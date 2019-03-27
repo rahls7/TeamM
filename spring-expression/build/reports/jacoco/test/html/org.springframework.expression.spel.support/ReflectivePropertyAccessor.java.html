@@ -1,0 +1,772 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReflectivePropertyAccessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.support</a> &gt; <span class="el_source">ReflectivePropertyAccessor.java</span></div><h1>ReflectivePropertyAccessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.support;
+
+import java.lang.reflect.Array;
+import java.lang.reflect.Field;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.springframework.asm.MethodVisitor;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.convert.Property;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.AccessException;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.PropertyAccessor;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.CompilablePropertyAccessor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * A powerful {@link PropertyAccessor} that uses reflection to access properties
+ * for reading and possibly also for writing.
+ *
+ * &lt;p&gt;A property can be referenced through a public getter method (when being read)
+ * or a public setter method (when being written), and also as a public field.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Phillip Webb
+ * @since 3.0
+ * @see StandardEvaluationContext
+ * @see SimpleEvaluationContext
+ * @see DataBindingPropertyAccessor
+ */
+public class ReflectivePropertyAccessor implements PropertyAccessor {
+
+<span class="fc" id="L64">	private static final Set&lt;Class&lt;?&gt;&gt; ANY_TYPES = Collections.emptySet();</span>
+
+	private static final Set&lt;Class&lt;?&gt;&gt; BOOLEAN_TYPES;
+
+	static {
+<span class="fc" id="L69">		Set&lt;Class&lt;?&gt;&gt; booleanTypes = new HashSet&lt;&gt;(4);</span>
+<span class="fc" id="L70">		booleanTypes.add(Boolean.class);</span>
+<span class="fc" id="L71">		booleanTypes.add(Boolean.TYPE);</span>
+<span class="fc" id="L72">		BOOLEAN_TYPES = Collections.unmodifiableSet(booleanTypes);</span>
+<span class="fc" id="L73">	}</span>
+
+
+	private final boolean allowWrite;
+
+<span class="fc" id="L78">	private final Map&lt;PropertyCacheKey, InvokerPair&gt; readerCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L80">	private final Map&lt;PropertyCacheKey, Member&gt; writerCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L82">	private final Map&lt;PropertyCacheKey, TypeDescriptor&gt; typeDescriptorCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L84">	private final Map&lt;Class&lt;?&gt;, Method[]&gt; sortedMethodsCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+	@Nullable
+	private volatile InvokerPair lastReadInvokerPair;
+
+
+	/**
+	 * Create a new property accessor for reading as well writing.
+	 * @see #ReflectivePropertyAccessor(boolean)
+	 */
+<span class="fc" id="L94">	public ReflectivePropertyAccessor() {</span>
+<span class="fc" id="L95">		this.allowWrite = true;</span>
+<span class="fc" id="L96">	}</span>
+
+	/**
+	 * Create a new property accessor for reading and possibly writing.
+	 * @param allowWrite whether to also allow for write operations
+	 * @since 4.3.15
+	 * @see #canWrite
+	 */
+<span class="fc" id="L104">	public ReflectivePropertyAccessor(boolean allowWrite) {</span>
+<span class="fc" id="L105">		this.allowWrite = allowWrite;</span>
+<span class="fc" id="L106">	}</span>
+
+
+	/**
+	 * Returns {@code null} which means this is a general purpose accessor.
+	 */
+	@Override
+	@Nullable
+	public Class&lt;?&gt;[] getSpecificTargetClasses() {
+<span class="fc" id="L115">		return null;</span>
+	}
+
+	@Override
+	public boolean canRead(EvaluationContext context, @Nullable Object target, String name) throws AccessException {
+<span class="fc bfc" id="L120" title="All 2 branches covered.">		if (target == null) {</span>
+<span class="fc" id="L121">			return false;</span>
+		}
+
+<span class="fc bfc" id="L124" title="All 2 branches covered.">		Class&lt;?&gt; type = (target instanceof Class ? (Class&lt;?&gt;) target : target.getClass());</span>
+<span class="fc bfc" id="L125" title="All 4 branches covered.">		if (type.isArray() &amp;&amp; name.equals(&quot;length&quot;)) {</span>
+<span class="fc" id="L126">			return true;</span>
+		}
+
+<span class="fc" id="L129">		PropertyCacheKey cacheKey = new PropertyCacheKey(type, name, target instanceof Class);</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">		if (this.readerCache.containsKey(cacheKey)) {</span>
+<span class="fc" id="L131">			return true;</span>
+		}
+
+<span class="fc" id="L134">		Method method = findGetterForProperty(name, type, target);</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">		if (method != null) {</span>
+			// Treat it like a property...
+			// The readerCache will only contain gettable properties (let's not worry about setters for now).
+<span class="fc" id="L138">			Property property = new Property(type, method, null);</span>
+<span class="fc" id="L139">			TypeDescriptor typeDescriptor = new TypeDescriptor(property);</span>
+<span class="fc" id="L140">			this.readerCache.put(cacheKey, new InvokerPair(method, typeDescriptor));</span>
+<span class="fc" id="L141">			this.typeDescriptorCache.put(cacheKey, typeDescriptor);</span>
+<span class="fc" id="L142">			return true;</span>
+		}
+		else {
+<span class="fc" id="L145">			Field field = findField(name, type, target);</span>
+<span class="fc bfc" id="L146" title="All 2 branches covered.">			if (field != null) {</span>
+<span class="fc" id="L147">				TypeDescriptor typeDescriptor = new TypeDescriptor(field);</span>
+<span class="fc" id="L148">				this.readerCache.put(cacheKey, new InvokerPair(field, typeDescriptor));</span>
+<span class="fc" id="L149">				this.typeDescriptorCache.put(cacheKey, typeDescriptor);</span>
+<span class="fc" id="L150">				return true;</span>
+			}
+		}
+
+<span class="fc" id="L154">		return false;</span>
+	}
+
+	@Override
+	public TypedValue read(EvaluationContext context, @Nullable Object target, String name) throws AccessException {
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		Assert.state(target != null, &quot;Target must not be null&quot;);</span>
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">		Class&lt;?&gt; type = (target instanceof Class ? (Class&lt;?&gt;) target : target.getClass());</span>
+
+<span class="fc bfc" id="L162" title="All 4 branches covered.">		if (type.isArray() &amp;&amp; name.equals(&quot;length&quot;)) {</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">			if (target instanceof Class) {</span>
+<span class="nc" id="L164">				throw new AccessException(&quot;Cannot access length on array class itself&quot;);</span>
+			}
+<span class="fc" id="L166">			return new TypedValue(Array.getLength(target));</span>
+		}
+
+<span class="fc" id="L169">		PropertyCacheKey cacheKey = new PropertyCacheKey(type, name, target instanceof Class);</span>
+<span class="fc" id="L170">		InvokerPair invoker = this.readerCache.get(cacheKey);</span>
+<span class="fc" id="L171">		this.lastReadInvokerPair = invoker;</span>
+
+<span class="fc bfc" id="L173" title="All 4 branches covered.">		if (invoker == null || invoker.member instanceof Method) {</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">			Method method = (Method) (invoker != null ? invoker.member : null);</span>
+<span class="fc bfc" id="L175" title="All 2 branches covered.">			if (method == null) {</span>
+<span class="fc" id="L176">				method = findGetterForProperty(name, type, target);</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">				if (method != null) {</span>
+					// Treat it like a property...
+					// The readerCache will only contain gettable properties (let's not worry about setters for now).
+<span class="fc" id="L180">					Property property = new Property(type, method, null);</span>
+<span class="fc" id="L181">					TypeDescriptor typeDescriptor = new TypeDescriptor(property);</span>
+<span class="fc" id="L182">					invoker = new InvokerPair(method, typeDescriptor);</span>
+<span class="fc" id="L183">					this.lastReadInvokerPair = invoker;</span>
+<span class="fc" id="L184">					this.readerCache.put(cacheKey, invoker);</span>
+				}
+			}
+<span class="fc bfc" id="L187" title="All 2 branches covered.">			if (method != null) {</span>
+				try {
+<span class="fc" id="L189">					ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L190">					Object value = method.invoke(target);</span>
+<span class="fc" id="L191">					return new TypedValue(value, invoker.typeDescriptor.narrow(value));</span>
+				}
+<span class="nc" id="L193">				catch (Exception ex) {</span>
+<span class="nc" id="L194">					throw new AccessException(&quot;Unable to access property '&quot; + name + &quot;' through getter method&quot;, ex);</span>
+				}
+			}
+		}
+
+<span class="pc bpc" id="L199" title="1 of 4 branches missed.">		if (invoker == null || invoker.member instanceof Field) {</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">			Field field = (Field) (invoker == null ? null : invoker.member);</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">			if (field == null) {</span>
+<span class="fc" id="L202">				field = findField(name, type, target);</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">				if (field != null) {</span>
+<span class="fc" id="L204">					invoker = new InvokerPair(field, new TypeDescriptor(field));</span>
+<span class="fc" id="L205">					this.lastReadInvokerPair = invoker;</span>
+<span class="fc" id="L206">					this.readerCache.put(cacheKey, invoker);</span>
+				}
+			}
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">			if (field != null) {</span>
+				try {
+<span class="fc" id="L211">					ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L212">					Object value = field.get(target);</span>
+<span class="fc" id="L213">					return new TypedValue(value, invoker.typeDescriptor.narrow(value));</span>
+				}
+<span class="nc" id="L215">				catch (Exception ex) {</span>
+<span class="nc" id="L216">					throw new AccessException(&quot;Unable to access field '&quot; + name + &quot;'&quot;, ex);</span>
+				}
+			}
+		}
+
+<span class="nc" id="L221">		throw new AccessException(&quot;Neither getter method nor field found for property '&quot; + name + &quot;'&quot;);</span>
+	}
+
+	@Override
+	public boolean canWrite(EvaluationContext context, @Nullable Object target, String name) throws AccessException {
+<span class="fc bfc" id="L226" title="All 4 branches covered.">		if (!this.allowWrite || target == null) {</span>
+<span class="fc" id="L227">			return false;</span>
+		}
+
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">		Class&lt;?&gt; type = (target instanceof Class ? (Class&lt;?&gt;) target : target.getClass());</span>
+<span class="fc" id="L231">		PropertyCacheKey cacheKey = new PropertyCacheKey(type, name, target instanceof Class);</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">		if (this.writerCache.containsKey(cacheKey)) {</span>
+<span class="fc" id="L233">			return true;</span>
+		}
+
+<span class="fc" id="L236">		Method method = findSetterForProperty(name, type, target);</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">		if (method != null) {</span>
+			// Treat it like a property
+<span class="fc" id="L239">			Property property = new Property(type, null, method);</span>
+<span class="fc" id="L240">			TypeDescriptor typeDescriptor = new TypeDescriptor(property);</span>
+<span class="fc" id="L241">			this.writerCache.put(cacheKey, method);</span>
+<span class="fc" id="L242">			this.typeDescriptorCache.put(cacheKey, typeDescriptor);</span>
+<span class="fc" id="L243">			return true;</span>
+		}
+		else {
+<span class="fc" id="L246">			Field field = findField(name, type, target);</span>
+<span class="fc bfc" id="L247" title="All 2 branches covered.">			if (field != null) {</span>
+<span class="fc" id="L248">				this.writerCache.put(cacheKey, field);</span>
+<span class="fc" id="L249">				this.typeDescriptorCache.put(cacheKey, new TypeDescriptor(field));</span>
+<span class="fc" id="L250">				return true;</span>
+			}
+		}
+
+<span class="fc" id="L254">		return false;</span>
+	}
+
+	@Override
+	public void write(EvaluationContext context, @Nullable Object target, String name, @Nullable Object newValue)
+			throws AccessException {
+
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">		if (!this.allowWrite) {</span>
+<span class="nc" id="L262">			throw new AccessException(&quot;PropertyAccessor for property '&quot; + name +</span>
+					&quot;' on target [&quot; + target + &quot;] does not allow write operations&quot;);
+		}
+
+<span class="fc bfc" id="L266" title="All 2 branches covered.">		Assert.state(target != null, &quot;Target must not be null&quot;);</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">		Class&lt;?&gt; type = (target instanceof Class ? (Class&lt;?&gt;) target : target.getClass());</span>
+
+<span class="fc" id="L269">		Object possiblyConvertedNewValue = newValue;</span>
+<span class="fc" id="L270">		TypeDescriptor typeDescriptor = getTypeDescriptor(context, target, name);</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">		if (typeDescriptor != null) {</span>
+			try {
+<span class="fc" id="L273">				possiblyConvertedNewValue = context.getTypeConverter().convertValue(</span>
+<span class="fc" id="L274">						newValue, TypeDescriptor.forObject(newValue), typeDescriptor);</span>
+			}
+<span class="fc" id="L276">			catch (EvaluationException evaluationException) {</span>
+<span class="fc" id="L277">				throw new AccessException(&quot;Type conversion failure&quot;, evaluationException);</span>
+<span class="fc" id="L278">			}</span>
+		}
+
+<span class="fc" id="L281">		PropertyCacheKey cacheKey = new PropertyCacheKey(type, name, target instanceof Class);</span>
+<span class="fc" id="L282">		Member cachedMember = this.writerCache.get(cacheKey);</span>
+
+<span class="fc bfc" id="L284" title="All 4 branches covered.">		if (cachedMember == null || cachedMember instanceof Method) {</span>
+<span class="fc" id="L285">			Method method = (Method) cachedMember;</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">			if (method == null) {</span>
+<span class="fc" id="L287">				method = findSetterForProperty(name, type, target);</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">				if (method != null) {</span>
+<span class="fc" id="L289">					cachedMember = method;</span>
+<span class="fc" id="L290">					this.writerCache.put(cacheKey, cachedMember);</span>
+				}
+			}
+<span class="fc bfc" id="L293" title="All 2 branches covered.">			if (method != null) {</span>
+				try {
+<span class="fc" id="L295">					ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L296">					method.invoke(target, possiblyConvertedNewValue);</span>
+<span class="fc" id="L297">					return;</span>
+				}
+<span class="nc" id="L299">				catch (Exception ex) {</span>
+<span class="nc" id="L300">					throw new AccessException(&quot;Unable to access property '&quot; + name + &quot;' through setter method&quot;, ex);</span>
+				}
+			}
+		}
+
+<span class="pc bpc" id="L305" title="1 of 4 branches missed.">		if (cachedMember == null || cachedMember instanceof Field) {</span>
+<span class="fc" id="L306">			Field field = (Field) cachedMember;</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">			if (field == null) {</span>
+<span class="fc" id="L308">				field = findField(name, type, target);</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">				if (field != null) {</span>
+<span class="fc" id="L310">					cachedMember = field;</span>
+<span class="fc" id="L311">					this.writerCache.put(cacheKey, cachedMember);</span>
+				}
+			}
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">			if (field != null) {</span>
+				try {
+<span class="fc" id="L316">					ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L317">					field.set(target, possiblyConvertedNewValue);</span>
+<span class="fc" id="L318">					return;</span>
+				}
+<span class="nc" id="L320">				catch (Exception ex) {</span>
+<span class="nc" id="L321">					throw new AccessException(&quot;Unable to access field '&quot; + name + &quot;'&quot;, ex);</span>
+				}
+			}
+		}
+
+<span class="nc" id="L326">		throw new AccessException(&quot;Neither setter method nor field found for property '&quot; + name + &quot;'&quot;);</span>
+	}
+
+	/**
+	 * Get the last read invoker pair.
+	 * @deprecated as of 4.3.15 since it is not used within the framework anymore
+	 */
+	@Deprecated
+	@Nullable
+	public Member getLastReadInvokerPair() {
+<span class="nc" id="L336">		InvokerPair lastReadInvoker = this.lastReadInvokerPair;</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">		return (lastReadInvoker != null ? lastReadInvoker.member : null);</span>
+	}
+
+
+	@Nullable
+	private TypeDescriptor getTypeDescriptor(EvaluationContext context, Object target, String name) {
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">		Class&lt;?&gt; type = (target instanceof Class ? (Class&lt;?&gt;) target : target.getClass());</span>
+
+<span class="pc bpc" id="L345" title="3 of 4 branches missed.">		if (type.isArray() &amp;&amp; name.equals(&quot;length&quot;)) {</span>
+<span class="nc" id="L346">			return TypeDescriptor.valueOf(Integer.TYPE);</span>
+		}
+<span class="fc" id="L348">		PropertyCacheKey cacheKey = new PropertyCacheKey(type, name, target instanceof Class);</span>
+<span class="fc" id="L349">		TypeDescriptor typeDescriptor = this.typeDescriptorCache.get(cacheKey);</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">		if (typeDescriptor == null) {</span>
+			// Attempt to populate the cache entry
+			try {
+<span class="pc bpc" id="L353" title="1 of 4 branches missed.">				if (canRead(context, target, name) || canWrite(context, target, name)) {</span>
+<span class="fc" id="L354">					typeDescriptor = this.typeDescriptorCache.get(cacheKey);</span>
+				}
+			}
+<span class="nc" id="L357">			catch (AccessException ex) {</span>
+				// Continue with null type descriptor
+<span class="fc" id="L359">			}</span>
+		}
+<span class="fc" id="L361">		return typeDescriptor;</span>
+	}
+
+	@Nullable
+	private Method findGetterForProperty(String propertyName, Class&lt;?&gt; clazz, Object target) {
+<span class="fc" id="L366">		Method method = findGetterForProperty(propertyName, clazz, target instanceof Class);</span>
+<span class="fc bfc" id="L367" title="All 4 branches covered.">		if (method == null &amp;&amp; target instanceof Class) {</span>
+<span class="fc" id="L368">			method = findGetterForProperty(propertyName, target.getClass(), false);</span>
+		}
+<span class="fc" id="L370">		return method;</span>
+	}
+
+	@Nullable
+	private Method findSetterForProperty(String propertyName, Class&lt;?&gt; clazz, Object target) {
+<span class="fc" id="L375">		Method method = findSetterForProperty(propertyName, clazz, target instanceof Class);</span>
+<span class="pc bpc" id="L376" title="1 of 4 branches missed.">		if (method == null &amp;&amp; target instanceof Class) {</span>
+<span class="nc" id="L377">			method = findSetterForProperty(propertyName, target.getClass(), false);</span>
+		}
+<span class="fc" id="L379">		return method;</span>
+	}
+
+	/**
+	 * Find a getter method for the specified property.
+	 */
+	@Nullable
+	protected Method findGetterForProperty(String propertyName, Class&lt;?&gt; clazz, boolean mustBeStatic) {
+<span class="fc" id="L387">		Method method = findMethodForProperty(getPropertyMethodSuffixes(propertyName),</span>
+				&quot;get&quot;, clazz, mustBeStatic, 0, ANY_TYPES);
+<span class="fc bfc" id="L389" title="All 2 branches covered.">		if (method == null) {</span>
+<span class="fc" id="L390">			method = findMethodForProperty(getPropertyMethodSuffixes(propertyName),</span>
+					&quot;is&quot;, clazz, mustBeStatic, 0, BOOLEAN_TYPES);
+		}
+<span class="fc" id="L393">		return method;</span>
+	}
+
+	/**
+	 * Find a setter method for the specified property.
+	 */
+	@Nullable
+	protected Method findSetterForProperty(String propertyName, Class&lt;?&gt; clazz, boolean mustBeStatic) {
+<span class="fc" id="L401">		return findMethodForProperty(getPropertyMethodSuffixes(propertyName),</span>
+				&quot;set&quot;, clazz, mustBeStatic, 1, ANY_TYPES);
+	}
+
+	@Nullable
+	private Method findMethodForProperty(String[] methodSuffixes, String prefix, Class&lt;?&gt; clazz,
+			boolean mustBeStatic, int numberOfParams, Set&lt;Class&lt;?&gt;&gt; requiredReturnTypes) {
+
+<span class="fc" id="L409">		Method[] methods = getSortedMethods(clazz);</span>
+<span class="fc bfc" id="L410" title="All 2 branches covered.">		for (String methodSuffix : methodSuffixes) {</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">			for (Method method : methods) {</span>
+<span class="fc bfc" id="L412" title="All 4 branches covered.">				if (isCandidateForProperty(method, clazz) &amp;&amp; method.getName().equals(prefix + methodSuffix) &amp;&amp;</span>
+<span class="pc bpc" id="L413" title="1 of 4 branches missed.">						method.getParameterCount() == numberOfParams &amp;&amp;</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">						(!mustBeStatic || Modifier.isStatic(method.getModifiers())) &amp;&amp;</span>
+<span class="fc bfc" id="L415" title="All 4 branches covered.">						(requiredReturnTypes.isEmpty() || requiredReturnTypes.contains(method.getReturnType()))) {</span>
+<span class="fc" id="L416">					return method;</span>
+				}
+			}
+		}
+<span class="fc" id="L420">		return null;</span>
+	}
+
+	/**
+	 * Determine whether the given {@code Method} is a candidate for property access
+	 * on an instance of the given target class.
+	 * &lt;p&gt;The default implementation considers any method as a candidate, even for
+	 * non-user-declared properties on the {@link Object} base class.
+	 * @param method the Method to evaluate
+	 * @param targetClass the concrete target class that is being introspected
+	 * @since 4.3.15
+	 */
+	protected boolean isCandidateForProperty(Method method, Class&lt;?&gt; targetClass) {
+<span class="fc" id="L433">		return true;</span>
+	}
+
+	/**
+	 * Return class methods ordered with non-bridge methods appearing higher.
+	 */
+	private Method[] getSortedMethods(Class&lt;?&gt; clazz) {
+<span class="fc" id="L440">		return this.sortedMethodsCache.computeIfAbsent(clazz, key -&gt; {</span>
+<span class="fc" id="L441">			Method[] methods = key.getMethods();</span>
+<span class="fc bfc" id="L442" title="All 4 branches covered.">			Arrays.sort(methods, (o1, o2) -&gt; (o1.isBridge() == o2.isBridge() ? 0 : (o1.isBridge() ? 1 : -1)));</span>
+<span class="fc" id="L443">			return methods;</span>
+		});
+	}
+
+	/**
+	 * Return the method suffixes for a given property name. The default implementation
+	 * uses JavaBean conventions with additional support for properties of the form 'xY'
+	 * where the method 'getXY()' is used in preference to the JavaBean convention of
+	 * 'getxY()'.
+	 */
+	protected String[] getPropertyMethodSuffixes(String propertyName) {
+<span class="fc" id="L454">		String suffix = getPropertyMethodSuffix(propertyName);</span>
+<span class="pc bpc" id="L455" title="1 of 4 branches missed.">		if (suffix.length() &gt; 0 &amp;&amp; Character.isUpperCase(suffix.charAt(0))) {</span>
+<span class="fc" id="L456">			return new String[] {suffix};</span>
+		}
+<span class="fc" id="L458">		return new String[] {suffix, StringUtils.capitalize(suffix)};</span>
+	}
+
+	/**
+	 * Return the method suffix for a given property name. The default implementation
+	 * uses JavaBean conventions.
+	 */
+	protected String getPropertyMethodSuffix(String propertyName) {
+<span class="fc bfc" id="L466" title="All 4 branches covered.">		if (propertyName.length() &gt; 1 &amp;&amp; Character.isUpperCase(propertyName.charAt(1))) {</span>
+<span class="fc" id="L467">			return propertyName;</span>
+		}
+<span class="fc" id="L469">		return StringUtils.capitalize(propertyName);</span>
+	}
+
+	@Nullable
+	private Field findField(String name, Class&lt;?&gt; clazz, Object target) {
+<span class="fc" id="L474">		Field field = findField(name, clazz, target instanceof Class);</span>
+<span class="pc bpc" id="L475" title="1 of 4 branches missed.">		if (field == null &amp;&amp; target instanceof Class) {</span>
+<span class="nc" id="L476">			field = findField(name, target.getClass(), false);</span>
+		}
+<span class="fc" id="L478">		return field;</span>
+	}
+
+	/**
+	 * Find a field of a certain name on a specified class.
+	 */
+	@Nullable
+	protected Field findField(String name, Class&lt;?&gt; clazz, boolean mustBeStatic) {
+<span class="fc" id="L486">		Field[] fields = clazz.getFields();</span>
+<span class="fc bfc" id="L487" title="All 2 branches covered.">		for (Field field : fields) {</span>
+<span class="pc bpc" id="L488" title="1 of 6 branches missed.">			if (field.getName().equals(name) &amp;&amp; (!mustBeStatic || Modifier.isStatic(field.getModifiers()))) {</span>
+<span class="fc" id="L489">				return field;</span>
+			}
+		}
+		// We'll search superclasses and implemented interfaces explicitly,
+		// although it shouldn't be necessary - however, see SPR-10125.
+<span class="fc bfc" id="L494" title="All 2 branches covered.">		if (clazz.getSuperclass() != null) {</span>
+<span class="fc" id="L495">			Field field = findField(name, clazz.getSuperclass(), mustBeStatic);</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">			if (field != null) {</span>
+<span class="fc" id="L497">				return field;</span>
+			}
+		}
+<span class="fc bfc" id="L500" title="All 2 branches covered.">		for (Class&lt;?&gt; implementedInterface : clazz.getInterfaces()) {</span>
+<span class="fc" id="L501">			Field field = findField(name, implementedInterface, mustBeStatic);</span>
+<span class="fc bfc" id="L502" title="All 2 branches covered.">			if (field != null) {</span>
+<span class="fc" id="L503">				return field;</span>
+			}
+		}
+<span class="fc" id="L506">		return null;</span>
+	}
+
+	/**
+	 * Attempt to create an optimized property accessor tailored for a property of a
+	 * particular name on a particular class. The general ReflectivePropertyAccessor
+	 * will always work but is not optimal due to the need to lookup which reflective
+	 * member (method/field) to use each time read() is called. This method will just
+	 * return the ReflectivePropertyAccessor instance if it is unable to build a more
+	 * optimal accessor.
+	 * &lt;p&gt;Note: An optimal accessor is currently only usable for read attempts.
+	 * Do not call this method if you need a read-write accessor.
+	 * @see OptimalPropertyAccessor
+	 */
+	public PropertyAccessor createOptimalAccessor(EvaluationContext context, @Nullable Object target, String name) {
+		// Don't be clever for arrays or a null target...
+<span class="pc bpc" id="L522" title="1 of 2 branches missed.">		if (target == null) {</span>
+<span class="nc" id="L523">			return this;</span>
+		}
+<span class="fc bfc" id="L525" title="All 2 branches covered.">		Class&lt;?&gt; clazz = (target instanceof Class ? (Class&lt;?&gt;) target : target.getClass());</span>
+<span class="fc bfc" id="L526" title="All 2 branches covered.">		if (clazz.isArray()) {</span>
+<span class="fc" id="L527">			return this;</span>
+		}
+
+<span class="fc" id="L530">		PropertyCacheKey cacheKey = new PropertyCacheKey(clazz, name, target instanceof Class);</span>
+<span class="fc" id="L531">		InvokerPair invocationTarget = this.readerCache.get(cacheKey);</span>
+
+<span class="fc bfc" id="L533" title="All 4 branches covered.">		if (invocationTarget == null || invocationTarget.member instanceof Method) {</span>
+<span class="fc bfc" id="L534" title="All 2 branches covered.">			Method method = (Method) (invocationTarget != null ? invocationTarget.member : null);</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">			if (method == null) {</span>
+<span class="fc" id="L536">				method = findGetterForProperty(name, clazz, target);</span>
+<span class="pc bpc" id="L537" title="1 of 2 branches missed.">				if (method != null) {</span>
+<span class="nc" id="L538">					invocationTarget = new InvokerPair(method, new TypeDescriptor(new MethodParameter(method, -1)));</span>
+<span class="nc" id="L539">					ReflectionUtils.makeAccessible(method);</span>
+<span class="nc" id="L540">					this.readerCache.put(cacheKey, invocationTarget);</span>
+				}
+			}
+<span class="fc bfc" id="L543" title="All 2 branches covered.">			if (method != null) {</span>
+<span class="fc" id="L544">				return new OptimalPropertyAccessor(invocationTarget);</span>
+			}
+		}
+
+<span class="pc bpc" id="L548" title="1 of 4 branches missed.">		if (invocationTarget == null || invocationTarget.member instanceof Field) {</span>
+<span class="fc bfc" id="L549" title="All 2 branches covered.">			Field field = (invocationTarget != null ? (Field) invocationTarget.member : null);</span>
+<span class="fc bfc" id="L550" title="All 2 branches covered.">			if (field == null) {</span>
+<span class="fc" id="L551">				field = findField(name, clazz, target instanceof Class);</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">				if (field != null) {</span>
+<span class="fc" id="L553">					invocationTarget = new InvokerPair(field, new TypeDescriptor(field));</span>
+<span class="fc" id="L554">					ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L555">					this.readerCache.put(cacheKey, invocationTarget);</span>
+				}
+			}
+<span class="pc bpc" id="L558" title="1 of 2 branches missed.">			if (field != null) {</span>
+<span class="fc" id="L559">				return new OptimalPropertyAccessor(invocationTarget);</span>
+			}
+		}
+
+<span class="nc" id="L563">		return this;</span>
+	}
+
+
+	/**
+	 * Captures the member (method/field) to call reflectively to access a property value
+	 * and the type descriptor for the value returned by the reflective call.
+	 */
+	private static class InvokerPair {
+
+		final Member member;
+
+		final TypeDescriptor typeDescriptor;
+
+<span class="fc" id="L577">		public InvokerPair(Member member, TypeDescriptor typeDescriptor) {</span>
+<span class="fc" id="L578">			this.member = member;</span>
+<span class="fc" id="L579">			this.typeDescriptor = typeDescriptor;</span>
+<span class="fc" id="L580">		}</span>
+	}
+
+
+	private static final class PropertyCacheKey implements Comparable&lt;PropertyCacheKey&gt; {
+
+		private final Class&lt;?&gt; clazz;
+
+		private final String property;
+
+		private boolean targetIsClass;
+
+<span class="fc" id="L592">		public PropertyCacheKey(Class&lt;?&gt; clazz, String name, boolean targetIsClass) {</span>
+<span class="fc" id="L593">			this.clazz = clazz;</span>
+<span class="fc" id="L594">			this.property = name;</span>
+<span class="fc" id="L595">			this.targetIsClass = targetIsClass;</span>
+<span class="fc" id="L596">		}</span>
+
+		@Override
+		public boolean equals(Object other) {
+<span class="pc bpc" id="L600" title="1 of 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L601">				return true;</span>
+			}
+<span class="pc bpc" id="L603" title="1 of 2 branches missed.">			if (!(other instanceof PropertyCacheKey)) {</span>
+<span class="nc" id="L604">				return false;</span>
+			}
+<span class="fc" id="L606">			PropertyCacheKey otherKey = (PropertyCacheKey) other;</span>
+<span class="pc bpc" id="L607" title="2 of 6 branches missed.">			return (this.clazz == otherKey.clazz &amp;&amp; this.property.equals(otherKey.property) &amp;&amp;</span>
+					this.targetIsClass == otherKey.targetIsClass);
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L613">			return (this.clazz.hashCode() * 29 + this.property.hashCode());</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L618">			return &quot;CacheKey [clazz=&quot; + this.clazz.getName() + &quot;, property=&quot; + this.property + &quot;, &quot; +</span>
+					this.property + &quot;, targetIsClass=&quot; + this.targetIsClass + &quot;]&quot;;
+		}
+
+		@Override
+		public int compareTo(PropertyCacheKey other) {
+<span class="nc" id="L624">			int result = this.clazz.getName().compareTo(other.clazz.getName());</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">			if (result == 0) {</span>
+<span class="nc" id="L626">				result = this.property.compareTo(other.property);</span>
+			}
+<span class="nc" id="L628">			return result;</span>
+		}
+	}
+
+
+	/**
+	 * An optimized form of a PropertyAccessor that will use reflection but only knows
+	 * how to access a particular property on a particular class. This is unlike the
+	 * general ReflectivePropertyResolver which manages a cache of methods/fields that
+	 * may be invoked to access different properties on different classes. This optimal
+	 * accessor exists because looking up the appropriate reflective object by class/name
+	 * on each read is not cheap.
+	 */
+	public static class OptimalPropertyAccessor implements CompilablePropertyAccessor {
+
+		/**
+		 * The member being accessed.
+		 */
+		public final Member member;
+
+		private final TypeDescriptor typeDescriptor;
+
+<span class="fc" id="L650">		OptimalPropertyAccessor(InvokerPair target) {</span>
+<span class="fc" id="L651">			this.member = target.member;</span>
+<span class="fc" id="L652">			this.typeDescriptor = target.typeDescriptor;</span>
+<span class="fc" id="L653">		}</span>
+
+		@Override
+		@Nullable
+		public Class&lt;?&gt;[] getSpecificTargetClasses() {
+<span class="fc" id="L658">			throw new UnsupportedOperationException(&quot;Should not be called on an OptimalPropertyAccessor&quot;);</span>
+		}
+
+		@Override
+		public boolean canRead(EvaluationContext context, @Nullable Object target, String name) throws AccessException {
+<span class="pc bpc" id="L663" title="1 of 2 branches missed.">			if (target == null) {</span>
+<span class="nc" id="L664">				return false;</span>
+			}
+<span class="pc bpc" id="L666" title="1 of 2 branches missed.">			Class&lt;?&gt; type = (target instanceof Class ? (Class&lt;?&gt;) target : target.getClass());</span>
+<span class="pc bpc" id="L667" title="1 of 2 branches missed.">			if (type.isArray()) {</span>
+<span class="nc" id="L668">				return false;</span>
+			}
+
+<span class="fc bfc" id="L671" title="All 2 branches covered.">			if (this.member instanceof Method) {</span>
+<span class="fc" id="L672">				Method method = (Method) this.member;</span>
+<span class="fc" id="L673">				String getterName = &quot;get&quot; + StringUtils.capitalize(name);</span>
+<span class="fc bfc" id="L674" title="All 2 branches covered.">				if (getterName.equals(method.getName())) {</span>
+<span class="fc" id="L675">					return true;</span>
+				}
+<span class="fc" id="L677">				getterName = &quot;is&quot; + StringUtils.capitalize(name);</span>
+<span class="fc" id="L678">				return getterName.equals(method.getName());</span>
+			}
+			else {
+<span class="fc" id="L681">				Field field = (Field) this.member;</span>
+<span class="fc" id="L682">				return field.getName().equals(name);</span>
+			}
+		}
+
+		@Override
+		public TypedValue read(EvaluationContext context, @Nullable Object target, String name) throws AccessException {
+<span class="fc bfc" id="L688" title="All 2 branches covered.">			if (this.member instanceof Method) {</span>
+<span class="fc" id="L689">				Method method = (Method) this.member;</span>
+				try {
+<span class="fc" id="L691">					ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L692">					Object value = method.invoke(target);</span>
+<span class="fc" id="L693">					return new TypedValue(value, this.typeDescriptor.narrow(value));</span>
+				}
+<span class="nc" id="L695">				catch (Exception ex) {</span>
+<span class="nc" id="L696">					throw new AccessException(&quot;Unable to access property '&quot; + name + &quot;' through getter method&quot;, ex);</span>
+				}
+			}
+			else {
+<span class="fc" id="L700">				Field field = (Field) this.member;</span>
+				try {
+<span class="fc" id="L702">					ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L703">					Object value = field.get(target);</span>
+<span class="fc" id="L704">					return new TypedValue(value, this.typeDescriptor.narrow(value));</span>
+				}
+<span class="nc" id="L706">				catch (Exception ex) {</span>
+<span class="nc" id="L707">					throw new AccessException(&quot;Unable to access field '&quot; + name + &quot;'&quot;, ex);</span>
+				}
+			}
+		}
+
+		@Override
+		public boolean canWrite(EvaluationContext context, @Nullable Object target, String name) {
+<span class="fc" id="L714">			throw new UnsupportedOperationException(&quot;Should not be called on an OptimalPropertyAccessor&quot;);</span>
+		}
+
+		@Override
+		public void write(EvaluationContext context, @Nullable Object target, String name, @Nullable Object newValue) {
+<span class="fc" id="L719">			throw new UnsupportedOperationException(&quot;Should not be called on an OptimalPropertyAccessor&quot;);</span>
+		}
+
+		@Override
+		public boolean isCompilable() {
+<span class="pc bpc" id="L724" title="1 of 2 branches missed.">			return (Modifier.isPublic(this.member.getModifiers()) &amp;&amp;</span>
+<span class="pc bpc" id="L725" title="1 of 2 branches missed.">					Modifier.isPublic(this.member.getDeclaringClass().getModifiers()));</span>
+		}
+
+		@Override
+		public Class&lt;?&gt; getPropertyType() {
+<span class="fc bfc" id="L730" title="All 2 branches covered.">			if (this.member instanceof Method) {</span>
+<span class="fc" id="L731">				return ((Method) this.member).getReturnType();</span>
+			}
+			else {
+<span class="fc" id="L734">				return ((Field) this.member).getType();</span>
+			}
+		}
+
+		@Override
+		public void generateCode(String propertyName, MethodVisitor mv, CodeFlow cf) {
+<span class="fc" id="L740">			boolean isStatic = Modifier.isStatic(this.member.getModifiers());</span>
+<span class="fc" id="L741">			String descriptor = cf.lastDescriptor();</span>
+<span class="fc" id="L742">			String classDesc = this.member.getDeclaringClass().getName().replace('.', '/');</span>
+
+<span class="fc bfc" id="L744" title="All 2 branches covered.">			if (!isStatic) {</span>
+<span class="fc bfc" id="L745" title="All 2 branches covered.">				if (descriptor == null) {</span>
+<span class="fc" id="L746">					cf.loadTarget(mv);</span>
+				}
+<span class="fc bfc" id="L748" title="All 4 branches covered.">				if (descriptor == null || !classDesc.equals(descriptor.substring(1))) {</span>
+<span class="fc" id="L749">					mv.visitTypeInsn(CHECKCAST, classDesc);</span>
+				}
+			}
+			else {
+<span class="fc bfc" id="L753" title="All 2 branches covered.">				if (descriptor != null) {</span>
+					// A static field/method call will not consume what is on the stack,
+					// it needs to be popped off.
+<span class="fc" id="L756">					mv.visitInsn(POP);</span>
+				}
+			}
+
+<span class="fc bfc" id="L760" title="All 2 branches covered.">			if (this.member instanceof Method) {</span>
+<span class="fc bfc" id="L761" title="All 2 branches covered.">				mv.visitMethodInsn((isStatic ? INVOKESTATIC : INVOKEVIRTUAL), classDesc, this.member.getName(),</span>
+<span class="fc" id="L762">						CodeFlow.createSignatureDescriptor((Method) this.member), false);</span>
+			}
+			else {
+<span class="fc bfc" id="L765" title="All 2 branches covered.">				mv.visitFieldInsn((isStatic ? GETSTATIC : GETFIELD), classDesc, this.member.getName(),</span>
+<span class="fc" id="L766">						CodeFlow.toJvmDescriptor(((Field) this.member).getType()));</span>
+			}
+<span class="fc" id="L768">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ProtobufDecoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.protobuf</a> &gt; <span class="el_source">ProtobufDecoder.java</span></div><h1>ProtobufDecoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.protobuf;
+
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
+
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.ExtensionRegistry;
+import com.google.protobuf.Message;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.Decoder;
+import org.springframework.core.codec.DecodingException;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.MimeType;
+
+/**
+ * A {@code Decoder} that reads {@link com.google.protobuf.Message}s using
+ * &lt;a href=&quot;https://developers.google.com/protocol-buffers/&quot;&gt;Google Protocol Buffers&lt;/a&gt;.
+ *
+ * &lt;p&gt;Flux deserialized via
+ * {@link #decode(Publisher, ResolvableType, MimeType, Map)} are expected to use
+ * &lt;a href=&quot;https://developers.google.com/protocol-buffers/docs/techniques?hl=en#streaming&quot;&gt;
+ * delimited Protobuf messages&lt;/a&gt; with the size of each message specified before
+ * the message itself. Single values deserialized via
+ * {@link #decodeToMono(Publisher, ResolvableType, MimeType, Map)} are expected
+ * to use regular Protobuf message format (without the size prepended before
+ * the message).
+ *
+ * &lt;p&gt;Notice that default instance of Protobuf message produces empty byte
+ * array, so {@code Mono.just(Msg.getDefaultInstance())} sent over the network
+ * will be deserialized as an empty {@link Mono}.
+ *
+ * &lt;p&gt;To generate {@code Message} Java classes, you need to install the
+ * {@code protoc} binary.
+ *
+ * &lt;p&gt;This decoder requires Protobuf 3 or higher, and supports
+ * {@code &quot;application/x-protobuf&quot;} and {@code &quot;application/octet-stream&quot;} with
+ * the official {@code &quot;com.google.protobuf:protobuf-java&quot;} library.
+ *
+ * @author Sébastien Deleuze
+ * @since 5.1
+ * @see ProtobufEncoder
+ */
+public class ProtobufDecoder extends ProtobufCodecSupport implements Decoder&lt;Message&gt; {
+
+	/** The default max size for aggregating messages. */
+	protected static final int DEFAULT_MESSAGE_MAX_SIZE = 64 * 1024;
+
+<span class="fc" id="L78">	private static final ConcurrentMap&lt;Class&lt;?&gt;, Method&gt; methodCache = new ConcurrentReferenceHashMap&lt;&gt;();</span>
+
+	private final ExtensionRegistry extensionRegistry;
+
+<span class="fc" id="L82">	private int maxMessageSize = DEFAULT_MESSAGE_MAX_SIZE;</span>
+
+
+	/**
+	 * Construct a new {@code ProtobufDecoder}.
+	 */
+	public ProtobufDecoder() {
+<span class="fc" id="L89">		this(ExtensionRegistry.newInstance());</span>
+<span class="fc" id="L90">	}</span>
+
+	/**
+	 * Construct a new {@code ProtobufDecoder} with an initializer that allows the
+	 * registration of message extensions.
+	 * @param extensionRegistry a message extension registry
+	 */
+<span class="fc" id="L97">	public ProtobufDecoder(ExtensionRegistry extensionRegistry) {</span>
+<span class="fc" id="L98">		Assert.notNull(extensionRegistry, &quot;ExtensionRegistry must not be null&quot;);</span>
+<span class="fc" id="L99">		this.extensionRegistry = extensionRegistry;</span>
+<span class="fc" id="L100">	}</span>
+
+
+	public void setMaxMessageSize(int maxMessageSize) {
+<span class="fc" id="L104">		this.maxMessageSize = maxMessageSize;</span>
+<span class="fc" id="L105">	}</span>
+
+
+	@Override
+	public boolean canDecode(ResolvableType elementType, @Nullable MimeType mimeType) {
+<span class="fc bfc" id="L110" title="All 4 branches covered.">		return Message.class.isAssignableFrom(elementType.toClass()) &amp;&amp; supportsMimeType(mimeType);</span>
+	}
+
+	@Override
+	public Flux&lt;Message&gt; decode(Publisher&lt;DataBuffer&gt; inputStream, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L117">		return Flux.from(inputStream)</span>
+<span class="fc" id="L118">				.flatMapIterable(new MessageDecoderFunction(elementType, this.maxMessageSize));</span>
+	}
+
+	@Override
+	public Mono&lt;Message&gt; decodeToMono(Publisher&lt;DataBuffer&gt; inputStream, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L125">		return DataBufferUtils.join(inputStream).map(dataBuffer -&gt; {</span>
+					try {
+<span class="fc" id="L127">						Message.Builder builder = getMessageBuilder(elementType.toClass());</span>
+<span class="fc" id="L128">						ByteBuffer buffer = dataBuffer.asByteBuffer();</span>
+<span class="fc" id="L129">						builder.mergeFrom(CodedInputStream.newInstance(buffer), this.extensionRegistry);</span>
+<span class="fc" id="L130">						return builder.build();</span>
+					}
+<span class="nc" id="L132">					catch (IOException ex) {</span>
+<span class="nc" id="L133">						throw new DecodingException(&quot;I/O error while parsing input stream&quot;, ex);</span>
+					}
+<span class="nc" id="L135">					catch (Exception ex) {</span>
+<span class="nc" id="L136">						throw new DecodingException(&quot;Could not read Protobuf message: &quot; + ex.getMessage(), ex);</span>
+					}
+					finally {
+<span class="fc" id="L139">						DataBufferUtils.release(dataBuffer);</span>
+					}
+				}
+		);
+	}
+
+	/**
+	 * Create a new {@code Message.Builder} instance for the given class.
+	 * &lt;p&gt;This method uses a ConcurrentHashMap for caching method lookups.
+	 */
+	private static Message.Builder getMessageBuilder(Class&lt;?&gt; clazz) throws Exception {
+<span class="fc" id="L150">		Method method = methodCache.get(clazz);</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">		if (method == null) {</span>
+<span class="fc" id="L152">			method = clazz.getMethod(&quot;newBuilder&quot;);</span>
+<span class="fc" id="L153">			methodCache.put(clazz, method);</span>
+		}
+<span class="fc" id="L155">		return (Message.Builder) method.invoke(clazz);</span>
+	}
+
+	@Override
+	public List&lt;MimeType&gt; getDecodableMimeTypes() {
+<span class="fc" id="L160">		return getMimeTypes();</span>
+	}
+
+
+	private class MessageDecoderFunction implements Function&lt;DataBuffer, Iterable&lt;? extends Message&gt;&gt; {
+
+		private final ResolvableType elementType;
+
+		private final int maxMessageSize;
+
+		@Nullable
+		private DataBuffer output;
+
+		private int messageBytesToRead;
+
+		private int offset;
+
+
+<span class="fc" id="L178">		public MessageDecoderFunction(ResolvableType elementType, int maxMessageSize) {</span>
+<span class="fc" id="L179">			this.elementType = elementType;</span>
+<span class="fc" id="L180">			this.maxMessageSize = maxMessageSize;</span>
+<span class="fc" id="L181">		}</span>
+
+
+		@Override
+		public Iterable&lt;? extends Message&gt; apply(DataBuffer input) {
+			try {
+<span class="fc" id="L187">				List&lt;Message&gt; messages = new ArrayList&lt;&gt;();</span>
+				int remainingBytesToRead;
+				int chunkBytesToRead;
+
+				do {
+<span class="fc bfc" id="L192" title="All 2 branches covered.">					if (this.output == null) {</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">						if (!readMessageSize(input)) {</span>
+<span class="fc" id="L194">							return messages;</span>
+						}
+<span class="fc bfc" id="L196" title="All 2 branches covered.">						if (this.messageBytesToRead &gt; this.maxMessageSize) {</span>
+<span class="fc" id="L197">							throw new DecodingException(</span>
+									&quot;The number of bytes to read from the incoming stream &quot; +
+											&quot;(&quot; + this.messageBytesToRead + &quot;) exceeds &quot; +
+											&quot;the configured limit (&quot; + this.maxMessageSize + &quot;)&quot;);
+						}
+<span class="fc" id="L202">						this.output = input.factory().allocateBuffer(this.messageBytesToRead);</span>
+					}
+
+<span class="fc bfc" id="L205" title="All 2 branches covered.">					chunkBytesToRead = this.messageBytesToRead &gt;= input.readableByteCount() ?</span>
+<span class="fc" id="L206">							input.readableByteCount() : this.messageBytesToRead;</span>
+<span class="fc" id="L207">					remainingBytesToRead = input.readableByteCount() - chunkBytesToRead;</span>
+
+<span class="fc" id="L209">					byte[] bytesToWrite = new byte[chunkBytesToRead];</span>
+<span class="fc" id="L210">					input.read(bytesToWrite, 0, chunkBytesToRead);</span>
+<span class="fc" id="L211">					this.output.write(bytesToWrite);</span>
+<span class="fc" id="L212">					this.messageBytesToRead -= chunkBytesToRead;</span>
+
+<span class="fc bfc" id="L214" title="All 2 branches covered.">					if (this.messageBytesToRead == 0) {</span>
+<span class="fc" id="L215">						Message.Builder builder = getMessageBuilder(this.elementType.toClass());</span>
+<span class="fc" id="L216">						ByteBuffer buffer = this.output.asByteBuffer();</span>
+<span class="fc" id="L217">						builder.mergeFrom(CodedInputStream.newInstance(buffer), extensionRegistry);</span>
+<span class="fc" id="L218">						messages.add(builder.build());</span>
+<span class="fc" id="L219">						DataBufferUtils.release(this.output);</span>
+<span class="fc" id="L220">						this.output = null;</span>
+					}
+<span class="fc bfc" id="L222" title="All 2 branches covered.">				} while (remainingBytesToRead &gt; 0);</span>
+<span class="fc" id="L223">				return messages;</span>
+			}
+<span class="fc" id="L225">			catch (DecodingException ex) {</span>
+<span class="fc" id="L226">				throw ex;</span>
+			}
+<span class="nc" id="L228">			catch (IOException ex) {</span>
+<span class="nc" id="L229">				throw new DecodingException(&quot;I/O error while parsing input stream&quot;, ex);</span>
+			}
+<span class="nc" id="L231">			catch (Exception ex) {</span>
+<span class="nc" id="L232">				throw new DecodingException(&quot;Could not read Protobuf message: &quot; + ex.getMessage(), ex);</span>
+			}
+			finally {
+<span class="fc" id="L235">				DataBufferUtils.release(input);</span>
+			}
+		}
+
+		/**
+		 * Parse message size as a varint from the input stream, updating {@code messageBytesToRead} and
+		 * {@code offset} fields if needed to allow processing of upcoming chunks.
+		 * Inspired from {@link CodedInputStream#readRawVarint32(int, java.io.InputStream)}
+		 *
+		 * @return {code true} when the message size is parsed successfully, {code false} when the message size is
+		 * truncated
+		 * @see &lt;a href =&quot;https://developers.google.com/protocol-buffers/docs/encoding#varints&quot;&gt;Base 128 Varints&lt;/a&gt;
+		 */
+		private boolean readMessageSize(DataBuffer input) {
+<span class="fc bfc" id="L249" title="All 2 branches covered.">			if (this.offset == 0) {</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">				if (input.readableByteCount() == 0) {</span>
+<span class="nc" id="L251">					return false;</span>
+				}
+<span class="fc" id="L253">				int firstByte = input.read();</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">				if ((firstByte &amp; 0x80) == 0) {</span>
+<span class="fc" id="L255">					this.messageBytesToRead = firstByte;</span>
+<span class="fc" id="L256">					return true;</span>
+				}
+<span class="fc" id="L258">				this.messageBytesToRead = firstByte &amp; 0x7f;</span>
+<span class="fc" id="L259">				this.offset = 7;</span>
+			}
+
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">			if (this.offset &lt; 32) {</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">				for (; this.offset &lt; 32; this.offset += 7) {</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">					if (input.readableByteCount() == 0) {</span>
+<span class="fc" id="L265">						return false;</span>
+					}
+<span class="fc" id="L267">					final int b = input.read();</span>
+<span class="fc" id="L268">					this.messageBytesToRead |= (b &amp; 0x7f) &lt;&lt; offset;</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">					if ((b &amp; 0x80) == 0) {</span>
+<span class="fc" id="L270">						this.offset = 0;</span>
+<span class="fc" id="L271">						return true;</span>
+					}
+				}
+			}
+			// Keep reading up to 64 bits.
+<span class="nc bnc" id="L276" title="All 2 branches missed.">			for (; this.offset &lt; 64; this.offset += 7) {</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">				if (input.readableByteCount() == 0) {</span>
+<span class="nc" id="L278">					return false;</span>
+				}
+<span class="nc" id="L280">				final int b = input.read();</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">				if ((b &amp; 0x80) == 0) {</span>
+<span class="nc" id="L282">					this.offset = 0;</span>
+<span class="nc" id="L283">					return true;</span>
+				}
+			}
+<span class="nc" id="L286">			this.offset = 0;</span>
+<span class="nc" id="L287">			throw new DecodingException(&quot;Cannot parse message size: malformed varint&quot;);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

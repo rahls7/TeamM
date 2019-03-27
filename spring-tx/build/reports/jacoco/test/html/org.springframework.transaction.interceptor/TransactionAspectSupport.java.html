@@ -1,0 +1,757 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionAspectSupport.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.interceptor</a> &gt; <span class="el_source">TransactionAspectSupport.java</span></div><h1>TransactionAspectSupport.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.interceptor;
+
+import java.lang.reflect.Method;
+import java.util.Properties;
+import java.util.concurrent.ConcurrentMap;
+
+import io.vavr.control.Try;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.annotation.BeanFactoryAnnotationUtils;
+import org.springframework.core.NamedThreadLocal;
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.NoTransactionException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.support.CallbackPreferringPlatformTransactionManager;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.StringUtils;
+
+/**
+ * Base class for transactional aspects, such as the {@link TransactionInterceptor}
+ * or an AspectJ aspect.
+ *
+ * &lt;p&gt;This enables the underlying Spring transaction infrastructure to be used easily
+ * to implement an aspect for any aspect system.
+ *
+ * &lt;p&gt;Subclasses are responsible for calling methods in this class in the correct order.
+ *
+ * &lt;p&gt;If no transaction name has been specified in the {@code TransactionAttribute},
+ * the exposed name will be the {@code fully-qualified class name + &quot;.&quot; + method name}
+ * (by default).
+ *
+ * &lt;p&gt;Uses the &lt;b&gt;Strategy&lt;/b&gt; design pattern. A {@code PlatformTransactionManager}
+ * implementation will perform the actual transaction management, and a
+ * {@code TransactionAttributeSource} is used for determining transaction definitions.
+ *
+ * &lt;p&gt;A transaction aspect is serializable if its {@code PlatformTransactionManager}
+ * and {@code TransactionAttributeSource} are serializable.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Stéphane Nicoll
+ * @author Sam Brannen
+ * @since 1.1
+ * @see #setTransactionManager
+ * @see #setTransactionAttributes
+ * @see #setTransactionAttributeSource
+ */
+<span class="fc" id="L72">public abstract class TransactionAspectSupport implements BeanFactoryAware, InitializingBean {</span>
+
+	// NOTE: This class must not implement Serializable because it serves as base
+	// class for AspectJ aspects (which are not allowed to implement Serializable)!
+
+
+	/**
+	 * Key to use to store the default transaction manager.
+	 */
+<span class="fc" id="L81">	private static final Object DEFAULT_TRANSACTION_MANAGER_KEY = new Object();</span>
+
+	/**
+	 * Vavr library present on the classpath?
+	 */
+<span class="fc" id="L86">	private static final boolean vavrPresent = ClassUtils.isPresent(</span>
+<span class="fc" id="L87">			&quot;io.vavr.control.Try&quot;, TransactionAspectSupport.class.getClassLoader());</span>
+
+	/**
+	 * Holder to support the {@code currentTransactionStatus()} method,
+	 * and to support communication between different cooperating advices
+	 * (e.g. before and after advice) if the aspect involves more than a
+	 * single method (as will be the case for around advice).
+	 */
+<span class="fc" id="L95">	private static final ThreadLocal&lt;TransactionInfo&gt; transactionInfoHolder =</span>
+			new NamedThreadLocal&lt;&gt;(&quot;Current aspect-driven transaction&quot;);
+
+
+	/**
+	 * Subclasses can use this to return the current TransactionInfo.
+	 * Only subclasses that cannot handle all operations in one method,
+	 * such as an AspectJ aspect involving distinct before and after advice,
+	 * need to use this mechanism to get at the current TransactionInfo.
+	 * An around advice such as an AOP Alliance MethodInterceptor can hold a
+	 * reference to the TransactionInfo throughout the aspect method.
+	 * &lt;p&gt;A TransactionInfo will be returned even if no transaction was created.
+	 * The {@code TransactionInfo.hasTransaction()} method can be used to query this.
+	 * &lt;p&gt;To find out about specific transaction characteristics, consider using
+	 * TransactionSynchronizationManager's {@code isSynchronizationActive()}
+	 * and/or {@code isActualTransactionActive()} methods.
+	 * @return the TransactionInfo bound to this thread, or {@code null} if none
+	 * @see TransactionInfo#hasTransaction()
+	 * @see org.springframework.transaction.support.TransactionSynchronizationManager#isSynchronizationActive()
+	 * @see org.springframework.transaction.support.TransactionSynchronizationManager#isActualTransactionActive()
+	 */
+	@Nullable
+	protected static TransactionInfo currentTransactionInfo() throws NoTransactionException {
+<span class="fc" id="L118">		return transactionInfoHolder.get();</span>
+	}
+
+	/**
+	 * Return the transaction status of the current method invocation.
+	 * Mainly intended for code that wants to set the current transaction
+	 * rollback-only but not throw an application exception.
+	 * @throws NoTransactionException if the transaction info cannot be found,
+	 * because the method was invoked outside an AOP invocation context
+	 */
+	public static TransactionStatus currentTransactionStatus() throws NoTransactionException {
+<span class="fc" id="L129">		TransactionInfo info = currentTransactionInfo();</span>
+<span class="pc bpc" id="L130" title="1 of 4 branches missed.">		if (info == null || info.transactionStatus == null) {</span>
+<span class="fc" id="L131">			throw new NoTransactionException(&quot;No transaction aspect-managed TransactionStatus in scope&quot;);</span>
+		}
+<span class="fc" id="L133">		return info.transactionStatus;</span>
+	}
+
+
+<span class="fc" id="L137">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private String transactionManagerBeanName;
+
+	@Nullable
+	private PlatformTransactionManager transactionManager;
+
+	@Nullable
+	private TransactionAttributeSource transactionAttributeSource;
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+<span class="fc" id="L151">	private final ConcurrentMap&lt;Object, PlatformTransactionManager&gt; transactionManagerCache =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(4);
+
+
+	/**
+	 * Specify the name of the default transaction manager bean.
+	 */
+	public void setTransactionManagerBeanName(@Nullable String transactionManagerBeanName) {
+<span class="fc" id="L159">		this.transactionManagerBeanName = transactionManagerBeanName;</span>
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Return the name of the default transaction manager bean.
+	 */
+	@Nullable
+	protected final String getTransactionManagerBeanName() {
+<span class="fc" id="L167">		return this.transactionManagerBeanName;</span>
+	}
+
+	/**
+	 * Specify the &lt;em&gt;default&lt;/em&gt; transaction manager to use to drive transactions.
+	 * &lt;p&gt;The default transaction manager will be used if a &lt;em&gt;qualifier&lt;/em&gt;
+	 * has not been declared for a given transaction or if an explicit name for the
+	 * default transaction manager bean has not been specified.
+	 * @see #setTransactionManagerBeanName
+	 */
+	public void setTransactionManager(@Nullable PlatformTransactionManager transactionManager) {
+<span class="fc" id="L178">		this.transactionManager = transactionManager;</span>
+<span class="fc" id="L179">	}</span>
+
+	/**
+	 * Return the default transaction manager, or {@code null} if unknown.
+	 */
+	@Nullable
+	public PlatformTransactionManager getTransactionManager() {
+<span class="fc" id="L186">		return this.transactionManager;</span>
+	}
+
+	/**
+	 * Set properties with method names as keys and transaction attribute
+	 * descriptors (parsed via TransactionAttributeEditor) as values:
+	 * e.g. key = &quot;myMethod&quot;, value = &quot;PROPAGATION_REQUIRED,readOnly&quot;.
+	 * &lt;p&gt;Note: Method names are always applied to the target class,
+	 * no matter if defined in an interface or the class itself.
+	 * &lt;p&gt;Internally, a NameMatchTransactionAttributeSource will be
+	 * created from the given properties.
+	 * @see #setTransactionAttributeSource
+	 * @see TransactionAttributeEditor
+	 * @see NameMatchTransactionAttributeSource
+	 */
+	public void setTransactionAttributes(Properties transactionAttributes) {
+<span class="fc" id="L202">		NameMatchTransactionAttributeSource tas = new NameMatchTransactionAttributeSource();</span>
+<span class="fc" id="L203">		tas.setProperties(transactionAttributes);</span>
+<span class="fc" id="L204">		this.transactionAttributeSource = tas;</span>
+<span class="fc" id="L205">	}</span>
+
+	/**
+	 * Set multiple transaction attribute sources which are used to find transaction
+	 * attributes. Will build a CompositeTransactionAttributeSource for the given sources.
+	 * @see CompositeTransactionAttributeSource
+	 * @see MethodMapTransactionAttributeSource
+	 * @see NameMatchTransactionAttributeSource
+	 * @see org.springframework.transaction.annotation.AnnotationTransactionAttributeSource
+	 */
+	public void setTransactionAttributeSources(TransactionAttributeSource... transactionAttributeSources) {
+<span class="fc" id="L216">		this.transactionAttributeSource = new CompositeTransactionAttributeSource(transactionAttributeSources);</span>
+<span class="fc" id="L217">	}</span>
+
+	/**
+	 * Set the transaction attribute source which is used to find transaction
+	 * attributes. If specifying a String property value, a PropertyEditor
+	 * will create a MethodMapTransactionAttributeSource from the value.
+	 * @see TransactionAttributeSourceEditor
+	 * @see MethodMapTransactionAttributeSource
+	 * @see NameMatchTransactionAttributeSource
+	 * @see org.springframework.transaction.annotation.AnnotationTransactionAttributeSource
+	 */
+	public void setTransactionAttributeSource(@Nullable TransactionAttributeSource transactionAttributeSource) {
+<span class="fc" id="L229">		this.transactionAttributeSource = transactionAttributeSource;</span>
+<span class="fc" id="L230">	}</span>
+
+	/**
+	 * Return the transaction attribute source.
+	 */
+	@Nullable
+	public TransactionAttributeSource getTransactionAttributeSource() {
+<span class="fc" id="L237">		return this.transactionAttributeSource;</span>
+	}
+
+	/**
+	 * Set the BeanFactory to use for retrieving PlatformTransactionManager beans.
+	 */
+	@Override
+	public void setBeanFactory(@Nullable BeanFactory beanFactory) {
+<span class="fc" id="L245">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L246">	}</span>
+
+	/**
+	 * Return the BeanFactory to use for retrieving PlatformTransactionManager beans.
+	 */
+	@Nullable
+	protected final BeanFactory getBeanFactory() {
+<span class="fc" id="L253">		return this.beanFactory;</span>
+	}
+
+	/**
+	 * Check that required properties were set.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L261" title="1 of 4 branches missed.">		if (getTransactionManager() == null &amp;&amp; this.beanFactory == null) {</span>
+<span class="nc" id="L262">			throw new IllegalStateException(</span>
+					&quot;Set the 'transactionManager' property or make sure to run within a BeanFactory &quot; +
+					&quot;containing a PlatformTransactionManager bean!&quot;);
+		}
+<span class="fc bfc" id="L266" title="All 2 branches covered.">		if (getTransactionAttributeSource() == null) {</span>
+<span class="fc" id="L267">			throw new IllegalStateException(</span>
+					&quot;Either 'transactionAttributeSource' or 'transactionAttributes' is required: &quot; +
+					&quot;If there are no transactional methods, then don't use a transaction aspect.&quot;);
+		}
+<span class="fc" id="L271">	}</span>
+
+
+	/**
+	 * General delegate for around-advice-based subclasses, delegating to several other template
+	 * methods on this class. Able to handle {@link CallbackPreferringPlatformTransactionManager}
+	 * as well as regular {@link PlatformTransactionManager} implementations.
+	 * @param method the Method being invoked
+	 * @param targetClass the target class that we're invoking the method on
+	 * @param invocation the callback to use for proceeding with the target invocation
+	 * @return the return value of the method, if any
+	 * @throws Throwable propagated from the target invocation
+	 */
+	@Nullable
+	protected Object invokeWithinTransaction(Method method, @Nullable Class&lt;?&gt; targetClass,
+			final InvocationCallback invocation) throws Throwable {
+
+		// If the transaction attribute is null, the method is non-transactional.
+<span class="fc" id="L289">		TransactionAttributeSource tas = getTransactionAttributeSource();</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">		final TransactionAttribute txAttr = (tas != null ? tas.getTransactionAttribute(method, targetClass) : null);</span>
+<span class="fc" id="L291">		final PlatformTransactionManager tm = determineTransactionManager(txAttr);</span>
+<span class="fc" id="L292">		final String joinpointIdentification = methodIdentification(method, targetClass, txAttr);</span>
+
+<span class="fc bfc" id="L294" title="All 4 branches covered.">		if (txAttr == null || !(tm instanceof CallbackPreferringPlatformTransactionManager)) {</span>
+			// Standard transaction demarcation with getTransaction and commit/rollback calls.
+<span class="fc" id="L296">			TransactionInfo txInfo = createTransactionIfNecessary(tm, txAttr, joinpointIdentification);</span>
+
+			Object retVal;
+			try {
+				// This is an around advice: Invoke the next interceptor in the chain.
+				// This will normally result in a target object being invoked.
+<span class="fc" id="L302">				retVal = invocation.proceedWithInvocation();</span>
+			}
+<span class="fc" id="L304">			catch (Throwable ex) {</span>
+				// target invocation exception
+<span class="fc" id="L306">				completeTransactionAfterThrowing(txInfo, ex);</span>
+<span class="fc" id="L307">				throw ex;</span>
+			}
+			finally {
+<span class="fc" id="L310">				cleanupTransactionInfo(txInfo);</span>
+			}
+
+<span class="pc bpc" id="L313" title="1 of 4 branches missed.">			if (vavrPresent &amp;&amp; VavrDelegate.isVavrTry(retVal)) {</span>
+				// Set rollback-only in case of Vavr failure matching our rollback rules...
+<span class="fc" id="L315">				TransactionStatus status = txInfo.getTransactionStatus();</span>
+<span class="pc bpc" id="L316" title="2 of 4 branches missed.">				if (status != null &amp;&amp; txAttr != null) {</span>
+<span class="fc" id="L317">					retVal = VavrDelegate.evaluateTryFailure(retVal, txAttr, status);</span>
+				}
+			}
+
+<span class="fc" id="L321">			commitTransactionAfterReturning(txInfo);</span>
+<span class="fc" id="L322">			return retVal;</span>
+		}
+
+		else {
+<span class="fc" id="L326">			final ThrowableHolder throwableHolder = new ThrowableHolder();</span>
+
+			// It's a CallbackPreferringPlatformTransactionManager: pass a TransactionCallback in.
+			try {
+<span class="fc" id="L330">				Object result = ((CallbackPreferringPlatformTransactionManager) tm).execute(txAttr, status -&gt; {</span>
+<span class="fc" id="L331">					TransactionInfo txInfo = prepareTransactionInfo(tm, txAttr, joinpointIdentification, status);</span>
+					try {
+<span class="fc" id="L333">						Object retVal = invocation.proceedWithInvocation();</span>
+<span class="pc bpc" id="L334" title="2 of 4 branches missed.">						if (vavrPresent &amp;&amp; VavrDelegate.isVavrTry(retVal)) {</span>
+							// Set rollback-only in case of Vavr failure matching our rollback rules...
+<span class="nc" id="L336">							retVal = VavrDelegate.evaluateTryFailure(retVal, txAttr, status);</span>
+						}
+<span class="fc" id="L338">						return retVal;</span>
+					}
+<span class="fc" id="L340">					catch (Throwable ex) {</span>
+<span class="pc bpc" id="L341" title="1 of 2 branches missed.">						if (txAttr.rollbackOn(ex)) {</span>
+							// A RuntimeException: will lead to a rollback.
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">							if (ex instanceof RuntimeException) {</span>
+<span class="fc" id="L344">								throw (RuntimeException) ex;</span>
+							}
+							else {
+<span class="nc" id="L347">								throw new ThrowableHolderException(ex);</span>
+							}
+						}
+						else {
+							// A normal return value: will lead to a commit.
+<span class="nc" id="L352">							throwableHolder.throwable = ex;</span>
+<span class="nc" id="L353">							return null;</span>
+						}
+					}
+					finally {
+<span class="fc" id="L357">						cleanupTransactionInfo(txInfo);</span>
+					}
+				});
+
+				// Check result state: It might indicate a Throwable to rethrow.
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">				if (throwableHolder.throwable != null) {</span>
+<span class="nc" id="L363">					throw throwableHolder.throwable;</span>
+				}
+<span class="fc" id="L365">				return result;</span>
+			}
+<span class="nc" id="L367">			catch (ThrowableHolderException ex) {</span>
+<span class="nc" id="L368">				throw ex.getCause();</span>
+			}
+<span class="nc" id="L370">			catch (TransactionSystemException ex2) {</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">				if (throwableHolder.throwable != null) {</span>
+<span class="nc" id="L372">					logger.error(&quot;Application exception overridden by commit exception&quot;, throwableHolder.throwable);</span>
+<span class="nc" id="L373">					ex2.initApplicationException(throwableHolder.throwable);</span>
+				}
+<span class="nc" id="L375">				throw ex2;</span>
+			}
+<span class="fc" id="L377">			catch (Throwable ex2) {</span>
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">				if (throwableHolder.throwable != null) {</span>
+<span class="nc" id="L379">					logger.error(&quot;Application exception overridden by commit exception&quot;, throwableHolder.throwable);</span>
+				}
+<span class="fc" id="L381">				throw ex2;</span>
+			}
+		}
+	}
+
+	/**
+	 * Clear the cache.
+	 */
+	protected void clearTransactionManagerCache() {
+<span class="nc" id="L390">		this.transactionManagerCache.clear();</span>
+<span class="nc" id="L391">		this.beanFactory = null;</span>
+<span class="nc" id="L392">	}</span>
+
+	/**
+	 * Determine the specific transaction manager to use for the given transaction.
+	 */
+	@Nullable
+	protected PlatformTransactionManager determineTransactionManager(@Nullable TransactionAttribute txAttr) {
+		// Do not attempt to lookup tx manager if no tx attributes are set
+<span class="fc bfc" id="L400" title="All 4 branches covered.">		if (txAttr == null || this.beanFactory == null) {</span>
+<span class="fc" id="L401">			return getTransactionManager();</span>
+		}
+
+<span class="fc" id="L404">		String qualifier = txAttr.getQualifier();</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">		if (StringUtils.hasText(qualifier)) {</span>
+<span class="fc" id="L406">			return determineQualifiedTransactionManager(this.beanFactory, qualifier);</span>
+		}
+<span class="fc bfc" id="L408" title="All 2 branches covered.">		else if (StringUtils.hasText(this.transactionManagerBeanName)) {</span>
+<span class="fc" id="L409">			return determineQualifiedTransactionManager(this.beanFactory, this.transactionManagerBeanName);</span>
+		}
+		else {
+<span class="fc" id="L412">			PlatformTransactionManager defaultTransactionManager = getTransactionManager();</span>
+<span class="fc bfc" id="L413" title="All 2 branches covered.">			if (defaultTransactionManager == null) {</span>
+<span class="fc" id="L414">				defaultTransactionManager = this.transactionManagerCache.get(DEFAULT_TRANSACTION_MANAGER_KEY);</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">				if (defaultTransactionManager == null) {</span>
+<span class="fc" id="L416">					defaultTransactionManager = this.beanFactory.getBean(PlatformTransactionManager.class);</span>
+<span class="fc" id="L417">					this.transactionManagerCache.putIfAbsent(</span>
+							DEFAULT_TRANSACTION_MANAGER_KEY, defaultTransactionManager);
+				}
+			}
+<span class="fc" id="L421">			return defaultTransactionManager;</span>
+		}
+	}
+
+	private PlatformTransactionManager determineQualifiedTransactionManager(BeanFactory beanFactory, String qualifier) {
+<span class="fc" id="L426">		PlatformTransactionManager txManager = this.transactionManagerCache.get(qualifier);</span>
+<span class="fc bfc" id="L427" title="All 2 branches covered.">		if (txManager == null) {</span>
+<span class="fc" id="L428">			txManager = BeanFactoryAnnotationUtils.qualifiedBeanOfType(</span>
+					beanFactory, PlatformTransactionManager.class, qualifier);
+<span class="fc" id="L430">			this.transactionManagerCache.putIfAbsent(qualifier, txManager);</span>
+		}
+<span class="fc" id="L432">		return txManager;</span>
+	}
+
+	private String methodIdentification(Method method, @Nullable Class&lt;?&gt; targetClass,
+			@Nullable TransactionAttribute txAttr) {
+
+<span class="fc" id="L438">		String methodIdentification = methodIdentification(method, targetClass);</span>
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">		if (methodIdentification == null) {</span>
+<span class="fc bfc" id="L440" title="All 2 branches covered.">			if (txAttr instanceof DefaultTransactionAttribute) {</span>
+<span class="fc" id="L441">				methodIdentification = ((DefaultTransactionAttribute) txAttr).getDescriptor();</span>
+			}
+<span class="fc bfc" id="L443" title="All 2 branches covered.">			if (methodIdentification == null) {</span>
+<span class="fc" id="L444">				methodIdentification = ClassUtils.getQualifiedMethodName(method, targetClass);</span>
+			}
+		}
+<span class="fc" id="L447">		return methodIdentification;</span>
+	}
+
+	/**
+	 * Convenience method to return a String representation of this Method
+	 * for use in logging. Can be overridden in subclasses to provide a
+	 * different identifier for the given method.
+	 * &lt;p&gt;The default implementation returns {@code null}, indicating the
+	 * use of {@link DefaultTransactionAttribute#getDescriptor()} instead,
+	 * ending up as {@link ClassUtils#getQualifiedMethodName(Method, Class)}.
+	 * @param method the method we're interested in
+	 * @param targetClass the class that the method is being invoked on
+	 * @return a String representation identifying this method
+	 * @see org.springframework.util.ClassUtils#getQualifiedMethodName
+	 */
+	@Nullable
+	protected String methodIdentification(Method method, @Nullable Class&lt;?&gt; targetClass) {
+<span class="fc" id="L464">		return null;</span>
+	}
+
+	/**
+	 * Create a transaction if necessary based on the given TransactionAttribute.
+	 * &lt;p&gt;Allows callers to perform custom TransactionAttribute lookups through
+	 * the TransactionAttributeSource.
+	 * @param txAttr the TransactionAttribute (may be {@code null})
+	 * @param joinpointIdentification the fully qualified method name
+	 * (used for monitoring and logging purposes)
+	 * @return a TransactionInfo object, whether or not a transaction was created.
+	 * The {@code hasTransaction()} method on TransactionInfo can be used to
+	 * tell if there was a transaction created.
+	 * @see #getTransactionAttributeSource()
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	protected TransactionInfo createTransactionIfNecessary(@Nullable PlatformTransactionManager tm,
+			@Nullable TransactionAttribute txAttr, final String joinpointIdentification) {
+
+		// If no name specified, apply method identification as transaction name.
+<span class="pc bpc" id="L484" title="1 of 4 branches missed.">		if (txAttr != null &amp;&amp; txAttr.getName() == null) {</span>
+<span class="fc" id="L485">			txAttr = new DelegatingTransactionAttribute(txAttr) {</span>
+				@Override
+				public String getName() {
+<span class="fc" id="L488">					return joinpointIdentification;</span>
+				}
+			};
+		}
+
+<span class="fc" id="L493">		TransactionStatus status = null;</span>
+<span class="fc bfc" id="L494" title="All 2 branches covered.">		if (txAttr != null) {</span>
+<span class="pc bpc" id="L495" title="1 of 2 branches missed.">			if (tm != null) {</span>
+<span class="fc" id="L496">				status = tm.getTransaction(txAttr);</span>
+			}
+			else {
+<span class="nc bnc" id="L499" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L500">					logger.debug(&quot;Skipping transactional joinpoint [&quot; + joinpointIdentification +</span>
+							&quot;] because no transaction manager has been configured&quot;);
+				}
+			}
+		}
+<span class="fc" id="L505">		return prepareTransactionInfo(tm, txAttr, joinpointIdentification, status);</span>
+	}
+
+	/**
+	 * Prepare a TransactionInfo for the given attribute and status object.
+	 * @param txAttr the TransactionAttribute (may be {@code null})
+	 * @param joinpointIdentification the fully qualified method name
+	 * (used for monitoring and logging purposes)
+	 * @param status the TransactionStatus for the current transaction
+	 * @return the prepared TransactionInfo object
+	 */
+	protected TransactionInfo prepareTransactionInfo(@Nullable PlatformTransactionManager tm,
+			@Nullable TransactionAttribute txAttr, String joinpointIdentification,
+			@Nullable TransactionStatus status) {
+
+<span class="fc" id="L520">		TransactionInfo txInfo = new TransactionInfo(tm, txAttr, joinpointIdentification);</span>
+<span class="fc bfc" id="L521" title="All 2 branches covered.">		if (txAttr != null) {</span>
+			// We need a transaction for this method...
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L524">				logger.trace(&quot;Getting transaction for [&quot; + txInfo.getJoinpointIdentification() + &quot;]&quot;);</span>
+			}
+			// The transaction manager will flag an error if an incompatible tx already exists.
+<span class="fc" id="L527">			txInfo.newTransactionStatus(status);</span>
+		}
+		else {
+			// The TransactionInfo.hasTransaction() method will return false. We created it only
+			// to preserve the integrity of the ThreadLocal stack maintained in this class.
+<span class="pc bpc" id="L532" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L533">				logger.trace(&quot;Don't need to create transaction for [&quot; + joinpointIdentification +</span>
+						&quot;]: This method isn't transactional.&quot;);
+			}
+		}
+
+		// We always bind the TransactionInfo to the thread, even if we didn't create
+		// a new transaction here. This guarantees that the TransactionInfo stack
+		// will be managed correctly even if no transaction was created by this aspect.
+<span class="fc" id="L541">		txInfo.bindToThread();</span>
+<span class="fc" id="L542">		return txInfo;</span>
+	}
+
+	/**
+	 * Execute after successful completion of call, but not after an exception was handled.
+	 * Do nothing if we didn't create a transaction.
+	 * @param txInfo information about the current transaction
+	 */
+	protected void commitTransactionAfterReturning(@Nullable TransactionInfo txInfo) {
+<span class="pc bpc" id="L551" title="1 of 4 branches missed.">		if (txInfo != null &amp;&amp; txInfo.getTransactionStatus() != null) {</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L553">				logger.trace(&quot;Completing transaction for [&quot; + txInfo.getJoinpointIdentification() + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L555">			txInfo.getTransactionManager().commit(txInfo.getTransactionStatus());</span>
+		}
+<span class="fc" id="L557">	}</span>
+
+	/**
+	 * Handle a throwable, completing the transaction.
+	 * We may commit or roll back, depending on the configuration.
+	 * @param txInfo information about the current transaction
+	 * @param ex throwable encountered
+	 */
+	protected void completeTransactionAfterThrowing(@Nullable TransactionInfo txInfo, Throwable ex) {
+<span class="pc bpc" id="L566" title="2 of 4 branches missed.">		if (txInfo != null &amp;&amp; txInfo.getTransactionStatus() != null) {</span>
+<span class="pc bpc" id="L567" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L568">				logger.trace(&quot;Completing transaction for [&quot; + txInfo.getJoinpointIdentification() +</span>
+						&quot;] after exception: &quot; + ex);
+			}
+<span class="pc bpc" id="L571" title="1 of 4 branches missed.">			if (txInfo.transactionAttribute != null &amp;&amp; txInfo.transactionAttribute.rollbackOn(ex)) {</span>
+				try {
+<span class="fc" id="L573">					txInfo.getTransactionManager().rollback(txInfo.getTransactionStatus());</span>
+				}
+<span class="fc" id="L575">				catch (TransactionSystemException ex2) {</span>
+<span class="fc" id="L576">					logger.error(&quot;Application exception overridden by rollback exception&quot;, ex);</span>
+<span class="fc" id="L577">					ex2.initApplicationException(ex);</span>
+<span class="fc" id="L578">					throw ex2;</span>
+				}
+<span class="nc" id="L580">				catch (RuntimeException | Error ex2) {</span>
+<span class="nc" id="L581">					logger.error(&quot;Application exception overridden by rollback exception&quot;, ex);</span>
+<span class="nc" id="L582">					throw ex2;</span>
+<span class="fc" id="L583">				}</span>
+			}
+			else {
+				// We don't roll back on this exception.
+				// Will still roll back if TransactionStatus.isRollbackOnly() is true.
+				try {
+<span class="fc" id="L589">					txInfo.getTransactionManager().commit(txInfo.getTransactionStatus());</span>
+				}
+<span class="fc" id="L591">				catch (TransactionSystemException ex2) {</span>
+<span class="fc" id="L592">					logger.error(&quot;Application exception overridden by commit exception&quot;, ex);</span>
+<span class="fc" id="L593">					ex2.initApplicationException(ex);</span>
+<span class="fc" id="L594">					throw ex2;</span>
+				}
+<span class="nc" id="L596">				catch (RuntimeException | Error ex2) {</span>
+<span class="nc" id="L597">					logger.error(&quot;Application exception overridden by commit exception&quot;, ex);</span>
+<span class="nc" id="L598">					throw ex2;</span>
+<span class="fc" id="L599">				}</span>
+			}
+		}
+<span class="fc" id="L602">	}</span>
+
+	/**
+	 * Reset the TransactionInfo ThreadLocal.
+	 * &lt;p&gt;Call this in all cases: exception or normal return!
+	 * @param txInfo information about the current transaction (may be {@code null})
+	 */
+	protected void cleanupTransactionInfo(@Nullable TransactionInfo txInfo) {
+<span class="pc bpc" id="L610" title="1 of 2 branches missed.">		if (txInfo != null) {</span>
+<span class="fc" id="L611">			txInfo.restoreThreadLocalStatus();</span>
+		}
+<span class="fc" id="L613">	}</span>
+
+
+	/**
+	 * Opaque object used to hold Transaction information. Subclasses
+	 * must pass it back to methods on this class, but not see its internals.
+	 */
+	protected final class TransactionInfo {
+
+		@Nullable
+		private final PlatformTransactionManager transactionManager;
+
+		@Nullable
+		private final TransactionAttribute transactionAttribute;
+
+		private final String joinpointIdentification;
+
+		@Nullable
+		private TransactionStatus transactionStatus;
+
+		@Nullable
+		private TransactionInfo oldTransactionInfo;
+
+		public TransactionInfo(@Nullable PlatformTransactionManager transactionManager,
+<span class="fc" id="L637">				@Nullable TransactionAttribute transactionAttribute, String joinpointIdentification) {</span>
+
+<span class="fc" id="L639">			this.transactionManager = transactionManager;</span>
+<span class="fc" id="L640">			this.transactionAttribute = transactionAttribute;</span>
+<span class="fc" id="L641">			this.joinpointIdentification = joinpointIdentification;</span>
+<span class="fc" id="L642">		}</span>
+
+		public PlatformTransactionManager getTransactionManager() {
+<span class="pc bpc" id="L645" title="1 of 2 branches missed.">			Assert.state(this.transactionManager != null, &quot;No PlatformTransactionManager set&quot;);</span>
+<span class="fc" id="L646">			return this.transactionManager;</span>
+		}
+
+		@Nullable
+		public TransactionAttribute getTransactionAttribute() {
+<span class="fc" id="L651">			return this.transactionAttribute;</span>
+		}
+
+		/**
+		 * Return a String representation of this joinpoint (usually a Method call)
+		 * for use in logging.
+		 */
+		public String getJoinpointIdentification() {
+<span class="nc" id="L659">			return this.joinpointIdentification;</span>
+		}
+
+		public void newTransactionStatus(@Nullable TransactionStatus status) {
+<span class="fc" id="L663">			this.transactionStatus = status;</span>
+<span class="fc" id="L664">		}</span>
+
+		@Nullable
+		public TransactionStatus getTransactionStatus() {
+<span class="fc" id="L668">			return this.transactionStatus;</span>
+		}
+
+		/**
+		 * Return whether a transaction was created by this aspect,
+		 * or whether we just have a placeholder to keep ThreadLocal stack integrity.
+		 */
+		public boolean hasTransaction() {
+<span class="fc bfc" id="L676" title="All 2 branches covered.">			return (this.transactionStatus != null);</span>
+		}
+
+		private void bindToThread() {
+			// Expose current TransactionStatus, preserving any existing TransactionStatus
+			// for restoration after this transaction is complete.
+<span class="fc" id="L682">			this.oldTransactionInfo = transactionInfoHolder.get();</span>
+<span class="fc" id="L683">			transactionInfoHolder.set(this);</span>
+<span class="fc" id="L684">		}</span>
+
+		private void restoreThreadLocalStatus() {
+			// Use stack to restore old transaction TransactionInfo.
+			// Will be null if none was set.
+<span class="fc" id="L689">			transactionInfoHolder.set(this.oldTransactionInfo);</span>
+<span class="fc" id="L690">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc bnc" id="L694" title="All 2 branches missed.">			return (this.transactionAttribute != null ? this.transactionAttribute.toString() : &quot;No transaction&quot;);</span>
+		}
+	}
+
+
+	/**
+	 * Simple callback interface for proceeding with the target invocation.
+	 * Concrete interceptors/aspects adapt this to their invocation mechanism.
+	 */
+	@FunctionalInterface
+	protected interface InvocationCallback {
+
+		Object proceedWithInvocation() throws Throwable;
+	}
+
+
+	/**
+	 * Internal holder class for a Throwable in a callback transaction model.
+	 */
+	private static class ThrowableHolder {
+
+		@Nullable
+		public Throwable throwable;
+	}
+
+
+	/**
+	 * Internal holder class for a Throwable, used as a RuntimeException to be
+	 * thrown from a TransactionCallback (and subsequently unwrapped again).
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class ThrowableHolderException extends RuntimeException {
+
+		public ThrowableHolderException(Throwable throwable) {
+<span class="nc" id="L728">			super(throwable);</span>
+<span class="nc" id="L729">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L733">			return getCause().toString();</span>
+		}
+	}
+
+
+	/**
+	 * Inner class to avoid a hard dependency on the Vavr library at runtime.
+	 */
+	private static class VavrDelegate {
+
+		public static boolean isVavrTry(Object retVal) {
+<span class="fc" id="L744">			return (retVal instanceof Try);</span>
+		}
+
+		public static Object evaluateTryFailure(Object retVal, TransactionAttribute txAttr, TransactionStatus status) {
+<span class="fc" id="L748">			return ((Try&lt;?&gt;) retVal).onFailure(ex -&gt; {</span>
+<span class="fc bfc" id="L749" title="All 2 branches covered.">				if (txAttr.rollbackOn(ex)) {</span>
+<span class="fc" id="L750">					status.setRollbackOnly();</span>
+				}
+<span class="fc" id="L752">			});</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

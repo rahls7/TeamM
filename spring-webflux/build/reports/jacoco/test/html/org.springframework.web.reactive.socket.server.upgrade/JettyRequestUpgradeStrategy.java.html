@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JettyRequestUpgradeStrategy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.socket.server.upgrade</a> &gt; <span class="el_source">JettyRequestUpgradeStrategy.java</span></div><h1>JettyRequestUpgradeStrategy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.socket.server.upgrade;
+
+import java.io.IOException;
+import java.util.function.Supplier;
+import javax.servlet.ServletContext;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.eclipse.jetty.websocket.api.WebSocketPolicy;
+import org.eclipse.jetty.websocket.server.WebSocketServerFactory;
+import reactor.core.publisher.Mono;
+
+import org.springframework.context.Lifecycle;
+import org.springframework.core.NamedThreadLocal;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.http.server.reactive.AbstractServerHttpRequest;
+import org.springframework.http.server.reactive.AbstractServerHttpResponse;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.web.reactive.socket.HandshakeInfo;
+import org.springframework.web.reactive.socket.WebSocketHandler;
+import org.springframework.web.reactive.socket.adapter.JettyWebSocketHandlerAdapter;
+import org.springframework.web.reactive.socket.adapter.JettyWebSocketSession;
+import org.springframework.web.reactive.socket.server.RequestUpgradeStrategy;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * A {@link RequestUpgradeStrategy} for use with Jetty.
+ *
+ * @author Violeta Georgieva
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+<span class="fc" id="L52">public class JettyRequestUpgradeStrategy implements RequestUpgradeStrategy, Lifecycle {</span>
+
+<span class="fc" id="L54">	private static final ThreadLocal&lt;WebSocketHandlerContainer&gt; adapterHolder =</span>
+			new NamedThreadLocal&lt;&gt;(&quot;JettyWebSocketHandlerAdapter&quot;);
+
+
+	@Nullable
+	private WebSocketPolicy webSocketPolicy;
+
+	@Nullable
+	private WebSocketServerFactory factory;
+
+	@Nullable
+	private volatile ServletContext servletContext;
+
+<span class="fc" id="L67">	private volatile boolean running = false;</span>
+
+<span class="fc" id="L69">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Configure a {@link WebSocketPolicy} to use to initialize
+	 * {@link WebSocketServerFactory}.
+	 * @param webSocketPolicy the WebSocket settings
+	 */
+	public void setWebSocketPolicy(WebSocketPolicy webSocketPolicy) {
+<span class="nc" id="L78">		this.webSocketPolicy = webSocketPolicy;</span>
+<span class="nc" id="L79">	}</span>
+
+	/**
+	 * Return the configured {@link WebSocketPolicy}, if any.
+	 */
+	@Nullable
+	public WebSocketPolicy getWebSocketPolicy() {
+<span class="nc" id="L86">		return this.webSocketPolicy;</span>
+	}
+
+
+	@Override
+	public void start() {
+<span class="fc" id="L92">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L93">			ServletContext servletContext = this.servletContext;</span>
+<span class="pc bpc" id="L94" title="2 of 4 branches missed.">			if (!isRunning() &amp;&amp; servletContext != null) {</span>
+<span class="fc" id="L95">				this.running = true;</span>
+				try {
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">					this.factory = (this.webSocketPolicy != null ?</span>
+							new WebSocketServerFactory(servletContext, this.webSocketPolicy) :
+							new WebSocketServerFactory(servletContext));
+<span class="fc" id="L100">					this.factory.setCreator((request, response) -&gt; {</span>
+<span class="fc" id="L101">						WebSocketHandlerContainer container = adapterHolder.get();</span>
+<span class="fc" id="L102">						String protocol = container.getProtocol();</span>
+<span class="fc bfc" id="L103" title="All 2 branches covered.">						if (protocol != null) {</span>
+<span class="fc" id="L104">							response.setAcceptedSubProtocol(protocol);</span>
+						}
+<span class="fc" id="L106">						return container.getAdapter();</span>
+					});
+<span class="fc" id="L108">					this.factory.start();</span>
+				}
+<span class="nc" id="L110">				catch (Throwable ex) {</span>
+<span class="nc" id="L111">					throw new IllegalStateException(&quot;Unable to start WebSocketServerFactory&quot;, ex);</span>
+<span class="fc" id="L112">				}</span>
+			}
+<span class="fc" id="L114">		}</span>
+<span class="fc" id="L115">	}</span>
+
+	@Override
+	public void stop() {
+<span class="nc" id="L119">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">			if (isRunning()) {</span>
+<span class="nc" id="L121">				this.running = false;</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">				if (this.factory != null) {</span>
+					try {
+<span class="nc" id="L124">						this.factory.stop();</span>
+					}
+<span class="nc" id="L126">					catch (Throwable ex) {</span>
+<span class="nc" id="L127">						throw new IllegalStateException(&quot;Failed to stop WebSocketServerFactory&quot;, ex);</span>
+<span class="nc" id="L128">					}</span>
+				}
+			}
+<span class="nc" id="L131">		}</span>
+<span class="nc" id="L132">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="fc" id="L136">		return this.running;</span>
+	}
+
+
+	@Override
+	public Mono&lt;Void&gt; upgrade(ServerWebExchange exchange, WebSocketHandler handler,
+			@Nullable String subProtocol, Supplier&lt;HandshakeInfo&gt; handshakeInfoFactory) {
+
+<span class="fc" id="L144">		ServerHttpRequest request = exchange.getRequest();</span>
+<span class="fc" id="L145">		ServerHttpResponse response = exchange.getResponse();</span>
+
+<span class="fc" id="L147">		HttpServletRequest servletRequest = getHttpServletRequest(request);</span>
+<span class="fc" id="L148">		HttpServletResponse servletResponse = getHttpServletResponse(response);</span>
+
+<span class="fc" id="L150">		HandshakeInfo handshakeInfo = handshakeInfoFactory.get();</span>
+<span class="fc" id="L151">		DataBufferFactory factory = response.bufferFactory();</span>
+
+<span class="fc" id="L153">		JettyWebSocketHandlerAdapter adapter = new JettyWebSocketHandlerAdapter(</span>
+<span class="fc" id="L154">				handler, session -&gt; new JettyWebSocketSession(session, handshakeInfo, factory));</span>
+
+<span class="fc" id="L156">		startLazily(servletRequest);</span>
+
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">		Assert.state(this.factory != null, &quot;No WebSocketServerFactory available&quot;);</span>
+<span class="fc" id="L159">		boolean isUpgrade = this.factory.isUpgradeRequest(servletRequest, servletResponse);</span>
+<span class="fc" id="L160">		Assert.isTrue(isUpgrade, &quot;Not a WebSocket handshake&quot;);</span>
+
+		try {
+<span class="fc" id="L163">			adapterHolder.set(new WebSocketHandlerContainer(adapter, subProtocol));</span>
+<span class="fc" id="L164">			this.factory.acceptWebSocket(servletRequest, servletResponse);</span>
+		}
+<span class="nc" id="L166">		catch (IOException ex) {</span>
+<span class="nc" id="L167">			return Mono.error(ex);</span>
+		}
+		finally {
+<span class="fc" id="L170">			adapterHolder.remove();</span>
+		}
+
+<span class="fc" id="L173">		return Mono.empty();</span>
+	}
+
+	private HttpServletRequest getHttpServletRequest(ServerHttpRequest request) {
+<span class="fc" id="L177">		Assert.isInstanceOf(AbstractServerHttpRequest.class, request);</span>
+<span class="fc" id="L178">		return ((AbstractServerHttpRequest) request).getNativeRequest();</span>
+	}
+
+	private HttpServletResponse getHttpServletResponse(ServerHttpResponse response) {
+<span class="fc" id="L182">		Assert.isInstanceOf(AbstractServerHttpResponse.class, response);</span>
+<span class="fc" id="L183">		return ((AbstractServerHttpResponse) response).getNativeResponse();</span>
+	}
+
+	private void startLazily(HttpServletRequest request) {
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">		if (this.servletContext != null) {</span>
+<span class="nc" id="L188">			return;</span>
+		}
+<span class="fc" id="L190">		synchronized (this.lifecycleMonitor) {</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">			if (this.servletContext == null) {</span>
+<span class="fc" id="L192">				this.servletContext = request.getServletContext();</span>
+<span class="fc" id="L193">				start();</span>
+			}
+<span class="fc" id="L195">		}</span>
+<span class="fc" id="L196">	}</span>
+
+
+	private static class WebSocketHandlerContainer {
+
+		private final JettyWebSocketHandlerAdapter adapter;
+
+		@Nullable
+		private final String protocol;
+
+<span class="fc" id="L206">		public WebSocketHandlerContainer(JettyWebSocketHandlerAdapter adapter, @Nullable String protocol) {</span>
+<span class="fc" id="L207">			this.adapter = adapter;</span>
+<span class="fc" id="L208">			this.protocol = protocol;</span>
+<span class="fc" id="L209">		}</span>
+
+		public JettyWebSocketHandlerAdapter getAdapter() {
+<span class="fc" id="L212">			return this.adapter;</span>
+		}
+
+		@Nullable
+		public String getProtocol() {
+<span class="fc" id="L217">			return this.protocol;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

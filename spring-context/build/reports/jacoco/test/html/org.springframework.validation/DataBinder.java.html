@@ -1,0 +1,912 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DataBinder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.validation</a> &gt; <span class="el_source">DataBinder.java</span></div><h1>DataBinder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.validation;
+
+import java.beans.PropertyEditor;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.ConfigurablePropertyAccessor;
+import org.springframework.beans.MutablePropertyValues;
+import org.springframework.beans.PropertyAccessException;
+import org.springframework.beans.PropertyAccessorUtils;
+import org.springframework.beans.PropertyBatchUpdateException;
+import org.springframework.beans.PropertyEditorRegistry;
+import org.springframework.beans.PropertyValue;
+import org.springframework.beans.PropertyValues;
+import org.springframework.beans.SimpleTypeConverter;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.format.Formatter;
+import org.springframework.format.support.FormatterPropertyEditorAdapter;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.PatternMatchUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Binder that allows for setting property values onto a target object,
+ * including support for validation and binding result analysis.
+ * The binding process can be customized through specifying allowed fields,
+ * required fields, custom editors, etc.
+ *
+ * &lt;p&gt;Note that there are potential security implications in failing to set an array
+ * of allowed fields. In the case of HTTP form POST data for example, malicious clients
+ * can attempt to subvert an application by supplying values for fields or properties
+ * that do not exist on the form. In some cases this could lead to illegal data being
+ * set on command objects &lt;i&gt;or their nested objects&lt;/i&gt;. For this reason, it is
+ * &lt;b&gt;highly recommended to specify the {@link #setAllowedFields allowedFields} property&lt;/b&gt;
+ * on the DataBinder.
+ *
+ * &lt;p&gt;The binding results can be examined via the {@link BindingResult} interface,
+ * extending the {@link Errors} interface: see the {@link #getBindingResult()} method.
+ * Missing fields and property access exceptions will be converted to {@link FieldError FieldErrors},
+ * collected in the Errors instance, using the following error codes:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;Missing field error: &quot;required&quot;
+ * &lt;li&gt;Type mismatch error: &quot;typeMismatch&quot;
+ * &lt;li&gt;Method invocation error: &quot;methodInvocation&quot;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;By default, binding errors get resolved through the {@link BindingErrorProcessor}
+ * strategy, processing for missing fields and property access exceptions: see the
+ * {@link #setBindingErrorProcessor} method. You can override the default strategy
+ * if needed, for example to generate different error codes.
+ *
+ * &lt;p&gt;Custom validation errors can be added afterwards. You will typically want to resolve
+ * such error codes into proper user-visible error messages; this can be achieved through
+ * resolving each error via a {@link org.springframework.context.MessageSource}, which is
+ * able to resolve an {@link ObjectError}/{@link FieldError} through its
+ * {@link org.springframework.context.MessageSource#getMessage(org.springframework.context.MessageSourceResolvable, java.util.Locale)}
+ * method. The list of message codes can be customized through the {@link MessageCodesResolver}
+ * strategy: see the {@link #setMessageCodesResolver} method. {@link DefaultMessageCodesResolver}'s
+ * javadoc states details on the default resolution rules.
+ *
+ * &lt;p&gt;This generic data binder can be used in any kind of environment.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Stephane Nicoll
+ * @author Kazuki Shimizu
+ * @see #setAllowedFields
+ * @see #setRequiredFields
+ * @see #registerCustomEditor
+ * @see #setMessageCodesResolver
+ * @see #setBindingErrorProcessor
+ * @see #bind
+ * @see #getBindingResult
+ * @see DefaultMessageCodesResolver
+ * @see DefaultBindingErrorProcessor
+ * @see org.springframework.context.MessageSource
+ */
+public class DataBinder implements PropertyEditorRegistry, TypeConverter {
+
+	/** Default object name used for binding: &quot;target&quot;. */
+	public static final String DEFAULT_OBJECT_NAME = &quot;target&quot;;
+
+	/** Default limit for array and collection growing: 256. */
+	public static final int DEFAULT_AUTO_GROW_COLLECTION_LIMIT = 256;
+
+
+	/**
+	 * We'll create a lot of DataBinder instances: Let's use a static logger.
+	 */
+<span class="fc" id="L122">	protected static final Log logger = LogFactory.getLog(DataBinder.class);</span>
+
+	@Nullable
+	private final Object target;
+
+	private final String objectName;
+
+	@Nullable
+	private AbstractPropertyBindingResult bindingResult;
+
+	@Nullable
+	private SimpleTypeConverter typeConverter;
+
+<span class="fc" id="L135">	private boolean ignoreUnknownFields = true;</span>
+
+<span class="fc" id="L137">	private boolean ignoreInvalidFields = false;</span>
+
+<span class="fc" id="L139">	private boolean autoGrowNestedPaths = true;</span>
+
+<span class="fc" id="L141">	private int autoGrowCollectionLimit = DEFAULT_AUTO_GROW_COLLECTION_LIMIT;</span>
+
+	@Nullable
+	private String[] allowedFields;
+
+	@Nullable
+	private String[] disallowedFields;
+
+	@Nullable
+	private String[] requiredFields;
+
+	@Nullable
+	private ConversionService conversionService;
+
+	@Nullable
+	private MessageCodesResolver messageCodesResolver;
+
+<span class="fc" id="L158">	private BindingErrorProcessor bindingErrorProcessor = new DefaultBindingErrorProcessor();</span>
+
+<span class="fc" id="L160">	private final List&lt;Validator&gt; validators = new ArrayList&lt;&gt;();</span>
+
+
+	/**
+	 * Create a new DataBinder instance, with default object name.
+	 * @param target the target object to bind onto (or {@code null}
+	 * if the binder is just used to convert a plain parameter value)
+	 * @see #DEFAULT_OBJECT_NAME
+	 */
+	public DataBinder(@Nullable Object target) {
+<span class="fc" id="L170">		this(target, DEFAULT_OBJECT_NAME);</span>
+<span class="fc" id="L171">	}</span>
+
+	/**
+	 * Create a new DataBinder instance.
+	 * @param target the target object to bind onto (or {@code null}
+	 * if the binder is just used to convert a plain parameter value)
+	 * @param objectName the name of the target object
+	 */
+<span class="fc" id="L179">	public DataBinder(@Nullable Object target, String objectName) {</span>
+<span class="fc" id="L180">		this.target = ObjectUtils.unwrapOptional(target);</span>
+<span class="fc" id="L181">		this.objectName = objectName;</span>
+<span class="fc" id="L182">	}</span>
+
+
+	/**
+	 * Return the wrapped target object.
+	 */
+	@Nullable
+	public Object getTarget() {
+<span class="fc" id="L190">		return this.target;</span>
+	}
+
+	/**
+	 * Return the name of the bound object.
+	 */
+	public String getObjectName() {
+<span class="fc" id="L197">		return this.objectName;</span>
+	}
+
+	/**
+	 * Set whether this binder should attempt to &quot;auto-grow&quot; a nested path that contains a null value.
+	 * &lt;p&gt;If &quot;true&quot;, a null path location will be populated with a default object value and traversed
+	 * instead of resulting in an exception. This flag also enables auto-growth of collection elements
+	 * when accessing an out-of-bounds index.
+	 * &lt;p&gt;Default is &quot;true&quot; on a standard DataBinder. Note that since Spring 4.1 this feature is supported
+	 * for bean property access (DataBinder's default mode) and field access.
+	 * @see #initBeanPropertyAccess()
+	 * @see org.springframework.beans.BeanWrapper#setAutoGrowNestedPaths
+	 */
+	public void setAutoGrowNestedPaths(boolean autoGrowNestedPaths) {
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">		Assert.state(this.bindingResult == null,</span>
+				&quot;DataBinder is already initialized - call setAutoGrowNestedPaths before other configuration methods&quot;);
+<span class="fc" id="L213">		this.autoGrowNestedPaths = autoGrowNestedPaths;</span>
+<span class="fc" id="L214">	}</span>
+
+	/**
+	 * Return whether &quot;auto-growing&quot; of nested paths has been activated.
+	 */
+	public boolean isAutoGrowNestedPaths() {
+<span class="fc" id="L220">		return this.autoGrowNestedPaths;</span>
+	}
+
+	/**
+	 * Specify the limit for array and collection auto-growing.
+	 * &lt;p&gt;Default is 256, preventing OutOfMemoryErrors in case of large indexes.
+	 * Raise this limit if your auto-growing needs are unusually high.
+	 * @see #initBeanPropertyAccess()
+	 * @see org.springframework.beans.BeanWrapper#setAutoGrowCollectionLimit
+	 */
+	public void setAutoGrowCollectionLimit(int autoGrowCollectionLimit) {
+<span class="fc bfc" id="L231" title="All 2 branches covered.">		Assert.state(this.bindingResult == null,</span>
+				&quot;DataBinder is already initialized - call setAutoGrowCollectionLimit before other configuration methods&quot;);
+<span class="fc" id="L233">		this.autoGrowCollectionLimit = autoGrowCollectionLimit;</span>
+<span class="fc" id="L234">	}</span>
+
+	/**
+	 * Return the current limit for array and collection auto-growing.
+	 */
+	public int getAutoGrowCollectionLimit() {
+<span class="fc" id="L240">		return this.autoGrowCollectionLimit;</span>
+	}
+
+	/**
+	 * Initialize standard JavaBean property access for this DataBinder.
+	 * &lt;p&gt;This is the default; an explicit call just leads to eager initialization.
+	 * @see #initDirectFieldAccess()
+	 * @see #createBeanPropertyBindingResult()
+	 */
+	public void initBeanPropertyAccess() {
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">		Assert.state(this.bindingResult == null,</span>
+				&quot;DataBinder is already initialized - call initBeanPropertyAccess before other configuration methods&quot;);
+<span class="fc" id="L252">		this.bindingResult = createBeanPropertyBindingResult();</span>
+<span class="fc" id="L253">	}</span>
+
+	/**
+	 * Create the {@link AbstractPropertyBindingResult} instance using standard
+	 * JavaBean property access.
+	 * @since 4.2.1
+	 */
+	protected AbstractPropertyBindingResult createBeanPropertyBindingResult() {
+<span class="fc" id="L261">		BeanPropertyBindingResult result = new BeanPropertyBindingResult(getTarget(),</span>
+<span class="fc" id="L262">				getObjectName(), isAutoGrowNestedPaths(), getAutoGrowCollectionLimit());</span>
+
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		if (this.conversionService != null) {</span>
+<span class="fc" id="L265">			result.initConversion(this.conversionService);</span>
+		}
+<span class="fc bfc" id="L267" title="All 2 branches covered.">		if (this.messageCodesResolver != null) {</span>
+<span class="fc" id="L268">			result.setMessageCodesResolver(this.messageCodesResolver);</span>
+		}
+
+<span class="fc" id="L271">		return result;</span>
+	}
+
+	/**
+	 * Initialize direct field access for this DataBinder,
+	 * as alternative to the default bean property access.
+	 * @see #initBeanPropertyAccess()
+	 * @see #createDirectFieldBindingResult()
+	 */
+	public void initDirectFieldAccess() {
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">		Assert.state(this.bindingResult == null,</span>
+				&quot;DataBinder is already initialized - call initDirectFieldAccess before other configuration methods&quot;);
+<span class="fc" id="L283">		this.bindingResult = createDirectFieldBindingResult();</span>
+<span class="fc" id="L284">	}</span>
+
+	/**
+	 * Create the {@link AbstractPropertyBindingResult} instance using direct
+	 * field access.
+	 * @since 4.2.1
+	 */
+	protected AbstractPropertyBindingResult createDirectFieldBindingResult() {
+<span class="fc" id="L292">		DirectFieldBindingResult result = new DirectFieldBindingResult(getTarget(),</span>
+<span class="fc" id="L293">				getObjectName(), isAutoGrowNestedPaths());</span>
+
+<span class="fc bfc" id="L295" title="All 2 branches covered.">		if (this.conversionService != null) {</span>
+<span class="fc" id="L296">			result.initConversion(this.conversionService);</span>
+		}
+<span class="fc bfc" id="L298" title="All 2 branches covered.">		if (this.messageCodesResolver != null) {</span>
+<span class="fc" id="L299">			result.setMessageCodesResolver(this.messageCodesResolver);</span>
+		}
+
+<span class="fc" id="L302">		return result;</span>
+	}
+
+	/**
+	 * Return the internal BindingResult held by this DataBinder,
+	 * as an AbstractPropertyBindingResult.
+	 */
+	protected AbstractPropertyBindingResult getInternalBindingResult() {
+<span class="fc bfc" id="L310" title="All 2 branches covered.">		if (this.bindingResult == null) {</span>
+<span class="fc" id="L311">			initBeanPropertyAccess();</span>
+		}
+<span class="fc" id="L313">		return this.bindingResult;</span>
+	}
+
+	/**
+	 * Return the underlying PropertyAccessor of this binder's BindingResult.
+	 */
+	protected ConfigurablePropertyAccessor getPropertyAccessor() {
+<span class="fc" id="L320">		return getInternalBindingResult().getPropertyAccessor();</span>
+	}
+
+	/**
+	 * Return this binder's underlying SimpleTypeConverter.
+	 */
+	protected SimpleTypeConverter getSimpleTypeConverter() {
+<span class="fc bfc" id="L327" title="All 2 branches covered.">		if (this.typeConverter == null) {</span>
+<span class="fc" id="L328">			this.typeConverter = new SimpleTypeConverter();</span>
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">			if (this.conversionService != null) {</span>
+<span class="fc" id="L330">				this.typeConverter.setConversionService(this.conversionService);</span>
+			}
+		}
+<span class="fc" id="L333">		return this.typeConverter;</span>
+	}
+
+	/**
+	 * Return the underlying TypeConverter of this binder's BindingResult.
+	 */
+	protected PropertyEditorRegistry getPropertyEditorRegistry() {
+<span class="fc bfc" id="L340" title="All 2 branches covered.">		if (getTarget() != null) {</span>
+<span class="fc" id="L341">			return getInternalBindingResult().getPropertyAccessor();</span>
+		}
+		else {
+<span class="fc" id="L344">			return getSimpleTypeConverter();</span>
+		}
+	}
+
+	/**
+	 * Return the underlying TypeConverter of this binder's BindingResult.
+	 */
+	protected TypeConverter getTypeConverter() {
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">		if (getTarget() != null) {</span>
+<span class="nc" id="L353">			return getInternalBindingResult().getPropertyAccessor();</span>
+		}
+		else {
+<span class="fc" id="L356">			return getSimpleTypeConverter();</span>
+		}
+	}
+
+	/**
+	 * Return the BindingResult instance created by this DataBinder.
+	 * This allows for convenient access to the binding results after
+	 * a bind operation.
+	 * @return the BindingResult instance, to be treated as BindingResult
+	 * or as Errors instance (Errors is a super-interface of BindingResult)
+	 * @see Errors
+	 * @see #bind
+	 */
+	public BindingResult getBindingResult() {
+<span class="fc" id="L370">		return getInternalBindingResult();</span>
+	}
+
+
+	/**
+	 * Set whether to ignore unknown fields, that is, whether to ignore bind
+	 * parameters that do not have corresponding fields in the target object.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this off to enforce that all bind parameters
+	 * must have a matching field in the target object.
+	 * &lt;p&gt;Note that this setting only applies to &lt;i&gt;binding&lt;/i&gt; operations
+	 * on this DataBinder, not to &lt;i&gt;retrieving&lt;/i&gt; values via its
+	 * {@link #getBindingResult() BindingResult}.
+	 * @see #bind
+	 */
+	public void setIgnoreUnknownFields(boolean ignoreUnknownFields) {
+<span class="fc" id="L385">		this.ignoreUnknownFields = ignoreUnknownFields;</span>
+<span class="fc" id="L386">	}</span>
+
+	/**
+	 * Return whether to ignore unknown fields when binding.
+	 */
+	public boolean isIgnoreUnknownFields() {
+<span class="fc" id="L392">		return this.ignoreUnknownFields;</span>
+	}
+
+	/**
+	 * Set whether to ignore invalid fields, that is, whether to ignore bind
+	 * parameters that have corresponding fields in the target object which are
+	 * not accessible (for example because of null values in the nested path).
+	 * &lt;p&gt;Default is &quot;false&quot;. Turn this on to ignore bind parameters for
+	 * nested objects in non-existing parts of the target object graph.
+	 * &lt;p&gt;Note that this setting only applies to &lt;i&gt;binding&lt;/i&gt; operations
+	 * on this DataBinder, not to &lt;i&gt;retrieving&lt;/i&gt; values via its
+	 * {@link #getBindingResult() BindingResult}.
+	 * @see #bind
+	 */
+	public void setIgnoreInvalidFields(boolean ignoreInvalidFields) {
+<span class="fc" id="L407">		this.ignoreInvalidFields = ignoreInvalidFields;</span>
+<span class="fc" id="L408">	}</span>
+
+	/**
+	 * Return whether to ignore invalid fields when binding.
+	 */
+	public boolean isIgnoreInvalidFields() {
+<span class="fc" id="L414">		return this.ignoreInvalidFields;</span>
+	}
+
+	/**
+	 * Register fields that should be allowed for binding. Default is all
+	 * fields. Restrict this for example to avoid unwanted modifications
+	 * by malicious users when binding HTTP request parameters.
+	 * &lt;p&gt;Supports &quot;xxx*&quot;, &quot;*xxx&quot; and &quot;*xxx*&quot; patterns. More sophisticated matching
+	 * can be implemented by overriding the {@code isAllowed} method.
+	 * &lt;p&gt;Alternatively, specify a list of &lt;i&gt;disallowed&lt;/i&gt; fields.
+	 * @param allowedFields array of field names
+	 * @see #setDisallowedFields
+	 * @see #isAllowed(String)
+	 */
+	public void setAllowedFields(@Nullable String... allowedFields) {
+<span class="fc" id="L429">		this.allowedFields = PropertyAccessorUtils.canonicalPropertyNames(allowedFields);</span>
+<span class="fc" id="L430">	}</span>
+
+	/**
+	 * Return the fields that should be allowed for binding.
+	 * @return array of field names
+	 */
+	@Nullable
+	public String[] getAllowedFields() {
+<span class="fc" id="L438">		return this.allowedFields;</span>
+	}
+
+	/**
+	 * Register fields that should &lt;i&gt;not&lt;/i&gt; be allowed for binding. Default is none.
+	 * Mark fields as disallowed for example to avoid unwanted modifications
+	 * by malicious users when binding HTTP request parameters.
+	 * &lt;p&gt;Supports &quot;xxx*&quot;, &quot;*xxx&quot; and &quot;*xxx*&quot; patterns. More sophisticated matching
+	 * can be implemented by overriding the {@code isAllowed} method.
+	 * &lt;p&gt;Alternatively, specify a list of &lt;i&gt;allowed&lt;/i&gt; fields.
+	 * @param disallowedFields array of field names
+	 * @see #setAllowedFields
+	 * @see #isAllowed(String)
+	 */
+	public void setDisallowedFields(@Nullable String... disallowedFields) {
+<span class="fc" id="L453">		this.disallowedFields = PropertyAccessorUtils.canonicalPropertyNames(disallowedFields);</span>
+<span class="fc" id="L454">	}</span>
+
+	/**
+	 * Return the fields that should &lt;i&gt;not&lt;/i&gt; be allowed for binding.
+	 * @return array of field names
+	 */
+	@Nullable
+	public String[] getDisallowedFields() {
+<span class="fc" id="L462">		return this.disallowedFields;</span>
+	}
+
+	/**
+	 * Register fields that are required for each binding process.
+	 * &lt;p&gt;If one of the specified fields is not contained in the list of
+	 * incoming property values, a corresponding &quot;missing field&quot; error
+	 * will be created, with error code &quot;required&quot; (by the default
+	 * binding error processor).
+	 * @param requiredFields array of field names
+	 * @see #setBindingErrorProcessor
+	 * @see DefaultBindingErrorProcessor#MISSING_FIELD_ERROR_CODE
+	 */
+	public void setRequiredFields(@Nullable String... requiredFields) {
+<span class="fc" id="L476">		this.requiredFields = PropertyAccessorUtils.canonicalPropertyNames(requiredFields);</span>
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L478">			logger.debug(&quot;DataBinder requires binding of required fields [&quot; +</span>
+<span class="nc" id="L479">					StringUtils.arrayToCommaDelimitedString(requiredFields) + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L481">	}</span>
+
+	/**
+	 * Return the fields that are required for each binding process.
+	 * @return array of field names
+	 */
+	@Nullable
+	public String[] getRequiredFields() {
+<span class="fc" id="L489">		return this.requiredFields;</span>
+	}
+
+	/**
+	 * Set the strategy to use for resolving errors into message codes.
+	 * Applies the given strategy to the underlying errors holder.
+	 * &lt;p&gt;Default is a DefaultMessageCodesResolver.
+	 * @see BeanPropertyBindingResult#setMessageCodesResolver
+	 * @see DefaultMessageCodesResolver
+	 */
+	public void setMessageCodesResolver(@Nullable MessageCodesResolver messageCodesResolver) {
+<span class="fc bfc" id="L500" title="All 2 branches covered.">		Assert.state(this.messageCodesResolver == null, &quot;DataBinder is already initialized with MessageCodesResolver&quot;);</span>
+<span class="fc" id="L501">		this.messageCodesResolver = messageCodesResolver;</span>
+<span class="fc bfc" id="L502" title="All 4 branches covered.">		if (this.bindingResult != null &amp;&amp; messageCodesResolver != null) {</span>
+<span class="fc" id="L503">			this.bindingResult.setMessageCodesResolver(messageCodesResolver);</span>
+		}
+<span class="fc" id="L505">	}</span>
+
+	/**
+	 * Set the strategy to use for processing binding errors, that is,
+	 * required field errors and {@code PropertyAccessException}s.
+	 * &lt;p&gt;Default is a DefaultBindingErrorProcessor.
+	 * @see DefaultBindingErrorProcessor
+	 */
+	public void setBindingErrorProcessor(BindingErrorProcessor bindingErrorProcessor) {
+<span class="nc" id="L514">		Assert.notNull(bindingErrorProcessor, &quot;BindingErrorProcessor must not be null&quot;);</span>
+<span class="nc" id="L515">		this.bindingErrorProcessor = bindingErrorProcessor;</span>
+<span class="nc" id="L516">	}</span>
+
+	/**
+	 * Return the strategy for processing binding errors.
+	 */
+	public BindingErrorProcessor getBindingErrorProcessor() {
+<span class="fc" id="L522">		return this.bindingErrorProcessor;</span>
+	}
+
+	/**
+	 * Set the Validator to apply after each binding step.
+	 * @see #addValidators(Validator...)
+	 * @see #replaceValidators(Validator...)
+	 */
+	public void setValidator(@Nullable Validator validator) {
+<span class="nc" id="L531">		assertValidators(validator);</span>
+<span class="nc" id="L532">		this.validators.clear();</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">		if (validator != null) {</span>
+<span class="nc" id="L534">			this.validators.add(validator);</span>
+		}
+<span class="nc" id="L536">	}</span>
+
+	private void assertValidators(Validator... validators) {
+<span class="nc" id="L539">		Object target = getTarget();</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">		for (Validator validator : validators) {</span>
+<span class="nc bnc" id="L541" title="All 6 branches missed.">			if (validator != null &amp;&amp; (target != null &amp;&amp; !validator.supports(target.getClass()))) {</span>
+<span class="nc" id="L542">				throw new IllegalStateException(&quot;Invalid target for Validator [&quot; + validator + &quot;]: &quot; + target);</span>
+			}
+		}
+<span class="nc" id="L545">	}</span>
+
+	/**
+	 * Add Validators to apply after each binding step.
+	 * @see #setValidator(Validator)
+	 * @see #replaceValidators(Validator...)
+	 */
+	public void addValidators(Validator... validators) {
+<span class="nc" id="L553">		assertValidators(validators);</span>
+<span class="nc" id="L554">		this.validators.addAll(Arrays.asList(validators));</span>
+<span class="nc" id="L555">	}</span>
+
+	/**
+	 * Replace the Validators to apply after each binding step.
+	 * @see #setValidator(Validator)
+	 * @see #addValidators(Validator...)
+	 */
+	public void replaceValidators(Validator... validators) {
+<span class="nc" id="L563">		assertValidators(validators);</span>
+<span class="nc" id="L564">		this.validators.clear();</span>
+<span class="nc" id="L565">		this.validators.addAll(Arrays.asList(validators));</span>
+<span class="nc" id="L566">	}</span>
+
+	/**
+	 * Return the primary Validator to apply after each binding step, if any.
+	 */
+	@Nullable
+	public Validator getValidator() {
+<span class="nc bnc" id="L573" title="All 2 branches missed.">		return (!this.validators.isEmpty() ? this.validators.get(0) : null);</span>
+	}
+
+	/**
+	 * Return the Validators to apply after data binding.
+	 */
+	public List&lt;Validator&gt; getValidators() {
+<span class="nc" id="L580">		return Collections.unmodifiableList(this.validators);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of PropertyEditorRegistry/TypeConverter interface
+	//---------------------------------------------------------------------
+
+	/**
+	 * Specify a Spring 3.0 ConversionService to use for converting
+	 * property values, as an alternative to JavaBeans PropertyEditors.
+	 */
+	public void setConversionService(@Nullable ConversionService conversionService) {
+<span class="pc bpc" id="L593" title="1 of 2 branches missed.">		Assert.state(this.conversionService == null, &quot;DataBinder is already initialized with ConversionService&quot;);</span>
+<span class="fc" id="L594">		this.conversionService = conversionService;</span>
+<span class="pc bpc" id="L595" title="1 of 4 branches missed.">		if (this.bindingResult != null &amp;&amp; conversionService != null) {</span>
+<span class="fc" id="L596">			this.bindingResult.initConversion(conversionService);</span>
+		}
+<span class="fc" id="L598">	}</span>
+
+	/**
+	 * Return the associated ConversionService, if any.
+	 */
+	@Nullable
+	public ConversionService getConversionService() {
+<span class="nc" id="L605">		return this.conversionService;</span>
+	}
+
+	/**
+	 * Add a custom formatter, applying it to all fields matching the
+	 * {@link Formatter}-declared type.
+	 * &lt;p&gt;Registers a corresponding {@link PropertyEditor} adapter underneath the covers.
+	 * @param formatter the formatter to add, generically declared for a specific type
+	 * @since 4.2
+	 * @see #registerCustomEditor(Class, PropertyEditor)
+	 */
+	public void addCustomFormatter(Formatter&lt;?&gt; formatter) {
+<span class="fc" id="L617">		FormatterPropertyEditorAdapter adapter = new FormatterPropertyEditorAdapter(formatter);</span>
+<span class="fc" id="L618">		getPropertyEditorRegistry().registerCustomEditor(adapter.getFieldType(), adapter);</span>
+<span class="fc" id="L619">	}</span>
+
+	/**
+	 * Add a custom formatter for the field type specified in {@link Formatter} class,
+	 * applying it to the specified fields only, if any, or otherwise to all fields.
+	 * &lt;p&gt;Registers a corresponding {@link PropertyEditor} adapter underneath the covers.
+	 * @param formatter the formatter to add, generically declared for a specific type
+	 * @param fields the fields to apply the formatter to, or none if to be applied to all
+	 * @since 4.2
+	 * @see #registerCustomEditor(Class, String, PropertyEditor)
+	 */
+	public void addCustomFormatter(Formatter&lt;?&gt; formatter, String... fields) {
+<span class="fc" id="L631">		FormatterPropertyEditorAdapter adapter = new FormatterPropertyEditorAdapter(formatter);</span>
+<span class="fc" id="L632">		Class&lt;?&gt; fieldType = adapter.getFieldType();</span>
+<span class="pc bpc" id="L633" title="1 of 2 branches missed.">		if (ObjectUtils.isEmpty(fields)) {</span>
+<span class="nc" id="L634">			getPropertyEditorRegistry().registerCustomEditor(fieldType, adapter);</span>
+		}
+		else {
+<span class="fc bfc" id="L637" title="All 2 branches covered.">			for (String field : fields) {</span>
+<span class="fc" id="L638">				getPropertyEditorRegistry().registerCustomEditor(fieldType, field, adapter);</span>
+			}
+		}
+<span class="fc" id="L641">	}</span>
+
+	/**
+	 * Add a custom formatter, applying it to the specified field types only, if any,
+	 * or otherwise to all fields matching the {@link Formatter}-declared type.
+	 * &lt;p&gt;Registers a corresponding {@link PropertyEditor} adapter underneath the covers.
+	 * @param formatter the formatter to add (does not need to generically declare a
+	 * field type if field types are explicitly specified as parameters)
+	 * @param fieldTypes the field types to apply the formatter to, or none if to be
+	 * derived from the given {@link Formatter} implementation class
+	 * @since 4.2
+	 * @see #registerCustomEditor(Class, PropertyEditor)
+	 */
+	public void addCustomFormatter(Formatter&lt;?&gt; formatter, Class&lt;?&gt;... fieldTypes) {
+<span class="fc" id="L655">		FormatterPropertyEditorAdapter adapter = new FormatterPropertyEditorAdapter(formatter);</span>
+<span class="pc bpc" id="L656" title="1 of 2 branches missed.">		if (ObjectUtils.isEmpty(fieldTypes)) {</span>
+<span class="nc" id="L657">			getPropertyEditorRegistry().registerCustomEditor(adapter.getFieldType(), adapter);</span>
+		}
+		else {
+<span class="fc bfc" id="L660" title="All 2 branches covered.">			for (Class&lt;?&gt; fieldType : fieldTypes) {</span>
+<span class="fc" id="L661">				getPropertyEditorRegistry().registerCustomEditor(fieldType, adapter);</span>
+			}
+		}
+<span class="fc" id="L664">	}</span>
+
+	@Override
+	public void registerCustomEditor(Class&lt;?&gt; requiredType, PropertyEditor propertyEditor) {
+<span class="fc" id="L668">		getPropertyEditorRegistry().registerCustomEditor(requiredType, propertyEditor);</span>
+<span class="fc" id="L669">	}</span>
+
+	@Override
+	public void registerCustomEditor(@Nullable Class&lt;?&gt; requiredType, @Nullable String field, PropertyEditor propertyEditor) {
+<span class="fc" id="L673">		getPropertyEditorRegistry().registerCustomEditor(requiredType, field, propertyEditor);</span>
+<span class="fc" id="L674">	}</span>
+
+	@Override
+	@Nullable
+	public PropertyEditor findCustomEditor(@Nullable Class&lt;?&gt; requiredType, @Nullable String propertyPath) {
+<span class="nc" id="L679">		return getPropertyEditorRegistry().findCustomEditor(requiredType, propertyPath);</span>
+	}
+
+	@Override
+	@Nullable
+	public &lt;T&gt; T convertIfNecessary(@Nullable Object value, @Nullable Class&lt;T&gt; requiredType) throws TypeMismatchException {
+<span class="fc" id="L685">		return getTypeConverter().convertIfNecessary(value, requiredType);</span>
+	}
+
+	@Override
+	@Nullable
+	public &lt;T&gt; T convertIfNecessary(@Nullable Object value, @Nullable Class&lt;T&gt; requiredType,
+			@Nullable MethodParameter methodParam) throws TypeMismatchException {
+
+<span class="nc" id="L693">		return getTypeConverter().convertIfNecessary(value, requiredType, methodParam);</span>
+	}
+
+	@Override
+	@Nullable
+	public &lt;T&gt; T convertIfNecessary(@Nullable Object value, @Nullable Class&lt;T&gt; requiredType, @Nullable Field field)
+			throws TypeMismatchException {
+
+<span class="nc" id="L701">		return getTypeConverter().convertIfNecessary(value, requiredType, field);</span>
+	}
+
+	@Nullable
+	@Override
+	public &lt;T&gt; T convertIfNecessary(@Nullable Object value, @Nullable Class&lt;T&gt; requiredType,
+			@Nullable TypeDescriptor typeDescriptor) throws TypeMismatchException {
+
+<span class="nc" id="L709">		return getTypeConverter().convertIfNecessary(value, requiredType, typeDescriptor);</span>
+	}
+
+
+	/**
+	 * Bind the given property values to this binder's target.
+	 * &lt;p&gt;This call can create field errors, representing basic binding
+	 * errors like a required field (code &quot;required&quot;), or type mismatch
+	 * between value and bean property (code &quot;typeMismatch&quot;).
+	 * &lt;p&gt;Note that the given PropertyValues should be a throwaway instance:
+	 * For efficiency, it will be modified to just contain allowed fields if it
+	 * implements the MutablePropertyValues interface; else, an internal mutable
+	 * copy will be created for this purpose. Pass in a copy of the PropertyValues
+	 * if you want your original instance to stay unmodified in any case.
+	 * @param pvs property values to bind
+	 * @see #doBind(org.springframework.beans.MutablePropertyValues)
+	 */
+	public void bind(PropertyValues pvs) {
+<span class="pc bpc" id="L727" title="1 of 2 branches missed.">		MutablePropertyValues mpvs = (pvs instanceof MutablePropertyValues ?</span>
+				(MutablePropertyValues) pvs : new MutablePropertyValues(pvs));
+<span class="fc" id="L729">		doBind(mpvs);</span>
+<span class="fc" id="L730">	}</span>
+
+	/**
+	 * Actual implementation of the binding process, working with the
+	 * passed-in MutablePropertyValues instance.
+	 * @param mpvs the property values to bind,
+	 * as MutablePropertyValues instance
+	 * @see #checkAllowedFields
+	 * @see #checkRequiredFields
+	 * @see #applyPropertyValues
+	 */
+	protected void doBind(MutablePropertyValues mpvs) {
+<span class="fc" id="L742">		checkAllowedFields(mpvs);</span>
+<span class="fc" id="L743">		checkRequiredFields(mpvs);</span>
+<span class="fc" id="L744">		applyPropertyValues(mpvs);</span>
+<span class="fc" id="L745">	}</span>
+
+	/**
+	 * Check the given property values against the allowed fields,
+	 * removing values for fields that are not allowed.
+	 * @param mpvs the property values to be bound (can be modified)
+	 * @see #getAllowedFields
+	 * @see #isAllowed(String)
+	 */
+	protected void checkAllowedFields(MutablePropertyValues mpvs) {
+<span class="fc" id="L755">		PropertyValue[] pvs = mpvs.getPropertyValues();</span>
+<span class="fc bfc" id="L756" title="All 2 branches covered.">		for (PropertyValue pv : pvs) {</span>
+<span class="fc" id="L757">			String field = PropertyAccessorUtils.canonicalPropertyName(pv.getName());</span>
+<span class="fc bfc" id="L758" title="All 2 branches covered.">			if (!isAllowed(field)) {</span>
+<span class="fc" id="L759">				mpvs.removePropertyValue(pv);</span>
+<span class="fc" id="L760">				getBindingResult().recordSuppressedField(field);</span>
+<span class="pc bpc" id="L761" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L762">					logger.debug(&quot;Field [&quot; + field + &quot;] has been removed from PropertyValues &quot; +</span>
+							&quot;and will not be bound, because it has not been found in the list of allowed fields&quot;);
+				}
+			}
+		}
+<span class="fc" id="L767">	}</span>
+
+	/**
+	 * Return if the given field is allowed for binding.
+	 * Invoked for each passed-in property value.
+	 * &lt;p&gt;The default implementation checks for &quot;xxx*&quot;, &quot;*xxx&quot; and &quot;*xxx*&quot; matches,
+	 * as well as direct equality, in the specified lists of allowed fields and
+	 * disallowed fields. A field matching a disallowed pattern will not be accepted
+	 * even if it also happens to match a pattern in the allowed list.
+	 * &lt;p&gt;Can be overridden in subclasses.
+	 * @param field the field to check
+	 * @return if the field is allowed
+	 * @see #setAllowedFields
+	 * @see #setDisallowedFields
+	 * @see org.springframework.util.PatternMatchUtils#simpleMatch(String, String)
+	 */
+	protected boolean isAllowed(String field) {
+<span class="fc" id="L784">		String[] allowed = getAllowedFields();</span>
+<span class="fc" id="L785">		String[] disallowed = getDisallowedFields();</span>
+<span class="fc bfc" id="L786" title="All 4 branches covered.">		return ((ObjectUtils.isEmpty(allowed) || PatternMatchUtils.simpleMatch(allowed, field)) &amp;&amp;</span>
+<span class="fc bfc" id="L787" title="All 4 branches covered.">				(ObjectUtils.isEmpty(disallowed) || !PatternMatchUtils.simpleMatch(disallowed, field)));</span>
+	}
+
+	/**
+	 * Check the given property values against the required fields,
+	 * generating missing field errors where appropriate.
+	 * @param mpvs the property values to be bound (can be modified)
+	 * @see #getRequiredFields
+	 * @see #getBindingErrorProcessor
+	 * @see BindingErrorProcessor#processMissingFieldError
+	 */
+	protected void checkRequiredFields(MutablePropertyValues mpvs) {
+<span class="fc" id="L799">		String[] requiredFields = getRequiredFields();</span>
+<span class="fc bfc" id="L800" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(requiredFields)) {</span>
+<span class="fc" id="L801">			Map&lt;String, PropertyValue&gt; propertyValues = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L802">			PropertyValue[] pvs = mpvs.getPropertyValues();</span>
+<span class="fc bfc" id="L803" title="All 2 branches covered.">			for (PropertyValue pv : pvs) {</span>
+<span class="fc" id="L804">				String canonicalName = PropertyAccessorUtils.canonicalPropertyName(pv.getName());</span>
+<span class="fc" id="L805">				propertyValues.put(canonicalName, pv);</span>
+			}
+<span class="fc bfc" id="L807" title="All 2 branches covered.">			for (String field : requiredFields) {</span>
+<span class="fc" id="L808">				PropertyValue pv = propertyValues.get(field);</span>
+<span class="fc bfc" id="L809" title="All 4 branches covered.">				boolean empty = (pv == null || pv.getValue() == null);</span>
+<span class="fc bfc" id="L810" title="All 2 branches covered.">				if (!empty) {</span>
+<span class="pc bpc" id="L811" title="1 of 2 branches missed.">					if (pv.getValue() instanceof String) {</span>
+<span class="fc bfc" id="L812" title="All 2 branches covered.">						empty = !StringUtils.hasText((String) pv.getValue());</span>
+					}
+<span class="nc bnc" id="L814" title="All 2 branches missed.">					else if (pv.getValue() instanceof String[]) {</span>
+<span class="nc" id="L815">						String[] values = (String[]) pv.getValue();</span>
+<span class="nc bnc" id="L816" title="All 4 branches missed.">						empty = (values.length == 0 || !StringUtils.hasText(values[0]));</span>
+					}
+				}
+<span class="fc bfc" id="L819" title="All 2 branches covered.">				if (empty) {</span>
+					// Use bind error processor to create FieldError.
+<span class="fc" id="L821">					getBindingErrorProcessor().processMissingFieldError(field, getInternalBindingResult());</span>
+					// Remove property from property values to bind:
+					// It has already caused a field error with a rejected value.
+<span class="fc bfc" id="L824" title="All 2 branches covered.">					if (pv != null) {</span>
+<span class="fc" id="L825">						mpvs.removePropertyValue(pv);</span>
+<span class="fc" id="L826">						propertyValues.remove(field);</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L831">	}</span>
+
+	/**
+	 * Apply given property values to the target object.
+	 * &lt;p&gt;Default implementation applies all of the supplied property
+	 * values as bean property values. By default, unknown fields will
+	 * be ignored.
+	 * @param mpvs the property values to be bound (can be modified)
+	 * @see #getTarget
+	 * @see #getPropertyAccessor
+	 * @see #isIgnoreUnknownFields
+	 * @see #getBindingErrorProcessor
+	 * @see BindingErrorProcessor#processPropertyAccessException
+	 */
+	protected void applyPropertyValues(MutablePropertyValues mpvs) {
+		try {
+			// Bind request parameters onto target object.
+<span class="fc" id="L848">			getPropertyAccessor().setPropertyValues(mpvs, isIgnoreUnknownFields(), isIgnoreInvalidFields());</span>
+		}
+<span class="fc" id="L850">		catch (PropertyBatchUpdateException ex) {</span>
+			// Use bind error processor to create FieldErrors.
+<span class="fc bfc" id="L852" title="All 2 branches covered.">			for (PropertyAccessException pae : ex.getPropertyAccessExceptions()) {</span>
+<span class="fc" id="L853">				getBindingErrorProcessor().processPropertyAccessException(pae, getInternalBindingResult());</span>
+			}
+<span class="fc" id="L855">		}</span>
+<span class="fc" id="L856">	}</span>
+
+
+	/**
+	 * Invoke the specified Validators, if any.
+	 * @see #setValidator(Validator)
+	 * @see #getBindingResult()
+	 */
+	public void validate() {
+<span class="nc" id="L865">		Object target = getTarget();</span>
+<span class="nc bnc" id="L866" title="All 2 branches missed.">		Assert.state(target != null, &quot;No target to validate&quot;);</span>
+<span class="nc" id="L867">		BindingResult bindingResult = getBindingResult();</span>
+		// Call each validator with the same binding result
+<span class="nc bnc" id="L869" title="All 2 branches missed.">		for (Validator validator : getValidators()) {</span>
+<span class="nc" id="L870">			validator.validate(target, bindingResult);</span>
+<span class="nc" id="L871">		}</span>
+<span class="nc" id="L872">	}</span>
+
+	/**
+	 * Invoke the specified Validators, if any, with the given validation hints.
+	 * &lt;p&gt;Note: Validation hints may get ignored by the actual target Validator.
+	 * @param validationHints one or more hint objects to be passed to a {@link SmartValidator}
+	 * @since 3.1
+	 * @see #setValidator(Validator)
+	 * @see SmartValidator#validate(Object, Errors, Object...)
+	 */
+	public void validate(Object... validationHints) {
+<span class="nc" id="L883">		Object target = getTarget();</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">		Assert.state(target != null, &quot;No target to validate&quot;);</span>
+<span class="nc" id="L885">		BindingResult bindingResult = getBindingResult();</span>
+		// Call each validator with the same binding result
+<span class="nc bnc" id="L887" title="All 2 branches missed.">		for (Validator validator : getValidators()) {</span>
+<span class="nc bnc" id="L888" title="All 4 branches missed.">			if (!ObjectUtils.isEmpty(validationHints) &amp;&amp; validator instanceof SmartValidator) {</span>
+<span class="nc" id="L889">				((SmartValidator) validator).validate(target, bindingResult, validationHints);</span>
+			}
+<span class="nc bnc" id="L891" title="All 2 branches missed.">			else if (validator != null) {</span>
+<span class="nc" id="L892">				validator.validate(target, bindingResult);</span>
+			}
+<span class="nc" id="L894">		}</span>
+<span class="nc" id="L895">	}</span>
+
+	/**
+	 * Close this DataBinder, which may result in throwing
+	 * a BindException if it encountered any errors.
+	 * @return the model Map, containing target object and Errors instance
+	 * @throws BindException if there were any errors in the bind operation
+	 * @see BindingResult#getModel()
+	 */
+	public Map&lt;?, ?&gt; close() throws BindException {
+<span class="fc bfc" id="L905" title="All 2 branches covered.">		if (getBindingResult().hasErrors()) {</span>
+<span class="fc" id="L906">			throw new BindException(getBindingResult());</span>
+		}
+<span class="fc" id="L908">		return getBindingResult().getModel();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

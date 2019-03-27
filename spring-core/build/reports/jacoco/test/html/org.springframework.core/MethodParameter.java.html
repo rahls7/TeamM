@@ -1,0 +1,835 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MethodParameter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core</a> &gt; <span class="el_source">MethodParameter.java</span></div><h1>MethodParameter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import kotlin.reflect.KFunction;
+import kotlin.reflect.KParameter;
+import kotlin.reflect.jvm.ReflectJvmMapping;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Helper class that encapsulates the specification of a method parameter, i.e. a {@link Method}
+ * or {@link Constructor} plus a parameter index and a nested type index for a declared generic
+ * type. Useful as a specification object to pass along.
+ *
+ * &lt;p&gt;As of 4.2, there is a {@link org.springframework.core.annotation.SynthesizingMethodParameter}
+ * subclass available which synthesizes annotations with attribute aliases. That subclass is used
+ * for web and message endpoint processing, in particular.
+ *
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Andy Clement
+ * @author Sam Brannen
+ * @author Sebastien Deleuze
+ * @since 2.0
+ * @see org.springframework.core.annotation.SynthesizingMethodParameter
+ */
+public class MethodParameter {
+
+<span class="fc" id="L62">	private static final Annotation[] EMPTY_ANNOTATION_ARRAY = new Annotation[0];</span>
+
+	private final Executable executable;
+
+	private final int parameterIndex;
+
+	@Nullable
+	private volatile Parameter parameter;
+
+<span class="fc" id="L71">	private int nestingLevel = 1;</span>
+
+	/** Map from Integer level to Integer type index. */
+	@Nullable
+	Map&lt;Integer, Integer&gt; typeIndexesPerLevel;
+
+	@Nullable
+	private volatile Class&lt;?&gt; containingClass;
+
+	@Nullable
+	private volatile Class&lt;?&gt; parameterType;
+
+	@Nullable
+	private volatile Type genericParameterType;
+
+	@Nullable
+	private volatile Annotation[] parameterAnnotations;
+
+	@Nullable
+	private volatile ParameterNameDiscoverer parameterNameDiscoverer;
+
+	@Nullable
+	private volatile String parameterName;
+
+	@Nullable
+	private volatile MethodParameter nestedMethodParameter;
+
+
+	/**
+	 * Create a new {@code MethodParameter} for the given method, with nesting level 1.
+	 * @param method the Method to specify a parameter for
+	 * @param parameterIndex the index of the parameter: -1 for the method
+	 * return type; 0 for the first method parameter; 1 for the second method
+	 * parameter, etc.
+	 */
+	public MethodParameter(Method method, int parameterIndex) {
+<span class="fc" id="L107">		this(method, parameterIndex, 1);</span>
+<span class="fc" id="L108">	}</span>
+
+	/**
+	 * Create a new {@code MethodParameter} for the given method.
+	 * @param method the Method to specify a parameter for
+	 * @param parameterIndex the index of the parameter: -1 for the method
+	 * return type; 0 for the first method parameter; 1 for the second method
+	 * parameter, etc.
+	 * @param nestingLevel the nesting level of the target type
+	 * (typically 1; e.g. in case of a List of Lists, 1 would indicate the
+	 * nested List, whereas 2 would indicate the element of the nested List)
+	 */
+<span class="fc" id="L120">	public MethodParameter(Method method, int parameterIndex, int nestingLevel) {</span>
+<span class="fc" id="L121">		Assert.notNull(method, &quot;Method must not be null&quot;);</span>
+<span class="fc" id="L122">		this.executable = method;</span>
+<span class="fc" id="L123">		this.parameterIndex = validateIndex(method, parameterIndex);</span>
+<span class="fc" id="L124">		this.nestingLevel = nestingLevel;</span>
+<span class="fc" id="L125">	}</span>
+
+	/**
+	 * Create a new MethodParameter for the given constructor, with nesting level 1.
+	 * @param constructor the Constructor to specify a parameter for
+	 * @param parameterIndex the index of the parameter
+	 */
+	public MethodParameter(Constructor&lt;?&gt; constructor, int parameterIndex) {
+<span class="fc" id="L133">		this(constructor, parameterIndex, 1);</span>
+<span class="fc" id="L134">	}</span>
+
+	/**
+	 * Create a new MethodParameter for the given constructor.
+	 * @param constructor the Constructor to specify a parameter for
+	 * @param parameterIndex the index of the parameter
+	 * @param nestingLevel the nesting level of the target type
+	 * (typically 1; e.g. in case of a List of Lists, 1 would indicate the
+	 * nested List, whereas 2 would indicate the element of the nested List)
+	 */
+<span class="fc" id="L144">	public MethodParameter(Constructor&lt;?&gt; constructor, int parameterIndex, int nestingLevel) {</span>
+<span class="fc" id="L145">		Assert.notNull(constructor, &quot;Constructor must not be null&quot;);</span>
+<span class="fc" id="L146">		this.executable = constructor;</span>
+<span class="fc" id="L147">		this.parameterIndex = validateIndex(constructor, parameterIndex);</span>
+<span class="fc" id="L148">		this.nestingLevel = nestingLevel;</span>
+<span class="fc" id="L149">	}</span>
+
+	/**
+	 * Copy constructor, resulting in an independent MethodParameter object
+	 * based on the same metadata and cache state that the original object was in.
+	 * @param original the original MethodParameter object to copy from
+	 */
+<span class="fc" id="L156">	public MethodParameter(MethodParameter original) {</span>
+<span class="fc" id="L157">		Assert.notNull(original, &quot;Original must not be null&quot;);</span>
+<span class="fc" id="L158">		this.executable = original.executable;</span>
+<span class="fc" id="L159">		this.parameterIndex = original.parameterIndex;</span>
+<span class="fc" id="L160">		this.parameter = original.parameter;</span>
+<span class="fc" id="L161">		this.nestingLevel = original.nestingLevel;</span>
+<span class="fc" id="L162">		this.typeIndexesPerLevel = original.typeIndexesPerLevel;</span>
+<span class="fc" id="L163">		this.containingClass = original.containingClass;</span>
+<span class="fc" id="L164">		this.parameterType = original.parameterType;</span>
+<span class="fc" id="L165">		this.genericParameterType = original.genericParameterType;</span>
+<span class="fc" id="L166">		this.parameterAnnotations = original.parameterAnnotations;</span>
+<span class="fc" id="L167">		this.parameterNameDiscoverer = original.parameterNameDiscoverer;</span>
+<span class="fc" id="L168">		this.parameterName = original.parameterName;</span>
+<span class="fc" id="L169">	}</span>
+
+
+	/**
+	 * Return the wrapped Method, if any.
+	 * &lt;p&gt;Note: Either Method or Constructor is available.
+	 * @return the Method, or {@code null} if none
+	 */
+	@Nullable
+	public Method getMethod() {
+<span class="fc bfc" id="L179" title="All 2 branches covered.">		return (this.executable instanceof Method ? (Method) this.executable : null);</span>
+	}
+
+	/**
+	 * Return the wrapped Constructor, if any.
+	 * &lt;p&gt;Note: Either Method or Constructor is available.
+	 * @return the Constructor, or {@code null} if none
+	 */
+	@Nullable
+	public Constructor&lt;?&gt; getConstructor() {
+<span class="fc bfc" id="L189" title="All 2 branches covered.">		return (this.executable instanceof Constructor ? (Constructor&lt;?&gt;) this.executable : null);</span>
+	}
+
+	/**
+	 * Return the class that declares the underlying Method or Constructor.
+	 */
+	public Class&lt;?&gt; getDeclaringClass() {
+<span class="fc" id="L196">		return this.executable.getDeclaringClass();</span>
+	}
+
+	/**
+	 * Return the wrapped member.
+	 * @return the Method or Constructor as Member
+	 */
+	public Member getMember() {
+<span class="nc" id="L204">		return this.executable;</span>
+	}
+
+	/**
+	 * Return the wrapped annotated element.
+	 * &lt;p&gt;Note: This method exposes the annotations declared on the method/constructor
+	 * itself (i.e. at the method/constructor level, not at the parameter level).
+	 * @return the Method or Constructor as AnnotatedElement
+	 */
+	public AnnotatedElement getAnnotatedElement() {
+<span class="fc" id="L214">		return this.executable;</span>
+	}
+
+	/**
+	 * Return the wrapped executable.
+	 * @return the Method or Constructor as Executable
+	 * @since 5.0
+	 */
+	public Executable getExecutable() {
+<span class="fc" id="L223">		return this.executable;</span>
+	}
+
+	/**
+	 * Return the {@link Parameter} descriptor for method/constructor parameter.
+	 * @since 5.0
+	 */
+	public Parameter getParameter() {
+<span class="nc bnc" id="L231" title="All 2 branches missed.">		if (this.parameterIndex &lt; 0) {</span>
+<span class="nc" id="L232">			throw new IllegalStateException(&quot;Cannot retrieve Parameter descriptor for method return type&quot;);</span>
+		}
+<span class="nc" id="L234">		Parameter parameter = this.parameter;</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">		if (parameter == null) {</span>
+<span class="nc" id="L236">			parameter = getExecutable().getParameters()[this.parameterIndex];</span>
+<span class="nc" id="L237">			this.parameter = parameter;</span>
+		}
+<span class="nc" id="L239">		return parameter;</span>
+	}
+
+	/**
+	 * Return the index of the method/constructor parameter.
+	 * @return the parameter index (-1 in case of the return type)
+	 */
+	public int getParameterIndex() {
+<span class="fc" id="L247">		return this.parameterIndex;</span>
+	}
+
+	/**
+	 * Increase this parameter's nesting level.
+	 * @see #getNestingLevel()
+	 */
+	public void increaseNestingLevel() {
+<span class="fc" id="L255">		this.nestingLevel++;</span>
+<span class="fc" id="L256">	}</span>
+
+	/**
+	 * Decrease this parameter's nesting level.
+	 * @see #getNestingLevel()
+	 */
+	public void decreaseNestingLevel() {
+<span class="nc" id="L263">		getTypeIndexesPerLevel().remove(this.nestingLevel);</span>
+<span class="nc" id="L264">		this.nestingLevel--;</span>
+<span class="nc" id="L265">	}</span>
+
+	/**
+	 * Return the nesting level of the target type
+	 * (typically 1; e.g. in case of a List of Lists, 1 would indicate the
+	 * nested List, whereas 2 would indicate the element of the nested List).
+	 */
+	public int getNestingLevel() {
+<span class="fc" id="L273">		return this.nestingLevel;</span>
+	}
+
+	/**
+	 * Set the type index for the current nesting level.
+	 * @param typeIndex the corresponding type index
+	 * (or {@code null} for the default type index)
+	 * @see #getNestingLevel()
+	 */
+	public void setTypeIndexForCurrentLevel(int typeIndex) {
+<span class="fc" id="L283">		getTypeIndexesPerLevel().put(this.nestingLevel, typeIndex);</span>
+<span class="fc" id="L284">	}</span>
+
+	/**
+	 * Return the type index for the current nesting level.
+	 * @return the corresponding type index, or {@code null}
+	 * if none specified (indicating the default type index)
+	 * @see #getNestingLevel()
+	 */
+	@Nullable
+	public Integer getTypeIndexForCurrentLevel() {
+<span class="nc" id="L294">		return getTypeIndexForLevel(this.nestingLevel);</span>
+	}
+
+	/**
+	 * Return the type index for the specified nesting level.
+	 * @param nestingLevel the nesting level to check
+	 * @return the corresponding type index, or {@code null}
+	 * if none specified (indicating the default type index)
+	 */
+	@Nullable
+	public Integer getTypeIndexForLevel(int nestingLevel) {
+<span class="fc" id="L305">		return getTypeIndexesPerLevel().get(nestingLevel);</span>
+	}
+
+	/**
+	 * Obtain the (lazily constructed) type-indexes-per-level Map.
+	 */
+	private Map&lt;Integer, Integer&gt; getTypeIndexesPerLevel() {
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">		if (this.typeIndexesPerLevel == null) {</span>
+<span class="fc" id="L313">			this.typeIndexesPerLevel = new HashMap&lt;&gt;(4);</span>
+		}
+<span class="fc" id="L315">		return this.typeIndexesPerLevel;</span>
+	}
+
+	/**
+	 * Return a variant of this {@code MethodParameter} which points to the
+	 * same parameter but one nesting level deeper. This is effectively the
+	 * same as {@link #increaseNestingLevel()}, just with an independent
+	 * {@code MethodParameter} object (e.g. in case of the original being cached).
+	 * @since 4.3
+	 */
+	public MethodParameter nested() {
+<span class="fc" id="L326">		MethodParameter nestedParam = this.nestedMethodParameter;</span>
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">		if (nestedParam != null) {</span>
+<span class="nc" id="L328">			return nestedParam;</span>
+		}
+<span class="fc" id="L330">		nestedParam = clone();</span>
+<span class="fc" id="L331">		nestedParam.nestingLevel = this.nestingLevel + 1;</span>
+<span class="fc" id="L332">		this.nestedMethodParameter = nestedParam;</span>
+<span class="fc" id="L333">		return nestedParam;</span>
+	}
+
+	/**
+	 * Return whether this method indicates a parameter which is not required:
+	 * either in the form of Java 8's {@link java.util.Optional}, any variant
+	 * of a parameter-level {@code Nullable} annotation (such as from JSR-305
+	 * or the FindBugs set of annotations), or a language-level nullable type
+	 * declaration in Kotlin.
+	 * @since 4.3
+	 */
+	public boolean isOptional() {
+<span class="pc bpc" id="L345" title="2 of 4 branches missed.">		return (getParameterType() == Optional.class || hasNullableAnnotation() ||</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">				(KotlinDetector.isKotlinReflectPresent() &amp;&amp;</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">						KotlinDetector.isKotlinType(getContainingClass()) &amp;&amp;</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">						KotlinDelegate.isOptional(this)));</span>
+	}
+
+	/**
+	 * Check whether this method parameter is annotated with any variant of a
+	 * {@code Nullable} annotation, e.g. {@code javax.annotation.Nullable} or
+	 * {@code edu.umd.cs.findbugs.annotations.Nullable}.
+	 */
+	private boolean hasNullableAnnotation() {
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">		for (Annotation ann : getParameterAnnotations()) {</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">			if (&quot;Nullable&quot;.equals(ann.annotationType().getSimpleName())) {</span>
+<span class="nc" id="L359">				return true;</span>
+			}
+		}
+<span class="fc" id="L362">		return false;</span>
+	}
+
+	/**
+	 * Return a variant of this {@code MethodParameter} which points to
+	 * the same parameter but one nesting level deeper in case of a
+	 * {@link java.util.Optional} declaration.
+	 * @since 4.3
+	 * @see #isOptional()
+	 * @see #nested()
+	 */
+	public MethodParameter nestedIfOptional() {
+<span class="nc bnc" id="L374" title="All 2 branches missed.">		return (getParameterType() == Optional.class ? nested() : this);</span>
+	}
+
+	/**
+	 * Set a containing class to resolve the parameter type against.
+	 */
+	void setContainingClass(Class&lt;?&gt; containingClass) {
+<span class="fc" id="L381">		this.containingClass = containingClass;</span>
+<span class="fc" id="L382">	}</span>
+
+	public Class&lt;?&gt; getContainingClass() {
+<span class="fc" id="L385">		Class&lt;?&gt; containingClass = this.containingClass;</span>
+<span class="fc bfc" id="L386" title="All 2 branches covered.">		return (containingClass != null ? containingClass : getDeclaringClass());</span>
+	}
+
+	/**
+	 * Set a resolved (generic) parameter type.
+	 */
+	void setParameterType(@Nullable Class&lt;?&gt; parameterType) {
+<span class="fc" id="L393">		this.parameterType = parameterType;</span>
+<span class="fc" id="L394">	}</span>
+
+	/**
+	 * Return the type of the method/constructor parameter.
+	 * @return the parameter type (never {@code null})
+	 */
+	public Class&lt;?&gt; getParameterType() {
+<span class="fc" id="L401">		Class&lt;?&gt; paramType = this.parameterType;</span>
+<span class="fc bfc" id="L402" title="All 2 branches covered.">		if (paramType == null) {</span>
+<span class="fc bfc" id="L403" title="All 2 branches covered.">			if (this.parameterIndex &lt; 0) {</span>
+<span class="fc" id="L404">				Method method = getMethod();</span>
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">				paramType = (method != null ?</span>
+<span class="pc bpc" id="L406" title="1 of 4 branches missed.">						(KotlinDetector.isKotlinReflectPresent() &amp;&amp; KotlinDetector.isKotlinType(getContainingClass()) ?</span>
+<span class="pc" id="L407">						KotlinDelegate.getReturnType(method) : method.getReturnType()) : void.class);</span>
+<span class="fc" id="L408">			}</span>
+			else {
+<span class="fc" id="L410">				paramType = this.executable.getParameterTypes()[this.parameterIndex];</span>
+			}
+<span class="fc" id="L412">			this.parameterType = paramType;</span>
+		}
+<span class="fc" id="L414">		return paramType;</span>
+	}
+
+	/**
+	 * Return the generic type of the method/constructor parameter.
+	 * @return the parameter type (never {@code null})
+	 * @since 3.0
+	 */
+	public Type getGenericParameterType() {
+<span class="fc" id="L423">		Type paramType = this.genericParameterType;</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">		if (paramType == null) {</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">			if (this.parameterIndex &lt; 0) {</span>
+<span class="fc" id="L426">				Method method = getMethod();</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">				paramType = (method != null ?</span>
+<span class="pc bpc" id="L428" title="1 of 4 branches missed.">						(KotlinDetector.isKotlinReflectPresent() &amp;&amp; KotlinDetector.isKotlinType(getContainingClass()) ?</span>
+<span class="pc" id="L429">						KotlinDelegate.getGenericReturnType(method) : method.getGenericReturnType()) : void.class);</span>
+<span class="fc" id="L430">			}</span>
+			else {
+<span class="fc" id="L432">				Type[] genericParameterTypes = this.executable.getGenericParameterTypes();</span>
+<span class="fc" id="L433">				int index = this.parameterIndex;</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">				if (this.executable instanceof Constructor &amp;&amp;</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">						ClassUtils.isInnerClass(this.executable.getDeclaringClass()) &amp;&amp;</span>
+<span class="pc bpc" id="L436" title="1 of 2 branches missed.">						genericParameterTypes.length == this.executable.getParameterCount() - 1) {</span>
+					// Bug in javac: type array excludes enclosing instance parameter
+					// for inner classes with at least one generic constructor parameter,
+					// so access it with the actual parameter index lowered by 1
+<span class="fc" id="L440">					index = this.parameterIndex - 1;</span>
+				}
+<span class="pc bpc" id="L442" title="1 of 4 branches missed.">				paramType = (index &gt;= 0 &amp;&amp; index &lt; genericParameterTypes.length ?</span>
+<span class="fc" id="L443">						genericParameterTypes[index] : getParameterType());</span>
+			}
+<span class="fc" id="L445">			this.genericParameterType = paramType;</span>
+		}
+<span class="fc" id="L447">		return paramType;</span>
+	}
+
+	/**
+	 * Return the nested type of the method/constructor parameter.
+	 * @return the parameter type (never {@code null})
+	 * @since 3.1
+	 * @see #getNestingLevel()
+	 */
+	public Class&lt;?&gt; getNestedParameterType() {
+<span class="fc bfc" id="L457" title="All 2 branches covered.">		if (this.nestingLevel &gt; 1) {</span>
+<span class="fc" id="L458">			Type type = getGenericParameterType();</span>
+<span class="fc bfc" id="L459" title="All 2 branches covered.">			for (int i = 2; i &lt;= this.nestingLevel; i++) {</span>
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">				if (type instanceof ParameterizedType) {</span>
+<span class="fc" id="L461">					Type[] args = ((ParameterizedType) type).getActualTypeArguments();</span>
+<span class="fc" id="L462">					Integer index = getTypeIndexForLevel(i);</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">					type = args[index != null ? index : args.length - 1];</span>
+				}
+				// TODO: Object.class if unresolvable
+			}
+<span class="pc bpc" id="L467" title="1 of 2 branches missed.">			if (type instanceof Class) {</span>
+<span class="fc" id="L468">				return (Class&lt;?&gt;) type;</span>
+			}
+<span class="nc bnc" id="L470" title="All 2 branches missed.">			else if (type instanceof ParameterizedType) {</span>
+<span class="nc" id="L471">				Type arg = ((ParameterizedType) type).getRawType();</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">				if (arg instanceof Class) {</span>
+<span class="nc" id="L473">					return (Class&lt;?&gt;) arg;</span>
+				}
+			}
+<span class="nc" id="L476">			return Object.class;</span>
+		}
+		else {
+<span class="fc" id="L479">			return getParameterType();</span>
+		}
+	}
+
+	/**
+	 * Return the nested generic type of the method/constructor parameter.
+	 * @return the parameter type (never {@code null})
+	 * @since 4.2
+	 * @see #getNestingLevel()
+	 */
+	public Type getNestedGenericParameterType() {
+<span class="nc bnc" id="L490" title="All 2 branches missed.">		if (this.nestingLevel &gt; 1) {</span>
+<span class="nc" id="L491">			Type type = getGenericParameterType();</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">			for (int i = 2; i &lt;= this.nestingLevel; i++) {</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">				if (type instanceof ParameterizedType) {</span>
+<span class="nc" id="L494">					Type[] args = ((ParameterizedType) type).getActualTypeArguments();</span>
+<span class="nc" id="L495">					Integer index = getTypeIndexForLevel(i);</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">					type = args[index != null ? index : args.length - 1];</span>
+				}
+			}
+<span class="nc" id="L499">			return type;</span>
+		}
+		else {
+<span class="nc" id="L502">			return getGenericParameterType();</span>
+		}
+	}
+
+	/**
+	 * Return the annotations associated with the target method/constructor itself.
+	 */
+	public Annotation[] getMethodAnnotations() {
+<span class="fc" id="L510">		return adaptAnnotationArray(getAnnotatedElement().getAnnotations());</span>
+	}
+
+	/**
+	 * Return the method/constructor annotation of the given type, if available.
+	 * @param annotationType the annotation type to look for
+	 * @return the annotation object, or {@code null} if not found
+	 */
+	@Nullable
+	public &lt;A extends Annotation&gt; A getMethodAnnotation(Class&lt;A&gt; annotationType) {
+<span class="nc" id="L520">		A annotation = getAnnotatedElement().getAnnotation(annotationType);</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">		return (annotation != null ? adaptAnnotation(annotation) : null);</span>
+	}
+
+	/**
+	 * Return whether the method/constructor is annotated with the given type.
+	 * @param annotationType the annotation type to look for
+	 * @since 4.3
+	 * @see #getMethodAnnotation(Class)
+	 */
+	public &lt;A extends Annotation&gt; boolean hasMethodAnnotation(Class&lt;A&gt; annotationType) {
+<span class="nc" id="L531">		return getAnnotatedElement().isAnnotationPresent(annotationType);</span>
+	}
+
+	/**
+	 * Return the annotations associated with the specific method/constructor parameter.
+	 */
+	public Annotation[] getParameterAnnotations() {
+<span class="fc" id="L538">		Annotation[] paramAnns = this.parameterAnnotations;</span>
+<span class="fc bfc" id="L539" title="All 2 branches covered.">		if (paramAnns == null) {</span>
+<span class="fc" id="L540">			Annotation[][] annotationArray = this.executable.getParameterAnnotations();</span>
+<span class="fc" id="L541">			int index = this.parameterIndex;</span>
+<span class="fc bfc" id="L542" title="All 2 branches covered.">			if (this.executable instanceof Constructor &amp;&amp;</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">					ClassUtils.isInnerClass(this.executable.getDeclaringClass()) &amp;&amp;</span>
+<span class="fc bfc" id="L544" title="All 2 branches covered.">					annotationArray.length == this.executable.getParameterCount() - 1) {</span>
+				// Bug in javac in JDK &lt;9: annotation array excludes enclosing instance parameter
+				// for inner classes, so access it with the actual parameter index lowered by 1
+<span class="fc" id="L547">				index = this.parameterIndex - 1;</span>
+			}
+<span class="pc bpc" id="L549" title="1 of 4 branches missed.">			paramAnns = (index &gt;= 0 &amp;&amp; index &lt; annotationArray.length ?</span>
+<span class="fc" id="L550">					adaptAnnotationArray(annotationArray[index]) : EMPTY_ANNOTATION_ARRAY);</span>
+<span class="fc" id="L551">			this.parameterAnnotations = paramAnns;</span>
+		}
+<span class="fc" id="L553">		return paramAnns;</span>
+	}
+
+	/**
+	 * Return {@code true} if the parameter has at least one annotation,
+	 * {@code false} if it has none.
+	 * @see #getParameterAnnotations()
+	 */
+	public boolean hasParameterAnnotations() {
+<span class="nc bnc" id="L562" title="All 2 branches missed.">		return (getParameterAnnotations().length != 0);</span>
+	}
+
+	/**
+	 * Return the parameter annotation of the given type, if available.
+	 * @param annotationType the annotation type to look for
+	 * @return the annotation object, or {@code null} if not found
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Nullable
+	public &lt;A extends Annotation&gt; A getParameterAnnotation(Class&lt;A&gt; annotationType) {
+<span class="fc" id="L573">		Annotation[] anns = getParameterAnnotations();</span>
+<span class="pc bfc" id="L574" title="All 2 branches covered.">		for (Annotation ann : anns) {</span>
+<span class="pc bpc" id="L575" title="1 of 2 branches missed.">			if (annotationType.isInstance(ann)) {</span>
+<span class="fc" id="L576">				return (A) ann;</span>
+			}
+		}
+<span class="fc" id="L579">		return null;</span>
+	}
+
+	/**
+	 * Return whether the parameter is declared with the given annotation type.
+	 * @param annotationType the annotation type to look for
+	 * @see #getParameterAnnotation(Class)
+	 */
+	public &lt;A extends Annotation&gt; boolean hasParameterAnnotation(Class&lt;A&gt; annotationType) {
+<span class="nc bnc" id="L588" title="All 2 branches missed.">		return (getParameterAnnotation(annotationType) != null);</span>
+	}
+
+	/**
+	 * Initialize parameter name discovery for this method parameter.
+	 * &lt;p&gt;This method does not actually try to retrieve the parameter name at
+	 * this point; it just allows discovery to happen when the application calls
+	 * {@link #getParameterName()} (if ever).
+	 */
+	public void initParameterNameDiscovery(@Nullable ParameterNameDiscoverer parameterNameDiscoverer) {
+<span class="nc" id="L598">		this.parameterNameDiscoverer = parameterNameDiscoverer;</span>
+<span class="nc" id="L599">	}</span>
+
+	/**
+	 * Return the name of the method/constructor parameter.
+	 * @return the parameter name (may be {@code null} if no
+	 * parameter name metadata is contained in the class file or no
+	 * {@link #initParameterNameDiscovery ParameterNameDiscoverer}
+	 * has been set to begin with)
+	 */
+	@Nullable
+	public String getParameterName() {
+<span class="nc bnc" id="L610" title="All 2 branches missed.">		if (this.parameterIndex &lt; 0) {</span>
+<span class="nc" id="L611">			return null;</span>
+		}
+<span class="nc" id="L613">		ParameterNameDiscoverer discoverer = this.parameterNameDiscoverer;</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">		if (discoverer != null) {</span>
+<span class="nc" id="L615">			String[] parameterNames = null;</span>
+<span class="nc bnc" id="L616" title="All 2 branches missed.">			if (this.executable instanceof Method) {</span>
+<span class="nc" id="L617">				parameterNames = discoverer.getParameterNames((Method) this.executable);</span>
+			}
+<span class="nc bnc" id="L619" title="All 2 branches missed.">			else if (this.executable instanceof Constructor) {</span>
+<span class="nc" id="L620">				parameterNames = discoverer.getParameterNames((Constructor&lt;?&gt;) this.executable);</span>
+			}
+<span class="nc bnc" id="L622" title="All 2 branches missed.">			if (parameterNames != null) {</span>
+<span class="nc" id="L623">				this.parameterName = parameterNames[this.parameterIndex];</span>
+			}
+<span class="nc" id="L625">			this.parameterNameDiscoverer = null;</span>
+		}
+<span class="nc" id="L627">		return this.parameterName;</span>
+	}
+
+
+	/**
+	 * A template method to post-process a given annotation instance before
+	 * returning it to the caller.
+	 * &lt;p&gt;The default implementation simply returns the given annotation as-is.
+	 * @param annotation the annotation about to be returned
+	 * @return the post-processed annotation (or simply the original one)
+	 * @since 4.2
+	 */
+	protected &lt;A extends Annotation&gt; A adaptAnnotation(A annotation) {
+<span class="nc" id="L640">		return annotation;</span>
+	}
+
+	/**
+	 * A template method to post-process a given annotation array before
+	 * returning it to the caller.
+	 * &lt;p&gt;The default implementation simply returns the given annotation array as-is.
+	 * @param annotations the annotation array about to be returned
+	 * @return the post-processed annotation array (or simply the original one)
+	 * @since 4.2
+	 */
+	protected Annotation[] adaptAnnotationArray(Annotation[] annotations) {
+<span class="fc" id="L652">		return annotations;</span>
+	}
+
+
+	@Override
+	public boolean equals(Object other) {
+<span class="fc bfc" id="L658" title="All 2 branches covered.">		if (this == other) {</span>
+<span class="fc" id="L659">			return true;</span>
+		}
+<span class="pc bpc" id="L661" title="1 of 2 branches missed.">		if (!(other instanceof MethodParameter)) {</span>
+<span class="nc" id="L662">			return false;</span>
+		}
+<span class="fc" id="L664">		MethodParameter otherParam = (MethodParameter) other;</span>
+<span class="pc bpc" id="L665" title="1 of 4 branches missed.">		return (this.parameterIndex == otherParam.parameterIndex &amp;&amp; getExecutable().equals(otherParam.getExecutable()));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="fc" id="L670">		return (getExecutable().hashCode() * 31 + this.parameterIndex);</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="nc" id="L675">		Method method = getMethod();</span>
+<span class="nc bnc" id="L676" title="All 2 branches missed.">		return (method != null ? &quot;method '&quot; + method.getName() + &quot;'&quot; : &quot;constructor&quot;) +</span>
+				&quot; parameter &quot; + this.parameterIndex;
+	}
+
+	@Override
+	public MethodParameter clone() {
+<span class="fc" id="L682">		return new MethodParameter(this);</span>
+	}
+
+
+	/**
+	 * Create a new MethodParameter for the given method or constructor.
+	 * &lt;p&gt;This is a convenience factory method for scenarios where a
+	 * Method or Constructor reference is treated in a generic fashion.
+	 * @param methodOrConstructor the Method or Constructor to specify a parameter for
+	 * @param parameterIndex the index of the parameter
+	 * @return the corresponding MethodParameter instance
+	 * @deprecated as of 5.0, in favor of {@link #forExecutable}
+	 */
+	@Deprecated
+	public static MethodParameter forMethodOrConstructor(Object methodOrConstructor, int parameterIndex) {
+<span class="pc bpc" id="L697" title="1 of 2 branches missed.">		if (!(methodOrConstructor instanceof Executable)) {</span>
+<span class="nc" id="L698">			throw new IllegalArgumentException(</span>
+					&quot;Given object [&quot; + methodOrConstructor + &quot;] is neither a Method nor a Constructor&quot;);
+		}
+<span class="fc" id="L701">		return forExecutable((Executable) methodOrConstructor, parameterIndex);</span>
+	}
+
+	/**
+	 * Create a new MethodParameter for the given method or constructor.
+	 * &lt;p&gt;This is a convenience factory method for scenarios where a
+	 * Method or Constructor reference is treated in a generic fashion.
+	 * @param executable the Method or Constructor to specify a parameter for
+	 * @param parameterIndex the index of the parameter
+	 * @return the corresponding MethodParameter instance
+	 * @since 5.0
+	 */
+	public static MethodParameter forExecutable(Executable executable, int parameterIndex) {
+<span class="fc bfc" id="L714" title="All 2 branches covered.">		if (executable instanceof Method) {</span>
+<span class="fc" id="L715">			return new MethodParameter((Method) executable, parameterIndex);</span>
+		}
+<span class="pc bpc" id="L717" title="1 of 2 branches missed.">		else if (executable instanceof Constructor) {</span>
+<span class="fc" id="L718">			return new MethodParameter((Constructor&lt;?&gt;) executable, parameterIndex);</span>
+		}
+		else {
+<span class="nc" id="L721">			throw new IllegalArgumentException(&quot;Not a Method/Constructor: &quot; + executable);</span>
+		}
+	}
+
+	/**
+	 * Create a new MethodParameter for the given parameter descriptor.
+	 * &lt;p&gt;This is a convenience factory method for scenarios where a
+	 * Java 8 {@link Parameter} descriptor is already available.
+	 * @param parameter the parameter descriptor
+	 * @return the corresponding MethodParameter instance
+	 * @since 5.0
+	 */
+	public static MethodParameter forParameter(Parameter parameter) {
+<span class="fc" id="L734">		return forExecutable(parameter.getDeclaringExecutable(), findParameterIndex(parameter));</span>
+	}
+
+	protected static int findParameterIndex(Parameter parameter) {
+<span class="fc" id="L738">		Executable executable = parameter.getDeclaringExecutable();</span>
+<span class="fc" id="L739">		Parameter[] allParams = executable.getParameters();</span>
+		// Try first with identity checks for greater performance.
+<span class="pc bpc" id="L741" title="1 of 2 branches missed.">		for (int i = 0; i &lt; allParams.length; i++) {</span>
+<span class="fc bfc" id="L742" title="All 2 branches covered.">			if (parameter == allParams[i]) {</span>
+<span class="fc" id="L743">				return i;</span>
+			}
+		}
+		// Potentially try again with object equality checks in order to avoid race
+		// conditions while invoking java.lang.reflect.Executable.getParameters().
+<span class="nc bnc" id="L748" title="All 2 branches missed.">		for (int i = 0; i &lt; allParams.length; i++) {</span>
+<span class="nc bnc" id="L749" title="All 2 branches missed.">			if (parameter.equals(allParams[i])) {</span>
+<span class="nc" id="L750">				return i;</span>
+			}
+		}
+<span class="nc" id="L753">		throw new IllegalArgumentException(&quot;Given parameter [&quot; + parameter +</span>
+				&quot;] does not match any parameter in the declaring executable&quot;);
+	}
+
+	private static int validateIndex(Executable executable, int parameterIndex) {
+<span class="fc" id="L758">		int count = executable.getParameterCount();</span>
+<span class="pc bpc" id="L759" title="1 of 4 branches missed.">		Assert.isTrue(parameterIndex &gt;= -1 &amp;&amp; parameterIndex &lt; count,</span>
+<span class="fc" id="L760">				() -&gt; &quot;Parameter index needs to be between -1 and &quot; + (count - 1));</span>
+<span class="fc" id="L761">		return parameterIndex;</span>
+	}
+
+
+	/**
+	 * Inner class to avoid a hard dependency on Kotlin at runtime.
+	 */
+	private static class KotlinDelegate {
+
+		/**
+		 * Check whether the specified {@link MethodParameter} represents a nullable Kotlin type
+		 * or an optional parameter (with a default value in the Kotlin declaration).
+		 */
+		public static boolean isOptional(MethodParameter param) {
+<span class="fc" id="L775">			Method method = param.getMethod();</span>
+<span class="fc" id="L776">			Constructor&lt;?&gt; ctor = param.getConstructor();</span>
+<span class="fc" id="L777">			int index = param.getParameterIndex();</span>
+<span class="fc bfc" id="L778" title="All 4 branches covered.">			if (method != null &amp;&amp; index == -1) {</span>
+<span class="fc" id="L779">				KFunction&lt;?&gt; function = ReflectJvmMapping.getKotlinFunction(method);</span>
+<span class="pc bpc" id="L780" title="1 of 4 branches missed.">				return (function != null &amp;&amp; function.getReturnType().isMarkedNullable());</span>
+			}
+			else {
+<span class="fc" id="L783">				KFunction&lt;?&gt; function = null;</span>
+<span class="fc" id="L784">				Predicate&lt;KParameter&gt; predicate = null;</span>
+<span class="fc bfc" id="L785" title="All 2 branches covered.">				if (method != null) {</span>
+<span class="fc" id="L786">					function = ReflectJvmMapping.getKotlinFunction(method);</span>
+<span class="fc" id="L787">					predicate = p -&gt; KParameter.Kind.VALUE.equals(p.getKind());</span>
+				}
+<span class="pc bpc" id="L789" title="1 of 2 branches missed.">				else if (ctor != null) {</span>
+<span class="fc" id="L790">					function = ReflectJvmMapping.getKotlinFunction(ctor);</span>
+<span class="fc bfc" id="L791" title="All 2 branches covered.">					predicate = p -&gt; KParameter.Kind.VALUE.equals(p.getKind()) ||</span>
+<span class="pc bpc" id="L792" title="1 of 2 branches missed.">							KParameter.Kind.INSTANCE.equals(p.getKind());</span>
+				}
+<span class="pc bpc" id="L794" title="1 of 2 branches missed.">				if (function != null) {</span>
+<span class="fc" id="L795">					List&lt;KParameter&gt; parameters = function.getParameters();</span>
+<span class="fc" id="L796">					KParameter parameter = parameters</span>
+<span class="fc" id="L797">							.stream()</span>
+<span class="fc" id="L798">							.filter(predicate)</span>
+<span class="fc" id="L799">							.collect(Collectors.toList())</span>
+<span class="fc" id="L800">							.get(index);</span>
+<span class="pc bpc" id="L801" title="1 of 4 branches missed.">					return (parameter.getType().isMarkedNullable() || parameter.isOptional());</span>
+				}
+			}
+<span class="nc" id="L804">			return false;</span>
+		}
+
+		/**
+		 * Return the generic return type of the method, with support of suspending
+		 * functions via Kotlin reflection.
+		 */
+		static private Type getGenericReturnType(Method method) {
+<span class="fc" id="L812">			KFunction&lt;?&gt; function = ReflectJvmMapping.getKotlinFunction(method);</span>
+<span class="pc bpc" id="L813" title="2 of 4 branches missed.">			if (function != null &amp;&amp; function.isSuspend()) {</span>
+<span class="fc" id="L814">				return ReflectJvmMapping.getJavaType(function.getReturnType());</span>
+			}
+<span class="nc" id="L816">			return method.getGenericReturnType();</span>
+		}
+
+		/**
+		 * Return the return type of the method, with support of suspending
+		 * functions via Kotlin reflection.
+		 */
+		static private Class&lt;?&gt; getReturnType(Method method) {
+<span class="fc" id="L824">			KFunction&lt;?&gt; function = ReflectJvmMapping.getKotlinFunction(method);</span>
+<span class="pc bpc" id="L825" title="1 of 4 branches missed.">			if (function != null &amp;&amp; function.isSuspend()) {</span>
+<span class="fc" id="L826">				Type paramType = ReflectJvmMapping.getJavaType(function.getReturnType());</span>
+<span class="fc" id="L827">				Class&lt;?&gt; paramClass = ResolvableType.forType(paramType).resolve();</span>
+<span class="fc" id="L828">				Assert.notNull(paramClass, &quot;Type &quot; + paramType + &quot;can't be resolved to a class&quot;);</span>
+<span class="fc" id="L829">				return paramClass;</span>
+			}
+<span class="fc" id="L831">			return method.getReturnType();</span>
+		}
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

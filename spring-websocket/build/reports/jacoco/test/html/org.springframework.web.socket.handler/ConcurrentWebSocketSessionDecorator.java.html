@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConcurrentWebSocketSessionDecorator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-websocket</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.handler</a> &gt; <span class="el_source">ConcurrentWebSocketSessionDecorator.java</span></div><h1>ConcurrentWebSocketSessionDecorator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.handler;
+
+import java.io.IOException;
+import java.util.Queue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.WebSocketMessage;
+import org.springframework.web.socket.WebSocketSession;
+
+/**
+ * Wrap a {@link org.springframework.web.socket.WebSocketSession WebSocketSession}
+ * to guarantee only one thread can send messages at a time.
+ *
+ * &lt;p&gt;If a send is slow, subsequent attempts to send more messages from other threads
+ * will not be able to acquire the flush lock and messages will be buffered instead.
+ * At that time, the specified buffer-size limit and send-time limit will be checked
+ * and the session will be closed if the limits are exceeded.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 4.0.3
+ */
+public class ConcurrentWebSocketSessionDecorator extends WebSocketSessionDecorator {
+
+<span class="fc" id="L48">	private static final Log logger = LogFactory.getLog(ConcurrentWebSocketSessionDecorator.class);</span>
+
+
+	private final int sendTimeLimit;
+
+	private final int bufferSizeLimit;
+
+	private final OverflowStrategy overflowStrategy;
+
+<span class="fc" id="L57">	private final Queue&lt;WebSocketMessage&lt;?&gt;&gt; buffer = new LinkedBlockingQueue&lt;&gt;();</span>
+
+<span class="fc" id="L59">	private final AtomicInteger bufferSize = new AtomicInteger();</span>
+
+	private volatile long sendStartTime;
+
+	private volatile boolean limitExceeded;
+
+	private volatile boolean closeInProgress;
+
+<span class="fc" id="L67">	private final Lock flushLock = new ReentrantLock();</span>
+
+<span class="fc" id="L69">	private final Lock closeLock = new ReentrantLock();</span>
+
+
+	/**
+	 * Basic constructor.
+	 * @param delegate the {@code WebSocketSession} to delegate to
+	 * @param sendTimeLimit the send-time limit (milliseconds)
+	 * @param bufferSizeLimit the buffer-size limit (number of bytes)
+	 */
+	public ConcurrentWebSocketSessionDecorator(WebSocketSession delegate, int sendTimeLimit, int bufferSizeLimit) {
+<span class="fc" id="L79">		this(delegate, sendTimeLimit, bufferSizeLimit, OverflowStrategy.TERMINATE);</span>
+<span class="fc" id="L80">	}</span>
+
+	/**
+	 * Constructor that also specifies the overflow strategy to use.
+	 * @param delegate the {@code WebSocketSession} to delegate to
+	 * @param sendTimeLimit the send-time limit (milliseconds)
+	 * @param bufferSizeLimit the buffer-size limit (number of bytes)
+	 * @param overflowStrategy the overflow strategy to use; by default the
+	 * session is terminated.
+	 * @since 5.1
+	 */
+	public ConcurrentWebSocketSessionDecorator(
+			WebSocketSession delegate, int sendTimeLimit, int bufferSizeLimit, OverflowStrategy overflowStrategy) {
+
+<span class="fc" id="L94">		super(delegate);</span>
+<span class="fc" id="L95">		this.sendTimeLimit = sendTimeLimit;</span>
+<span class="fc" id="L96">		this.bufferSizeLimit = bufferSizeLimit;</span>
+<span class="fc" id="L97">		this.overflowStrategy = overflowStrategy;</span>
+<span class="fc" id="L98">	}</span>
+
+
+	/**
+	 * Return the configured send-time limit (milliseconds).
+	 * @since 4.3.13
+	 */
+	public int getSendTimeLimit() {
+<span class="fc" id="L106">		return this.sendTimeLimit;</span>
+	}
+
+	/**
+	 * Return the configured buffer-size limit (number of bytes).
+	 * @since 4.3.13
+	 */
+	public int getBufferSizeLimit() {
+<span class="fc" id="L114">		return this.bufferSizeLimit;</span>
+	}
+
+	/**
+	 * Return the current buffer size (number of bytes).
+	 */
+	public int getBufferSize() {
+<span class="fc" id="L121">		return this.bufferSize.get();</span>
+	}
+
+	/**
+	 * Return the time (milliseconds) since the current send started,
+	 * or 0 if no send is currently in progress.
+	 */
+	public long getTimeSinceSendStarted() {
+<span class="fc" id="L129">		long start = this.sendStartTime;</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">		return (start &gt; 0 ? (System.currentTimeMillis() - start) : 0);</span>
+	}
+
+
+	@Override
+	public void sendMessage(WebSocketMessage&lt;?&gt; message) throws IOException {
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">		if (shouldNotSend()) {</span>
+<span class="nc" id="L137">			return;</span>
+		}
+
+<span class="fc" id="L140">		this.buffer.add(message);</span>
+<span class="fc" id="L141">		this.bufferSize.addAndGet(message.getPayloadLength());</span>
+
+		do {
+<span class="fc bfc" id="L144" title="All 2 branches covered.">			if (!tryFlushMessageBuffer()) {</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L146">					logger.trace(String.format(&quot;Another send already in progress: &quot; +</span>
+							&quot;session id '%s':, \&quot;in-progress\&quot; send time %d (ms), buffer size %d bytes&quot;,
+<span class="nc" id="L148">							getId(), getTimeSinceSendStarted(), getBufferSize()));</span>
+				}
+<span class="fc" id="L150">				checkSessionLimits();</span>
+<span class="fc" id="L151">				break;</span>
+			}
+		}
+<span class="pc bpc" id="L154" title="3 of 4 branches missed.">		while (!this.buffer.isEmpty() &amp;&amp; !shouldNotSend());</span>
+<span class="fc" id="L155">	}</span>
+
+	private boolean shouldNotSend() {
+<span class="pc bpc" id="L158" title="2 of 4 branches missed.">		return (this.limitExceeded || this.closeInProgress);</span>
+	}
+
+	private boolean tryFlushMessageBuffer() throws IOException {
+<span class="fc bfc" id="L162" title="All 2 branches covered.">		if (this.flushLock.tryLock()) {</span>
+			try {
+				while (true) {
+<span class="fc" id="L165">					WebSocketMessage&lt;?&gt; message = this.buffer.poll();</span>
+<span class="pc bpc" id="L166" title="1 of 4 branches missed.">					if (message == null || shouldNotSend()) {</span>
+<span class="nc" id="L167">						break;</span>
+					}
+<span class="fc" id="L169">					this.bufferSize.addAndGet(-message.getPayloadLength());</span>
+<span class="fc" id="L170">					this.sendStartTime = System.currentTimeMillis();</span>
+<span class="fc" id="L171">					getDelegate().sendMessage(message);</span>
+<span class="fc" id="L172">					this.sendStartTime = 0;</span>
+<span class="fc" id="L173">				}</span>
+			}
+			finally {
+<span class="fc" id="L176">				this.sendStartTime = 0;</span>
+<span class="fc" id="L177">				this.flushLock.unlock();</span>
+			}
+<span class="fc" id="L179">			return true;</span>
+		}
+<span class="fc" id="L181">		return false;</span>
+	}
+
+	private void checkSessionLimits() {
+<span class="pc bpc" id="L185" title="2 of 4 branches missed.">		if (!shouldNotSend() &amp;&amp; this.closeLock.tryLock()) {</span>
+			try {
+<span class="fc bfc" id="L187" title="All 2 branches covered.">				if (getTimeSinceSendStarted() &gt; getSendTimeLimit()) {</span>
+<span class="fc" id="L188">					String format = &quot;Send time %d (ms) for session '%s' exceeded the allowed limit %d&quot;;</span>
+<span class="fc" id="L189">					String reason = String.format(format, getTimeSinceSendStarted(), getId(), getSendTimeLimit());</span>
+<span class="nc" id="L190">					limitExceeded(reason);</span>
+<span class="nc" id="L191">				}</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">				else if (getBufferSize() &gt; getBufferSizeLimit()) {</span>
+<span class="pc bpc" id="L193" title="1 of 3 branches missed.">					switch (this.overflowStrategy) {</span>
+						case TERMINATE:
+<span class="fc" id="L195">							String format = &quot;Buffer size %d bytes for session '%s' exceeds the allowed limit %d&quot;;</span>
+<span class="fc" id="L196">							String reason = String.format(format, getBufferSize(), getId(), getBufferSizeLimit());</span>
+<span class="nc" id="L197">							limitExceeded(reason);</span>
+<span class="nc" id="L198">							break;</span>
+						case DROP:
+<span class="fc" id="L200">							int i = 0;</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">							while (getBufferSize() &gt; getBufferSizeLimit()) {</span>
+<span class="fc" id="L202">								WebSocketMessage&lt;?&gt; message = this.buffer.poll();</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">								if (message == null) {</span>
+<span class="nc" id="L204">									break;</span>
+								}
+<span class="fc" id="L206">								this.bufferSize.addAndGet(-message.getPayloadLength());</span>
+<span class="fc" id="L207">								i++;</span>
+<span class="fc" id="L208">							}</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">							if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L210">								logger.debug(&quot;Dropped &quot; + i + &quot; messages, buffer size: &quot; + getBufferSize());</span>
+							}
+							break;
+						default:
+							// Should never happen..
+<span class="nc" id="L215">							throw new IllegalStateException(&quot;Unexpected OverflowStrategy: &quot; + this.overflowStrategy);</span>
+					}
+				}
+			}
+			finally {
+<span class="fc" id="L220">				this.closeLock.unlock();</span>
+			}
+		}
+<span class="fc" id="L223">	}</span>
+
+	private void limitExceeded(String reason) {
+<span class="fc" id="L226">		this.limitExceeded = true;</span>
+<span class="fc" id="L227">		throw new SessionLimitExceededException(reason, CloseStatus.SESSION_NOT_RELIABLE);</span>
+	}
+
+	@Override
+	public void close(CloseStatus status) throws IOException {
+<span class="fc" id="L232">		this.closeLock.lock();</span>
+		try {
+<span class="fc bfc" id="L234" title="All 2 branches covered.">			if (this.closeInProgress) {</span>
+<span class="fc" id="L235">				return;</span>
+			}
+<span class="fc bfc" id="L237" title="All 2 branches covered.">			if (!CloseStatus.SESSION_NOT_RELIABLE.equals(status)) {</span>
+				try {
+<span class="fc" id="L239">					checkSessionLimits();</span>
+				}
+<span class="fc" id="L241">				catch (SessionLimitExceededException ex) {</span>
+					// Ignore
+<span class="fc" id="L243">				}</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">				if (this.limitExceeded) {</span>
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L246">						logger.debug(&quot;Changing close status &quot; + status + &quot; to SESSION_NOT_RELIABLE.&quot;);</span>
+					}
+<span class="fc" id="L248">					status = CloseStatus.SESSION_NOT_RELIABLE;</span>
+				}
+			}
+<span class="fc" id="L251">			this.closeInProgress = true;</span>
+<span class="fc" id="L252">			super.close(status);</span>
+		}
+		finally {
+<span class="fc" id="L255">			this.closeLock.unlock();</span>
+		}
+<span class="fc" id="L257">	}</span>
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L262">		return getDelegate().toString();</span>
+	}
+
+
+	/**
+	 * Enum for options of what to do when the buffer fills up.
+	 * @since 5.1
+	 */
+<span class="fc" id="L270">	public enum OverflowStrategy {</span>
+
+		/**
+		 * Throw {@link SessionLimitExceededException} that would will result
+		 * in the session being terminated.
+		 */
+<span class="fc" id="L276">		TERMINATE,</span>
+
+		/**
+		 * Drop the oldest messages from the buffer.
+		 */
+<span class="fc" id="L281">		DROP</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

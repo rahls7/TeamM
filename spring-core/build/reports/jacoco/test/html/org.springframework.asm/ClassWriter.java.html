@@ -1,0 +1,973 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ClassWriter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.asm</a> &gt; <span class="el_source">ClassWriter.java</span></div><h1>ClassWriter.java</h1><pre class="source lang-java linenums">// ASM: a very small and fast Java bytecode manipulation framework
+// Copyright (c) 2000-2011 INRIA, France Telecom
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+// 3. Neither the name of the copyright holders nor the names of its
+//    contributors may be used to endorse or promote products derived from
+//    this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+// THE POSSIBILITY OF SUCH DAMAGE.
+package org.springframework.asm;
+
+/**
+ * A {@link ClassVisitor} that generates a corresponding ClassFile structure, as defined in the Java
+ * Virtual Machine Specification (JVMS). It can be used alone, to generate a Java class &quot;from
+ * scratch&quot;, or with one or more {@link ClassReader} and adapter {@link ClassVisitor} to generate a
+ * modified class from one or more existing Java classes.
+ *
+ * @see &lt;a href=&quot;https://docs.oracle.com/javase/specs/jvms/se9/html/jvms-4.html&quot;&gt;JVMS 4&lt;/a&gt;
+ * @author Eric Bruneton
+ */
+public class ClassWriter extends ClassVisitor {
+
+  /**
+   * A flag to automatically compute the maximum stack size and the maximum number of local
+   * variables of methods. If this flag is set, then the arguments of the {@link
+   * MethodVisitor#visitMaxs} method of the {@link MethodVisitor} returned by the {@link
+   * #visitMethod} method will be ignored, and computed automatically from the signature and the
+   * bytecode of each method.
+   *
+   * &lt;p&gt;&lt;b&gt;Note:&lt;/b&gt; for classes whose version is {@link Opcodes#V1_7} of more, this option requires
+   * valid stack map frames. The maximum stack size is then computed from these frames, and from the
+   * bytecode instructions in between. If stack map frames are not present or must be recomputed,
+   * used {@link #COMPUTE_FRAMES} instead.
+   *
+   * @see #ClassWriter(int)
+   */
+  public static final int COMPUTE_MAXS = 1;
+
+  /**
+   * A flag to automatically compute the stack map frames of methods from scratch. If this flag is
+   * set, then the calls to the {@link MethodVisitor#visitFrame} method are ignored, and the stack
+   * map frames are recomputed from the methods bytecode. The arguments of the {@link
+   * MethodVisitor#visitMaxs} method are also ignored and recomputed from the bytecode. In other
+   * words, {@link #COMPUTE_FRAMES} implies {@link #COMPUTE_MAXS}.
+   *
+   * @see #ClassWriter(int)
+   */
+  public static final int COMPUTE_FRAMES = 2;
+
+  // Note: fields are ordered as in the ClassFile structure, and those related to attributes are
+  // ordered as in Section 4.7 of the JVMS.
+
+  /**
+   * The minor_version and major_version fields of the JVMS ClassFile structure. minor_version is
+   * stored in the 16 most significant bits, and major_version in the 16 least significant bits.
+   */
+  private int version;
+
+  /** The symbol table for this class (contains the constant_pool and the BootstrapMethods). */
+  private final SymbolTable symbolTable;
+
+  /**
+   * The access_flags field of the JVMS ClassFile structure. This field can contain ASM specific
+   * access flags, such as {@link Opcodes#ACC_DEPRECATED}, which are removed when generating the
+   * ClassFile structure.
+   */
+  private int accessFlags;
+
+  /** The this_class field of the JVMS ClassFile structure. */
+  private int thisClass;
+
+  /** The super_class field of the JVMS ClassFile structure. */
+  private int superClass;
+
+  /** The interface_count field of the JVMS ClassFile structure. */
+  private int interfaceCount;
+
+  /** The 'interfaces' array of the JVMS ClassFile structure. */
+  private int[] interfaces;
+
+  /**
+   * The fields of this class, stored in a linked list of {@link FieldWriter} linked via their
+   * {@link FieldWriter#fv} field. This field stores the first element of this list.
+   */
+  private FieldWriter firstField;
+
+  /**
+   * The fields of this class, stored in a linked list of {@link FieldWriter} linked via their
+   * {@link FieldWriter#fv} field. This field stores the last element of this list.
+   */
+  private FieldWriter lastField;
+
+  /**
+   * The methods of this class, stored in a linked list of {@link MethodWriter} linked via their
+   * {@link MethodWriter#mv} field. This field stores the first element of this list.
+   */
+  private MethodWriter firstMethod;
+
+  /**
+   * The methods of this class, stored in a linked list of {@link MethodWriter} linked via their
+   * {@link MethodWriter#mv} field. This field stores the last element of this list.
+   */
+  private MethodWriter lastMethod;
+
+  /** The number_of_classes field of the InnerClasses attribute, or 0. */
+  private int numberOfInnerClasses;
+
+  /** The 'classes' array of the InnerClasses attribute, or {@literal null}. */
+  private ByteVector innerClasses;
+
+  /** The class_index field of the EnclosingMethod attribute, or 0. */
+  private int enclosingClassIndex;
+
+  /** The method_index field of the EnclosingMethod attribute. */
+  private int enclosingMethodIndex;
+
+  /** The signature_index field of the Signature attribute, or 0. */
+  private int signatureIndex;
+
+  /** The source_file_index field of the SourceFile attribute, or 0. */
+  private int sourceFileIndex;
+
+  /** The debug_extension field of the SourceDebugExtension attribute, or {@literal null}. */
+  private ByteVector debugExtension;
+
+  /**
+   * The last runtime visible annotation of this class. The previous ones can be accessed with the
+   * {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeVisibleAnnotation;
+
+  /**
+   * The last runtime invisible annotation of this class. The previous ones can be accessed with the
+   * {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeInvisibleAnnotation;
+
+  /**
+   * The last runtime visible type annotation of this class. The previous ones can be accessed with
+   * the {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeVisibleTypeAnnotation;
+
+  /**
+   * The last runtime invisible type annotation of this class. The previous ones can be accessed
+   * with the {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeInvisibleTypeAnnotation;
+
+  /** The Module attribute of this class, or {@literal null}. */
+  private ModuleWriter moduleWriter;
+
+  /** The host_class_index field of the NestHost attribute, or 0. */
+  private int nestHostClassIndex;
+
+  /** The number_of_classes field of the NestMembers attribute, or 0. */
+  private int numberOfNestMemberClasses;
+
+  /** The 'classes' array of the NestMembers attribute, or {@literal null}. */
+  private ByteVector nestMemberClasses;
+
+  /**
+   * The first non standard attribute of this class. The next ones can be accessed with the {@link
+   * Attribute#nextAttribute} field. May be {@literal null}.
+   *
+   * &lt;p&gt;&lt;b&gt;WARNING&lt;/b&gt;: this list stores the attributes in the &lt;i&gt;reverse&lt;/i&gt; order of their visit.
+   * firstAttribute is actually the last attribute visited in {@link #visitAttribute}. The {@link
+   * #toByteArray} method writes the attributes in the order defined by this list, i.e. in the
+   * reverse order specified by the user.
+   */
+  private Attribute firstAttribute;
+
+  /**
+   * Indicates what must be automatically computed in {@link MethodWriter}. Must be one of {@link
+   * MethodWriter#COMPUTE_NOTHING}, {@link MethodWriter#COMPUTE_MAX_STACK_AND_LOCAL}, {@link
+   * MethodWriter#COMPUTE_INSERTED_FRAMES}, or {@link MethodWriter#COMPUTE_ALL_FRAMES}.
+   */
+  private int compute;
+
+  // -----------------------------------------------------------------------------------------------
+  // Constructor
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Constructs a new {@link ClassWriter} object.
+   *
+   * @param flags option flags that can be used to modify the default behavior of this class. Must
+   *     be zero or more of {@link #COMPUTE_MAXS} and {@link #COMPUTE_FRAMES}.
+   */
+  public ClassWriter(final int flags) {
+<span class="nc" id="L209">    this(null, flags);</span>
+<span class="nc" id="L210">  }</span>
+
+  /**
+   * Constructs a new {@link ClassWriter} object and enables optimizations for &quot;mostly add&quot; bytecode
+   * transformations. These optimizations are the following:
+   *
+   * &lt;ul&gt;
+   *   &lt;li&gt;The constant pool and bootstrap methods from the original class are copied as is in the
+   *       new class, which saves time. New constant pool entries and new bootstrap methods will be
+   *       added at the end if necessary, but unused constant pool entries or bootstrap methods
+   *       &lt;i&gt;won't be removed&lt;/i&gt;.
+   *   &lt;li&gt;Methods that are not transformed are copied as is in the new class, directly from the
+   *       original class bytecode (i.e. without emitting visit events for all the method
+   *       instructions), which saves a &lt;i&gt;lot&lt;/i&gt; of time. Untransformed methods are detected by
+   *       the fact that the {@link ClassReader} receives {@link MethodVisitor} objects that come
+   *       from a {@link ClassWriter} (and not from any other {@link ClassVisitor} instance).
+   * &lt;/ul&gt;
+   *
+   * @param classReader the {@link ClassReader} used to read the original class. It will be used to
+   *     copy the entire constant pool and bootstrap methods from the original class and also to
+   *     copy other fragments of original bytecode where applicable.
+   * @param flags option flags that can be used to modify the default behavior of this class.Must be
+   *     zero or more of {@link #COMPUTE_MAXS} and {@link #COMPUTE_FRAMES}. &lt;i&gt;These option flags do
+   *     not affect methods that are copied as is in the new class. This means that neither the
+   *     maximum stack size nor the stack frames will be computed for these methods&lt;/i&gt;.
+   */
+  public ClassWriter(final ClassReader classReader, final int flags) {
+<span class="nc" id="L237">    super(Opcodes.ASM7);</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">    symbolTable = classReader == null ? new SymbolTable(this) : new SymbolTable(this, classReader);</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">    if ((flags &amp; COMPUTE_FRAMES) != 0) {</span>
+<span class="nc" id="L240">      this.compute = MethodWriter.COMPUTE_ALL_FRAMES;</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">    } else if ((flags &amp; COMPUTE_MAXS) != 0) {</span>
+<span class="nc" id="L242">      this.compute = MethodWriter.COMPUTE_MAX_STACK_AND_LOCAL;</span>
+    } else {
+<span class="nc" id="L244">      this.compute = MethodWriter.COMPUTE_NOTHING;</span>
+    }
+<span class="nc" id="L246">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Implementation of the ClassVisitor abstract class
+  // -----------------------------------------------------------------------------------------------
+
+  @Override
+  public final void visit(
+      final int version,
+      final int access,
+      final String name,
+      final String signature,
+      final String superName,
+      final String[] interfaces) {
+<span class="nc" id="L260">    this.version = version;</span>
+<span class="nc" id="L261">    this.accessFlags = access;</span>
+<span class="nc" id="L262">    this.thisClass = symbolTable.setMajorVersionAndClassName(version &amp; 0xFFFF, name);</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">    if (signature != null) {</span>
+<span class="nc" id="L264">      this.signatureIndex = symbolTable.addConstantUtf8(signature);</span>
+    }
+<span class="nc bnc" id="L266" title="All 2 branches missed.">    this.superClass = superName == null ? 0 : symbolTable.addConstantClass(superName).index;</span>
+<span class="nc bnc" id="L267" title="All 4 branches missed.">    if (interfaces != null &amp;&amp; interfaces.length &gt; 0) {</span>
+<span class="nc" id="L268">      interfaceCount = interfaces.length;</span>
+<span class="nc" id="L269">      this.interfaces = new int[interfaceCount];</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">      for (int i = 0; i &lt; interfaceCount; ++i) {</span>
+<span class="nc" id="L271">        this.interfaces[i] = symbolTable.addConstantClass(interfaces[i]).index;</span>
+      }
+    }
+<span class="nc bnc" id="L274" title="All 4 branches missed.">    if (compute == MethodWriter.COMPUTE_MAX_STACK_AND_LOCAL &amp;&amp; (version &amp; 0xFFFF) &gt;= Opcodes.V1_7) {</span>
+<span class="nc" id="L275">      compute = MethodWriter.COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES;</span>
+    }
+<span class="nc" id="L277">  }</span>
+
+  @Override
+  public final void visitSource(final String file, final String debug) {
+<span class="nc bnc" id="L281" title="All 2 branches missed.">    if (file != null) {</span>
+<span class="nc" id="L282">      sourceFileIndex = symbolTable.addConstantUtf8(file);</span>
+    }
+<span class="nc bnc" id="L284" title="All 2 branches missed.">    if (debug != null) {</span>
+<span class="nc" id="L285">      debugExtension = new ByteVector().encodeUtf8(debug, 0, Integer.MAX_VALUE);</span>
+    }
+<span class="nc" id="L287">  }</span>
+
+  @Override
+  public final ModuleVisitor visitModule(
+      final String name, final int access, final String version) {
+<span class="nc" id="L292">    return moduleWriter =</span>
+        new ModuleWriter(
+            symbolTable,
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            symbolTable.addConstantModule(name).index,</span>
+            access,
+<span class="nc" id="L297">            version == null ? 0 : symbolTable.addConstantUtf8(version));</span>
+  }
+
+  @Override
+  public void visitNestHost(final String nestHost) {
+<span class="nc" id="L302">    nestHostClassIndex = symbolTable.addConstantClass(nestHost).index;</span>
+<span class="nc" id="L303">  }</span>
+
+  @Override
+  public final void visitOuterClass(
+      final String owner, final String name, final String descriptor) {
+<span class="nc" id="L308">    enclosingClassIndex = symbolTable.addConstantClass(owner).index;</span>
+<span class="nc bnc" id="L309" title="All 4 branches missed.">    if (name != null &amp;&amp; descriptor != null) {</span>
+<span class="nc" id="L310">      enclosingMethodIndex = symbolTable.addConstantNameAndType(name, descriptor);</span>
+    }
+<span class="nc" id="L312">  }</span>
+
+  @Override
+  public final AnnotationVisitor visitAnnotation(final String descriptor, final boolean visible) {
+<span class="nc bnc" id="L316" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L317">      return lastRuntimeVisibleAnnotation =</span>
+<span class="nc" id="L318">          AnnotationWriter.create(symbolTable, descriptor, lastRuntimeVisibleAnnotation);</span>
+    } else {
+<span class="nc" id="L320">      return lastRuntimeInvisibleAnnotation =</span>
+<span class="nc" id="L321">          AnnotationWriter.create(symbolTable, descriptor, lastRuntimeInvisibleAnnotation);</span>
+    }
+  }
+
+  @Override
+  public final AnnotationVisitor visitTypeAnnotation(
+      final int typeRef, final TypePath typePath, final String descriptor, final boolean visible) {
+<span class="nc bnc" id="L328" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L329">      return lastRuntimeVisibleTypeAnnotation =</span>
+<span class="nc" id="L330">          AnnotationWriter.create(</span>
+              symbolTable, typeRef, typePath, descriptor, lastRuntimeVisibleTypeAnnotation);
+    } else {
+<span class="nc" id="L333">      return lastRuntimeInvisibleTypeAnnotation =</span>
+<span class="nc" id="L334">          AnnotationWriter.create(</span>
+              symbolTable, typeRef, typePath, descriptor, lastRuntimeInvisibleTypeAnnotation);
+    }
+  }
+
+  @Override
+  public final void visitAttribute(final Attribute attribute) {
+    // Store the attributes in the &lt;i&gt;reverse&lt;/i&gt; order of their visit by this method.
+<span class="nc" id="L342">    attribute.nextAttribute = firstAttribute;</span>
+<span class="nc" id="L343">    firstAttribute = attribute;</span>
+<span class="nc" id="L344">  }</span>
+
+  @Override
+  public void visitNestMember(final String nestMember) {
+<span class="nc bnc" id="L348" title="All 2 branches missed.">    if (nestMemberClasses == null) {</span>
+<span class="nc" id="L349">      nestMemberClasses = new ByteVector();</span>
+    }
+<span class="nc" id="L351">    ++numberOfNestMemberClasses;</span>
+<span class="nc" id="L352">    nestMemberClasses.putShort(symbolTable.addConstantClass(nestMember).index);</span>
+<span class="nc" id="L353">  }</span>
+
+  @Override
+  public final void visitInnerClass(
+      final String name, final String outerName, final String innerName, final int access) {
+<span class="nc bnc" id="L358" title="All 2 branches missed.">    if (innerClasses == null) {</span>
+<span class="nc" id="L359">      innerClasses = new ByteVector();</span>
+    }
+    // Section 4.7.6 of the JVMS states &quot;Every CONSTANT_Class_info entry in the constant_pool table
+    // which represents a class or interface C that is not a package member must have exactly one
+    // corresponding entry in the classes array&quot;. To avoid duplicates we keep track in the info
+    // field of the Symbol of each CONSTANT_Class_info entry C whether an inner class entry has
+    // already been added for C. If so, we store the index of this inner class entry (plus one) in
+    // the info field. This trick allows duplicate detection in O(1) time.
+<span class="nc" id="L367">    Symbol nameSymbol = symbolTable.addConstantClass(name);</span>
+<span class="nc bnc" id="L368" title="All 2 branches missed.">    if (nameSymbol.info == 0) {</span>
+<span class="nc" id="L369">      ++numberOfInnerClasses;</span>
+<span class="nc" id="L370">      innerClasses.putShort(nameSymbol.index);</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">      innerClasses.putShort(outerName == null ? 0 : symbolTable.addConstantClass(outerName).index);</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">      innerClasses.putShort(innerName == null ? 0 : symbolTable.addConstantUtf8(innerName));</span>
+<span class="nc" id="L373">      innerClasses.putShort(access);</span>
+<span class="nc" id="L374">      nameSymbol.info = numberOfInnerClasses;</span>
+    }
+    // Else, compare the inner classes entry nameSymbol.info - 1 with the arguments of this method
+    // and throw an exception if there is a difference?
+<span class="nc" id="L378">  }</span>
+
+  @Override
+  public final FieldVisitor visitField(
+      final int access,
+      final String name,
+      final String descriptor,
+      final String signature,
+      final Object value) {
+<span class="nc" id="L387">    FieldWriter fieldWriter =</span>
+        new FieldWriter(symbolTable, access, name, descriptor, signature, value);
+<span class="nc bnc" id="L389" title="All 2 branches missed.">    if (firstField == null) {</span>
+<span class="nc" id="L390">      firstField = fieldWriter;</span>
+    } else {
+<span class="nc" id="L392">      lastField.fv = fieldWriter;</span>
+    }
+<span class="nc" id="L394">    return lastField = fieldWriter;</span>
+  }
+
+  @Override
+  public final MethodVisitor visitMethod(
+      final int access,
+      final String name,
+      final String descriptor,
+      final String signature,
+      final String[] exceptions) {
+<span class="nc" id="L404">    MethodWriter methodWriter =</span>
+        new MethodWriter(symbolTable, access, name, descriptor, signature, exceptions, compute);
+<span class="nc bnc" id="L406" title="All 2 branches missed.">    if (firstMethod == null) {</span>
+<span class="nc" id="L407">      firstMethod = methodWriter;</span>
+    } else {
+<span class="nc" id="L409">      lastMethod.mv = methodWriter;</span>
+    }
+<span class="nc" id="L411">    return lastMethod = methodWriter;</span>
+  }
+
+  @Override
+  public final void visitEnd() {
+    // Nothing to do.
+<span class="nc" id="L417">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Other public methods
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Returns the content of the class file that was built by this ClassWriter.
+   *
+   * @return the binary content of the JVMS ClassFile structure that was built by this ClassWriter.
+   * @throws ClassTooLargeException if the constant pool of the class is too large.
+   * @throws MethodTooLargeException if the Code attribute of a method is too large.
+   */
+  public byte[] toByteArray() {
+    // First step: compute the size in bytes of the ClassFile structure.
+    // The magic field uses 4 bytes, 10 mandatory fields (minor_version, major_version,
+    // constant_pool_count, access_flags, this_class, super_class, interfaces_count, fields_count,
+    // methods_count and attributes_count) use 2 bytes each, and each interface uses 2 bytes too.
+<span class="nc" id="L435">    int size = 24 + 2 * interfaceCount;</span>
+<span class="nc" id="L436">    int fieldsCount = 0;</span>
+<span class="nc" id="L437">    FieldWriter fieldWriter = firstField;</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">    while (fieldWriter != null) {</span>
+<span class="nc" id="L439">      ++fieldsCount;</span>
+<span class="nc" id="L440">      size += fieldWriter.computeFieldInfoSize();</span>
+<span class="nc" id="L441">      fieldWriter = (FieldWriter) fieldWriter.fv;</span>
+    }
+<span class="nc" id="L443">    int methodsCount = 0;</span>
+<span class="nc" id="L444">    MethodWriter methodWriter = firstMethod;</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">    while (methodWriter != null) {</span>
+<span class="nc" id="L446">      ++methodsCount;</span>
+<span class="nc" id="L447">      size += methodWriter.computeMethodInfoSize();</span>
+<span class="nc" id="L448">      methodWriter = (MethodWriter) methodWriter.mv;</span>
+    }
+    // For ease of reference, we use here the same attribute order as in Section 4.7 of the JVMS.
+<span class="nc" id="L451">    int attributesCount = 0;</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">    if (innerClasses != null) {</span>
+<span class="nc" id="L453">      ++attributesCount;</span>
+<span class="nc" id="L454">      size += 8 + innerClasses.length;</span>
+<span class="nc" id="L455">      symbolTable.addConstantUtf8(Constants.INNER_CLASSES);</span>
+    }
+<span class="nc bnc" id="L457" title="All 2 branches missed.">    if (enclosingClassIndex != 0) {</span>
+<span class="nc" id="L458">      ++attributesCount;</span>
+<span class="nc" id="L459">      size += 10;</span>
+<span class="nc" id="L460">      symbolTable.addConstantUtf8(Constants.ENCLOSING_METHOD);</span>
+    }
+<span class="nc bnc" id="L462" title="All 4 branches missed.">    if ((accessFlags &amp; Opcodes.ACC_SYNTHETIC) != 0 &amp;&amp; (version &amp; 0xFFFF) &lt; Opcodes.V1_5) {</span>
+<span class="nc" id="L463">      ++attributesCount;</span>
+<span class="nc" id="L464">      size += 6;</span>
+<span class="nc" id="L465">      symbolTable.addConstantUtf8(Constants.SYNTHETIC);</span>
+    }
+<span class="nc bnc" id="L467" title="All 2 branches missed.">    if (signatureIndex != 0) {</span>
+<span class="nc" id="L468">      ++attributesCount;</span>
+<span class="nc" id="L469">      size += 8;</span>
+<span class="nc" id="L470">      symbolTable.addConstantUtf8(Constants.SIGNATURE);</span>
+    }
+<span class="nc bnc" id="L472" title="All 2 branches missed.">    if (sourceFileIndex != 0) {</span>
+<span class="nc" id="L473">      ++attributesCount;</span>
+<span class="nc" id="L474">      size += 8;</span>
+<span class="nc" id="L475">      symbolTable.addConstantUtf8(Constants.SOURCE_FILE);</span>
+    }
+<span class="nc bnc" id="L477" title="All 2 branches missed.">    if (debugExtension != null) {</span>
+<span class="nc" id="L478">      ++attributesCount;</span>
+<span class="nc" id="L479">      size += 6 + debugExtension.length;</span>
+<span class="nc" id="L480">      symbolTable.addConstantUtf8(Constants.SOURCE_DEBUG_EXTENSION);</span>
+    }
+<span class="nc bnc" id="L482" title="All 2 branches missed.">    if ((accessFlags &amp; Opcodes.ACC_DEPRECATED) != 0) {</span>
+<span class="nc" id="L483">      ++attributesCount;</span>
+<span class="nc" id="L484">      size += 6;</span>
+<span class="nc" id="L485">      symbolTable.addConstantUtf8(Constants.DEPRECATED);</span>
+    }
+<span class="nc bnc" id="L487" title="All 2 branches missed.">    if (lastRuntimeVisibleAnnotation != null) {</span>
+<span class="nc" id="L488">      ++attributesCount;</span>
+<span class="nc" id="L489">      size +=</span>
+<span class="nc" id="L490">          lastRuntimeVisibleAnnotation.computeAnnotationsSize(</span>
+              Constants.RUNTIME_VISIBLE_ANNOTATIONS);
+    }
+<span class="nc bnc" id="L493" title="All 2 branches missed.">    if (lastRuntimeInvisibleAnnotation != null) {</span>
+<span class="nc" id="L494">      ++attributesCount;</span>
+<span class="nc" id="L495">      size +=</span>
+<span class="nc" id="L496">          lastRuntimeInvisibleAnnotation.computeAnnotationsSize(</span>
+              Constants.RUNTIME_INVISIBLE_ANNOTATIONS);
+    }
+<span class="nc bnc" id="L499" title="All 2 branches missed.">    if (lastRuntimeVisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L500">      ++attributesCount;</span>
+<span class="nc" id="L501">      size +=</span>
+<span class="nc" id="L502">          lastRuntimeVisibleTypeAnnotation.computeAnnotationsSize(</span>
+              Constants.RUNTIME_VISIBLE_TYPE_ANNOTATIONS);
+    }
+<span class="nc bnc" id="L505" title="All 2 branches missed.">    if (lastRuntimeInvisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L506">      ++attributesCount;</span>
+<span class="nc" id="L507">      size +=</span>
+<span class="nc" id="L508">          lastRuntimeInvisibleTypeAnnotation.computeAnnotationsSize(</span>
+              Constants.RUNTIME_INVISIBLE_TYPE_ANNOTATIONS);
+    }
+<span class="nc bnc" id="L511" title="All 2 branches missed.">    if (symbolTable.computeBootstrapMethodsSize() &gt; 0) {</span>
+<span class="nc" id="L512">      ++attributesCount;</span>
+<span class="nc" id="L513">      size += symbolTable.computeBootstrapMethodsSize();</span>
+    }
+<span class="nc bnc" id="L515" title="All 2 branches missed.">    if (moduleWriter != null) {</span>
+<span class="nc" id="L516">      attributesCount += moduleWriter.getAttributeCount();</span>
+<span class="nc" id="L517">      size += moduleWriter.computeAttributesSize();</span>
+    }
+<span class="nc bnc" id="L519" title="All 2 branches missed.">    if (nestHostClassIndex != 0) {</span>
+<span class="nc" id="L520">      ++attributesCount;</span>
+<span class="nc" id="L521">      size += 8;</span>
+<span class="nc" id="L522">      symbolTable.addConstantUtf8(Constants.NEST_HOST);</span>
+    }
+<span class="nc bnc" id="L524" title="All 2 branches missed.">    if (nestMemberClasses != null) {</span>
+<span class="nc" id="L525">      ++attributesCount;</span>
+<span class="nc" id="L526">      size += 8 + nestMemberClasses.length;</span>
+<span class="nc" id="L527">      symbolTable.addConstantUtf8(Constants.NEST_MEMBERS);</span>
+    }
+<span class="nc bnc" id="L529" title="All 2 branches missed.">    if (firstAttribute != null) {</span>
+<span class="nc" id="L530">      attributesCount += firstAttribute.getAttributeCount();</span>
+<span class="nc" id="L531">      size += firstAttribute.computeAttributesSize(symbolTable);</span>
+    }
+    // IMPORTANT: this must be the last part of the ClassFile size computation, because the previous
+    // statements can add attribute names to the constant pool, thereby changing its size!
+<span class="nc" id="L535">    size += symbolTable.getConstantPoolLength();</span>
+<span class="nc" id="L536">    int constantPoolCount = symbolTable.getConstantPoolCount();</span>
+<span class="nc bnc" id="L537" title="All 2 branches missed.">    if (constantPoolCount &gt; 0xFFFF) {</span>
+<span class="nc" id="L538">      throw new ClassTooLargeException(symbolTable.getClassName(), constantPoolCount);</span>
+    }
+
+    // Second step: allocate a ByteVector of the correct size (in order to avoid any array copy in
+    // dynamic resizes) and fill it with the ClassFile content.
+<span class="nc" id="L543">    ByteVector result = new ByteVector(size);</span>
+<span class="nc" id="L544">    result.putInt(0xCAFEBABE).putInt(version);</span>
+<span class="nc" id="L545">    symbolTable.putConstantPool(result);</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">    int mask = (version &amp; 0xFFFF) &lt; Opcodes.V1_5 ? Opcodes.ACC_SYNTHETIC : 0;</span>
+<span class="nc" id="L547">    result.putShort(accessFlags &amp; ~mask).putShort(thisClass).putShort(superClass);</span>
+<span class="nc" id="L548">    result.putShort(interfaceCount);</span>
+<span class="nc bnc" id="L549" title="All 2 branches missed.">    for (int i = 0; i &lt; interfaceCount; ++i) {</span>
+<span class="nc" id="L550">      result.putShort(interfaces[i]);</span>
+    }
+<span class="nc" id="L552">    result.putShort(fieldsCount);</span>
+<span class="nc" id="L553">    fieldWriter = firstField;</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">    while (fieldWriter != null) {</span>
+<span class="nc" id="L555">      fieldWriter.putFieldInfo(result);</span>
+<span class="nc" id="L556">      fieldWriter = (FieldWriter) fieldWriter.fv;</span>
+    }
+<span class="nc" id="L558">    result.putShort(methodsCount);</span>
+<span class="nc" id="L559">    boolean hasFrames = false;</span>
+<span class="nc" id="L560">    boolean hasAsmInstructions = false;</span>
+<span class="nc" id="L561">    methodWriter = firstMethod;</span>
+<span class="nc bnc" id="L562" title="All 2 branches missed.">    while (methodWriter != null) {</span>
+<span class="nc" id="L563">      hasFrames |= methodWriter.hasFrames();</span>
+<span class="nc" id="L564">      hasAsmInstructions |= methodWriter.hasAsmInstructions();</span>
+<span class="nc" id="L565">      methodWriter.putMethodInfo(result);</span>
+<span class="nc" id="L566">      methodWriter = (MethodWriter) methodWriter.mv;</span>
+    }
+    // For ease of reference, we use here the same attribute order as in Section 4.7 of the JVMS.
+<span class="nc" id="L569">    result.putShort(attributesCount);</span>
+<span class="nc bnc" id="L570" title="All 2 branches missed.">    if (innerClasses != null) {</span>
+<span class="nc" id="L571">      result</span>
+<span class="nc" id="L572">          .putShort(symbolTable.addConstantUtf8(Constants.INNER_CLASSES))</span>
+<span class="nc" id="L573">          .putInt(innerClasses.length + 2)</span>
+<span class="nc" id="L574">          .putShort(numberOfInnerClasses)</span>
+<span class="nc" id="L575">          .putByteArray(innerClasses.data, 0, innerClasses.length);</span>
+    }
+<span class="nc bnc" id="L577" title="All 2 branches missed.">    if (enclosingClassIndex != 0) {</span>
+<span class="nc" id="L578">      result</span>
+<span class="nc" id="L579">          .putShort(symbolTable.addConstantUtf8(Constants.ENCLOSING_METHOD))</span>
+<span class="nc" id="L580">          .putInt(4)</span>
+<span class="nc" id="L581">          .putShort(enclosingClassIndex)</span>
+<span class="nc" id="L582">          .putShort(enclosingMethodIndex);</span>
+    }
+<span class="nc bnc" id="L584" title="All 4 branches missed.">    if ((accessFlags &amp; Opcodes.ACC_SYNTHETIC) != 0 &amp;&amp; (version &amp; 0xFFFF) &lt; Opcodes.V1_5) {</span>
+<span class="nc" id="L585">      result.putShort(symbolTable.addConstantUtf8(Constants.SYNTHETIC)).putInt(0);</span>
+    }
+<span class="nc bnc" id="L587" title="All 2 branches missed.">    if (signatureIndex != 0) {</span>
+<span class="nc" id="L588">      result</span>
+<span class="nc" id="L589">          .putShort(symbolTable.addConstantUtf8(Constants.SIGNATURE))</span>
+<span class="nc" id="L590">          .putInt(2)</span>
+<span class="nc" id="L591">          .putShort(signatureIndex);</span>
+    }
+<span class="nc bnc" id="L593" title="All 2 branches missed.">    if (sourceFileIndex != 0) {</span>
+<span class="nc" id="L594">      result</span>
+<span class="nc" id="L595">          .putShort(symbolTable.addConstantUtf8(Constants.SOURCE_FILE))</span>
+<span class="nc" id="L596">          .putInt(2)</span>
+<span class="nc" id="L597">          .putShort(sourceFileIndex);</span>
+    }
+<span class="nc bnc" id="L599" title="All 2 branches missed.">    if (debugExtension != null) {</span>
+<span class="nc" id="L600">      int length = debugExtension.length;</span>
+<span class="nc" id="L601">      result</span>
+<span class="nc" id="L602">          .putShort(symbolTable.addConstantUtf8(Constants.SOURCE_DEBUG_EXTENSION))</span>
+<span class="nc" id="L603">          .putInt(length)</span>
+<span class="nc" id="L604">          .putByteArray(debugExtension.data, 0, length);</span>
+    }
+<span class="nc bnc" id="L606" title="All 2 branches missed.">    if ((accessFlags &amp; Opcodes.ACC_DEPRECATED) != 0) {</span>
+<span class="nc" id="L607">      result.putShort(symbolTable.addConstantUtf8(Constants.DEPRECATED)).putInt(0);</span>
+    }
+<span class="nc" id="L609">    AnnotationWriter.putAnnotations(</span>
+        symbolTable,
+        lastRuntimeVisibleAnnotation,
+        lastRuntimeInvisibleAnnotation,
+        lastRuntimeVisibleTypeAnnotation,
+        lastRuntimeInvisibleTypeAnnotation,
+        result);
+<span class="nc" id="L616">    symbolTable.putBootstrapMethods(result);</span>
+<span class="nc bnc" id="L617" title="All 2 branches missed.">    if (moduleWriter != null) {</span>
+<span class="nc" id="L618">      moduleWriter.putAttributes(result);</span>
+    }
+<span class="nc bnc" id="L620" title="All 2 branches missed.">    if (nestHostClassIndex != 0) {</span>
+<span class="nc" id="L621">      result</span>
+<span class="nc" id="L622">          .putShort(symbolTable.addConstantUtf8(Constants.NEST_HOST))</span>
+<span class="nc" id="L623">          .putInt(2)</span>
+<span class="nc" id="L624">          .putShort(nestHostClassIndex);</span>
+    }
+<span class="nc bnc" id="L626" title="All 2 branches missed.">    if (nestMemberClasses != null) {</span>
+<span class="nc" id="L627">      result</span>
+<span class="nc" id="L628">          .putShort(symbolTable.addConstantUtf8(Constants.NEST_MEMBERS))</span>
+<span class="nc" id="L629">          .putInt(nestMemberClasses.length + 2)</span>
+<span class="nc" id="L630">          .putShort(numberOfNestMemberClasses)</span>
+<span class="nc" id="L631">          .putByteArray(nestMemberClasses.data, 0, nestMemberClasses.length);</span>
+    }
+<span class="nc bnc" id="L633" title="All 2 branches missed.">    if (firstAttribute != null) {</span>
+<span class="nc" id="L634">      firstAttribute.putAttributes(symbolTable, result);</span>
+    }
+
+    // Third step: replace the ASM specific instructions, if any.
+<span class="nc bnc" id="L638" title="All 2 branches missed.">    if (hasAsmInstructions) {</span>
+<span class="nc" id="L639">      return replaceAsmInstructions(result.data, hasFrames);</span>
+    } else {
+<span class="nc" id="L641">      return result.data;</span>
+    }
+  }
+
+  /**
+   * Returns the equivalent of the given class file, with the ASM specific instructions replaced
+   * with standard ones. This is done with a ClassReader -&amp;gt; ClassWriter round trip.
+   *
+   * @param classFile a class file containing ASM specific instructions, generated by this
+   *     ClassWriter.
+   * @param hasFrames whether there is at least one stack map frames in 'classFile'.
+   * @return an equivalent of 'classFile', with the ASM specific instructions replaced with standard
+   *     ones.
+   */
+  private byte[] replaceAsmInstructions(final byte[] classFile, final boolean hasFrames) {
+<span class="nc" id="L656">    final Attribute[] attributes = getAttributePrototypes();</span>
+<span class="nc" id="L657">    firstField = null;</span>
+<span class="nc" id="L658">    lastField = null;</span>
+<span class="nc" id="L659">    firstMethod = null;</span>
+<span class="nc" id="L660">    lastMethod = null;</span>
+<span class="nc" id="L661">    lastRuntimeVisibleAnnotation = null;</span>
+<span class="nc" id="L662">    lastRuntimeInvisibleAnnotation = null;</span>
+<span class="nc" id="L663">    lastRuntimeVisibleTypeAnnotation = null;</span>
+<span class="nc" id="L664">    lastRuntimeInvisibleTypeAnnotation = null;</span>
+<span class="nc" id="L665">    moduleWriter = null;</span>
+<span class="nc" id="L666">    nestHostClassIndex = 0;</span>
+<span class="nc" id="L667">    numberOfNestMemberClasses = 0;</span>
+<span class="nc" id="L668">    nestMemberClasses = null;</span>
+<span class="nc" id="L669">    firstAttribute = null;</span>
+<span class="nc bnc" id="L670" title="All 2 branches missed.">    compute = hasFrames ? MethodWriter.COMPUTE_INSERTED_FRAMES : MethodWriter.COMPUTE_NOTHING;</span>
+<span class="nc bnc" id="L671" title="All 2 branches missed.">    new ClassReader(classFile, 0, /* checkClassVersion = */ false)</span>
+<span class="nc" id="L672">        .accept(</span>
+            this,
+            attributes,
+            (hasFrames ? ClassReader.EXPAND_FRAMES : 0) | ClassReader.EXPAND_ASM_INSNS);
+<span class="nc" id="L676">    return toByteArray();</span>
+  }
+
+  /**
+   * Returns the prototypes of the attributes used by this class, its fields and its methods.
+   *
+   * @return the prototypes of the attributes used by this class, its fields and its methods.
+   */
+  private Attribute[] getAttributePrototypes() {
+<span class="nc" id="L685">    Attribute.Set attributePrototypes = new Attribute.Set();</span>
+<span class="nc" id="L686">    attributePrototypes.addAttributes(firstAttribute);</span>
+<span class="nc" id="L687">    FieldWriter fieldWriter = firstField;</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">    while (fieldWriter != null) {</span>
+<span class="nc" id="L689">      fieldWriter.collectAttributePrototypes(attributePrototypes);</span>
+<span class="nc" id="L690">      fieldWriter = (FieldWriter) fieldWriter.fv;</span>
+    }
+<span class="nc" id="L692">    MethodWriter methodWriter = firstMethod;</span>
+<span class="nc bnc" id="L693" title="All 2 branches missed.">    while (methodWriter != null) {</span>
+<span class="nc" id="L694">      methodWriter.collectAttributePrototypes(attributePrototypes);</span>
+<span class="nc" id="L695">      methodWriter = (MethodWriter) methodWriter.mv;</span>
+    }
+<span class="nc" id="L697">    return attributePrototypes.toArray();</span>
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Utility methods: constant pool management for Attribute sub classes
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Adds a number or string constant to the constant pool of the class being build. Does nothing if
+   * the constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link
+   * Attribute} sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param value the value of the constant to be added to the constant pool. This parameter must be
+   *     an {@link Integer}, a {@link Float}, a {@link Long}, a {@link Double} or a {@link String}.
+   * @return the index of a new or already existing constant item with the given value.
+   */
+  public int newConst(final Object value) {
+<span class="nc" id="L714">    return symbolTable.addConstant(value).index;</span>
+  }
+
+  /**
+   * Adds an UTF8 string to the constant pool of the class being build. Does nothing if the constant
+   * pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute} sub
+   * classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param value the String value.
+   * @return the index of a new or already existing UTF8 item.
+   */
+  // DontCheck(AbbreviationAsWordInName): can't be renamed (for backward binary compatibility).
+  public int newUTF8(final String value) {
+<span class="nc" id="L727">    return symbolTable.addConstantUtf8(value);</span>
+  }
+
+  /**
+   * Adds a class reference to the constant pool of the class being build. Does nothing if the
+   * constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute}
+   * sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param value the internal name of the class.
+   * @return the index of a new or already existing class reference item.
+   */
+  public int newClass(final String value) {
+<span class="nc" id="L739">    return symbolTable.addConstantClass(value).index;</span>
+  }
+
+  /**
+   * Adds a method type reference to the constant pool of the class being build. Does nothing if the
+   * constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute}
+   * sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param methodDescriptor method descriptor of the method type.
+   * @return the index of a new or already existing method type reference item.
+   */
+  public int newMethodType(final String methodDescriptor) {
+<span class="nc" id="L751">    return symbolTable.addConstantMethodType(methodDescriptor).index;</span>
+  }
+
+  /**
+   * Adds a module reference to the constant pool of the class being build. Does nothing if the
+   * constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute}
+   * sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param moduleName name of the module.
+   * @return the index of a new or already existing module reference item.
+   */
+  public int newModule(final String moduleName) {
+<span class="nc" id="L763">    return symbolTable.addConstantModule(moduleName).index;</span>
+  }
+
+  /**
+   * Adds a package reference to the constant pool of the class being build. Does nothing if the
+   * constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute}
+   * sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param packageName name of the package in its internal form.
+   * @return the index of a new or already existing module reference item.
+   */
+  public int newPackage(final String packageName) {
+<span class="nc" id="L775">    return symbolTable.addConstantPackage(packageName).index;</span>
+  }
+
+  /**
+   * Adds a handle to the constant pool of the class being build. Does nothing if the constant pool
+   * already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute} sub classes,
+   * and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param tag the kind of this handle. Must be {@link Opcodes#H_GETFIELD}, {@link
+   *     Opcodes#H_GETSTATIC}, {@link Opcodes#H_PUTFIELD}, {@link Opcodes#H_PUTSTATIC}, {@link
+   *     Opcodes#H_INVOKEVIRTUAL}, {@link Opcodes#H_INVOKESTATIC}, {@link Opcodes#H_INVOKESPECIAL},
+   *     {@link Opcodes#H_NEWINVOKESPECIAL} or {@link Opcodes#H_INVOKEINTERFACE}.
+   * @param owner the internal name of the field or method owner class.
+   * @param name the name of the field or method.
+   * @param descriptor the descriptor of the field or method.
+   * @return the index of a new or already existing method type reference item.
+   * @deprecated this method is superseded by {@link #newHandle(int, String, String, String,
+   *     boolean)}.
+   */
+  @Deprecated
+  public int newHandle(
+      final int tag, final String owner, final String name, final String descriptor) {
+<span class="nc bnc" id="L797" title="All 2 branches missed.">    return newHandle(tag, owner, name, descriptor, tag == Opcodes.H_INVOKEINTERFACE);</span>
+  }
+
+  /**
+   * Adds a handle to the constant pool of the class being build. Does nothing if the constant pool
+   * already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute} sub classes,
+   * and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param tag the kind of this handle. Must be {@link Opcodes#H_GETFIELD}, {@link
+   *     Opcodes#H_GETSTATIC}, {@link Opcodes#H_PUTFIELD}, {@link Opcodes#H_PUTSTATIC}, {@link
+   *     Opcodes#H_INVOKEVIRTUAL}, {@link Opcodes#H_INVOKESTATIC}, {@link Opcodes#H_INVOKESPECIAL},
+   *     {@link Opcodes#H_NEWINVOKESPECIAL} or {@link Opcodes#H_INVOKEINTERFACE}.
+   * @param owner the internal name of the field or method owner class.
+   * @param name the name of the field or method.
+   * @param descriptor the descriptor of the field or method.
+   * @param isInterface true if the owner is an interface.
+   * @return the index of a new or already existing method type reference item.
+   */
+  public int newHandle(
+      final int tag,
+      final String owner,
+      final String name,
+      final String descriptor,
+      final boolean isInterface) {
+<span class="nc" id="L821">    return symbolTable.addConstantMethodHandle(tag, owner, name, descriptor, isInterface).index;</span>
+  }
+
+  /**
+   * Adds a dynamic constant reference to the constant pool of the class being build. Does nothing
+   * if the constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link
+   * Attribute} sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param name name of the invoked method.
+   * @param descriptor field descriptor of the constant type.
+   * @param bootstrapMethodHandle the bootstrap method.
+   * @param bootstrapMethodArguments the bootstrap method constant arguments.
+   * @return the index of a new or already existing dynamic constant reference item.
+   */
+  public int newConstantDynamic(
+      final String name,
+      final String descriptor,
+      final Handle bootstrapMethodHandle,
+      final Object... bootstrapMethodArguments) {
+<span class="nc" id="L840">    return symbolTable.addConstantDynamic(</span>
+            name, descriptor, bootstrapMethodHandle, bootstrapMethodArguments)
+        .index;
+  }
+
+  /**
+   * Adds an invokedynamic reference to the constant pool of the class being build. Does nothing if
+   * the constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link
+   * Attribute} sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param name name of the invoked method.
+   * @param descriptor descriptor of the invoke method.
+   * @param bootstrapMethodHandle the bootstrap method.
+   * @param bootstrapMethodArguments the bootstrap method constant arguments.
+   * @return the index of a new or already existing invokedynamic reference item.
+   */
+  public int newInvokeDynamic(
+      final String name,
+      final String descriptor,
+      final Handle bootstrapMethodHandle,
+      final Object... bootstrapMethodArguments) {
+<span class="nc" id="L861">    return symbolTable.addConstantInvokeDynamic(</span>
+            name, descriptor, bootstrapMethodHandle, bootstrapMethodArguments)
+        .index;
+  }
+
+  /**
+   * Adds a field reference to the constant pool of the class being build. Does nothing if the
+   * constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute}
+   * sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param owner the internal name of the field's owner class.
+   * @param name the field's name.
+   * @param descriptor the field's descriptor.
+   * @return the index of a new or already existing field reference item.
+   */
+  public int newField(final String owner, final String name, final String descriptor) {
+<span class="nc" id="L877">    return symbolTable.addConstantFieldref(owner, name, descriptor).index;</span>
+  }
+
+  /**
+   * Adds a method reference to the constant pool of the class being build. Does nothing if the
+   * constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute}
+   * sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param owner the internal name of the method's owner class.
+   * @param name the method's name.
+   * @param descriptor the method's descriptor.
+   * @param isInterface {@literal true} if {@code owner} is an interface.
+   * @return the index of a new or already existing method reference item.
+   */
+  public int newMethod(
+      final String owner, final String name, final String descriptor, final boolean isInterface) {
+<span class="nc" id="L893">    return symbolTable.addConstantMethodref(owner, name, descriptor, isInterface).index;</span>
+  }
+
+  /**
+   * Adds a name and type to the constant pool of the class being build. Does nothing if the
+   * constant pool already contains a similar item. &lt;i&gt;This method is intended for {@link Attribute}
+   * sub classes, and is normally not needed by class generators or adapters.&lt;/i&gt;
+   *
+   * @param name a name.
+   * @param descriptor a type descriptor.
+   * @return the index of a new or already existing name and type item.
+   */
+  public int newNameType(final String name, final String descriptor) {
+<span class="nc" id="L906">    return symbolTable.addConstantNameAndType(name, descriptor);</span>
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Default method to compute common super classes when computing stack map frames
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Returns the common super type of the two given types. The default implementation of this method
+   * &lt;i&gt;loads&lt;/i&gt; the two given classes and uses the java.lang.Class methods to find the common
+   * super class. It can be overridden to compute this common super type in other ways, in
+   * particular without actually loading any class, or to take into account the class that is
+   * currently being generated by this ClassWriter, which can of course not be loaded since it is
+   * under construction.
+   *
+   * @param type1 the internal name of a class.
+   * @param type2 the internal name of another class.
+   * @return the internal name of the common super class of the two given classes.
+   */
+  protected String getCommonSuperClass(final String type1, final String type2) {
+<span class="nc" id="L926">    ClassLoader classLoader = getClassLoader();</span>
+    Class&lt;?&gt; class1;
+    try {
+<span class="nc" id="L929">      class1 = Class.forName(type1.replace('/', '.'), false, classLoader);</span>
+<span class="nc" id="L930">    } catch (ClassNotFoundException e) {</span>
+<span class="nc" id="L931">      throw new TypeNotPresentException(type1, e);</span>
+<span class="nc" id="L932">    }</span>
+    Class&lt;?&gt; class2;
+    try {
+<span class="nc" id="L935">      class2 = Class.forName(type2.replace('/', '.'), false, classLoader);</span>
+<span class="nc" id="L936">    } catch (ClassNotFoundException e) {</span>
+<span class="nc" id="L937">      throw new TypeNotPresentException(type2, e);</span>
+<span class="nc" id="L938">    }</span>
+<span class="nc bnc" id="L939" title="All 2 branches missed.">    if (class1.isAssignableFrom(class2)) {</span>
+<span class="nc" id="L940">      return type1;</span>
+    }
+<span class="nc bnc" id="L942" title="All 2 branches missed.">    if (class2.isAssignableFrom(class1)) {</span>
+<span class="nc" id="L943">      return type2;</span>
+    }
+<span class="nc bnc" id="L945" title="All 4 branches missed.">    if (class1.isInterface() || class2.isInterface()) {</span>
+<span class="nc" id="L946">      return &quot;java/lang/Object&quot;;</span>
+    } else {
+      do {
+<span class="nc" id="L949">        class1 = class1.getSuperclass();</span>
+<span class="nc bnc" id="L950" title="All 2 branches missed.">      } while (!class1.isAssignableFrom(class2));</span>
+<span class="nc" id="L951">      return class1.getName().replace('.', '/');</span>
+    }
+  }
+
+  /**
+   * Returns the {@link ClassLoader} to be used by the default implementation of {@link
+   * #getCommonSuperClass(String, String)}, that of this {@link ClassWriter}'s runtime type by
+   * default.
+   *
+   * @return ClassLoader
+   */
+  protected ClassLoader getClassLoader() {
+    // SPRING PATCH: prefer thread context ClassLoader for application classes
+<span class="nc" id="L964">    ClassLoader classLoader = null;</span>
+    try {
+<span class="nc" id="L966">      classLoader = Thread.currentThread().getContextClassLoader();</span>
+<span class="nc" id="L967">    } catch (Throwable ex) {</span>
+      // Cannot access thread context ClassLoader - falling back...
+<span class="nc" id="L969">    }</span>
+<span class="nc bnc" id="L970" title="All 2 branches missed.">    return (classLoader != null ? classLoader : getClass().getClassLoader());</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractNamedValueArgumentResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method.annotation</a> &gt; <span class="el_source">AbstractNamedValueArgumentResolver.java</span></div><h1>AbstractNamedValueArgumentResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method.annotation;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import reactor.core.publisher.Mono;
+
+import org.springframework.beans.ConversionNotSupportedException;
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.beans.factory.config.BeanExpressionContext;
+import org.springframework.beans.factory.config.BeanExpressionResolver;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.lang.Nullable;
+import org.springframework.ui.Model;
+import org.springframework.web.bind.WebDataBinder;
+import org.springframework.web.bind.annotation.ValueConstants;
+import org.springframework.web.reactive.BindingContext;
+import org.springframework.web.reactive.result.method.HandlerMethodArgumentResolverSupport;
+import org.springframework.web.server.ServerErrorException;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.ServerWebInputException;
+
+/**
+ * Abstract base class for resolving method arguments from a named value.
+ * Request parameters, request headers, and path variables are examples of named
+ * values. Each may have a name, a required flag, and a default value.
+ *
+ * &lt;p&gt;Subclasses define how to do the following:
+ * &lt;ul&gt;
+ * &lt;li&gt;Obtain named value information for a method parameter
+ * &lt;li&gt;Resolve names into argument values
+ * &lt;li&gt;Handle missing argument values when argument values are required
+ * &lt;li&gt;Optionally handle a resolved value
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;A default value string can contain ${...} placeholders and Spring Expression
+ * Language #{...} expressions. For this to work a
+ * {@link ConfigurableBeanFactory} must be supplied to the class constructor.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+public abstract class AbstractNamedValueArgumentResolver extends HandlerMethodArgumentResolverSupport {
+
+	@Nullable
+	private final ConfigurableBeanFactory configurableBeanFactory;
+
+	@Nullable
+	private final BeanExpressionContext expressionContext;
+
+<span class="fc" id="L69">	private final Map&lt;MethodParameter, NamedValueInfo&gt; namedValueInfoCache = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+
+	/**
+	 * Create a new {@link AbstractNamedValueArgumentResolver} instance.
+	 * @param factory a bean factory to use for resolving {@code ${...}} placeholder
+	 * and {@code #{...}} SpEL expressions in default values, or {@code null} if default
+	 * values are not expected to contain expressions
+	 * @param registry for checking reactive type wrappers
+	 */
+	public AbstractNamedValueArgumentResolver(@Nullable ConfigurableBeanFactory factory,
+			ReactiveAdapterRegistry registry) {
+
+<span class="fc" id="L82">		super(registry);</span>
+<span class="fc" id="L83">		this.configurableBeanFactory = factory;</span>
+<span class="fc bfc" id="L84" title="All 2 branches covered.">		this.expressionContext = (factory != null ? new BeanExpressionContext(factory, null) : null);</span>
+<span class="fc" id="L85">	}</span>
+
+
+	@Override
+	public Mono&lt;Object&gt; resolveArgument(
+			MethodParameter parameter, BindingContext bindingContext, ServerWebExchange exchange) {
+
+<span class="fc" id="L92">		NamedValueInfo namedValueInfo = getNamedValueInfo(parameter);</span>
+<span class="fc" id="L93">		MethodParameter nestedParameter = parameter.nestedIfOptional();</span>
+
+<span class="fc" id="L95">		Object resolvedName = resolveStringValue(namedValueInfo.name);</span>
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">		if (resolvedName == null) {</span>
+<span class="nc" id="L97">			return Mono.error(new IllegalArgumentException(</span>
+<span class="nc" id="L98">					&quot;Specified name must not resolve to null: [&quot; + namedValueInfo.name + &quot;]&quot;));</span>
+		}
+
+<span class="fc" id="L101">		Model model = bindingContext.getModel();</span>
+
+<span class="fc" id="L103">		return resolveName(resolvedName.toString(), nestedParameter, exchange)</span>
+<span class="fc" id="L104">				.flatMap(arg -&gt; {</span>
+<span class="fc bfc" id="L105" title="All 4 branches covered.">					if (&quot;&quot;.equals(arg) &amp;&amp; namedValueInfo.defaultValue != null) {</span>
+<span class="fc" id="L106">						arg = resolveStringValue(namedValueInfo.defaultValue);</span>
+					}
+<span class="fc" id="L108">					arg = applyConversion(arg, namedValueInfo, parameter, bindingContext, exchange);</span>
+<span class="fc" id="L109">					handleResolvedValue(arg, namedValueInfo.name, parameter, model, exchange);</span>
+<span class="fc" id="L110">					return Mono.justOrEmpty(arg);</span>
+				})
+<span class="fc" id="L112">				.switchIfEmpty(getDefaultValue(</span>
+						namedValueInfo, parameter, bindingContext, model, exchange));
+	}
+
+	/**
+	 * Obtain the named value for the given method parameter.
+	 */
+	private NamedValueInfo getNamedValueInfo(MethodParameter parameter) {
+<span class="fc" id="L120">		NamedValueInfo namedValueInfo = this.namedValueInfoCache.get(parameter);</span>
+<span class="fc bfc" id="L121" title="All 2 branches covered.">		if (namedValueInfo == null) {</span>
+<span class="fc" id="L122">			namedValueInfo = createNamedValueInfo(parameter);</span>
+<span class="fc" id="L123">			namedValueInfo = updateNamedValueInfo(parameter, namedValueInfo);</span>
+<span class="fc" id="L124">			this.namedValueInfoCache.put(parameter, namedValueInfo);</span>
+		}
+<span class="fc" id="L126">		return namedValueInfo;</span>
+	}
+
+	/**
+	 * Create the {@link NamedValueInfo} object for the given method parameter.
+	 * Implementations typically retrieve the method annotation by means of
+	 * {@link MethodParameter#getParameterAnnotation(Class)}.
+	 * @param parameter the method parameter
+	 * @return the named value information
+	 */
+	protected abstract NamedValueInfo createNamedValueInfo(MethodParameter parameter);
+
+	/**
+	 * Create a new NamedValueInfo based on the given NamedValueInfo with
+	 * sanitized values.
+	 */
+	private NamedValueInfo updateNamedValueInfo(MethodParameter parameter, NamedValueInfo info) {
+<span class="fc" id="L143">		String name = info.name;</span>
+<span class="fc bfc" id="L144" title="All 2 branches covered.">		if (info.name.isEmpty()) {</span>
+<span class="fc" id="L145">			name = parameter.getParameterName();</span>
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">			if (name == null) {</span>
+<span class="nc" id="L147">				String type = parameter.getNestedParameterType().getName();</span>
+<span class="nc" id="L148">				throw new IllegalArgumentException(&quot;Name for argument type [&quot; + type + &quot;] not &quot; +</span>
+						&quot;available, and parameter name information not found in class file either.&quot;);
+			}
+		}
+<span class="fc bfc" id="L152" title="All 2 branches covered.">		String defaultValue = (ValueConstants.DEFAULT_NONE.equals(info.defaultValue) ? null : info.defaultValue);</span>
+<span class="fc" id="L153">		return new NamedValueInfo(name, info.required, defaultValue);</span>
+	}
+
+	/**
+	 * Resolve the given annotation-specified value,
+	 * potentially containing placeholders and expressions.
+	 */
+	@Nullable
+	private Object resolveStringValue(String value) {
+<span class="pc bpc" id="L162" title="1 of 4 branches missed.">		if (this.configurableBeanFactory == null || this.expressionContext == null) {</span>
+<span class="fc" id="L163">			return value;</span>
+		}
+<span class="fc" id="L165">		String placeholdersResolved = this.configurableBeanFactory.resolveEmbeddedValue(value);</span>
+<span class="fc" id="L166">		BeanExpressionResolver exprResolver = this.configurableBeanFactory.getBeanExpressionResolver();</span>
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">		if (exprResolver == null) {</span>
+<span class="nc" id="L168">			return value;</span>
+		}
+<span class="fc" id="L170">		return exprResolver.evaluate(placeholdersResolved, this.expressionContext);</span>
+	}
+
+	/**
+	 * Resolve the given parameter type and value name into an argument value.
+	 * @param name the name of the value being resolved
+	 * @param parameter the method parameter to resolve to an argument value
+	 * (pre-nested in case of a {@link java.util.Optional} declaration)
+	 * @param exchange the current exchange
+	 * @return the resolved argument (may be empty {@link Mono})
+	 */
+	protected abstract Mono&lt;Object&gt; resolveName(String name, MethodParameter parameter, ServerWebExchange exchange);
+
+	/**
+	 * Apply type conversion if necessary.
+	 */
+	@Nullable
+	private Object applyConversion(@Nullable Object value, NamedValueInfo namedValueInfo, MethodParameter parameter,
+			BindingContext bindingContext, ServerWebExchange exchange) {
+
+<span class="fc" id="L190">		WebDataBinder binder = bindingContext.createDataBinder(exchange, namedValueInfo.name);</span>
+		try {
+<span class="fc" id="L192">			value = binder.convertIfNecessary(value, parameter.getParameterType(), parameter);</span>
+		}
+<span class="nc" id="L194">		catch (ConversionNotSupportedException ex) {</span>
+<span class="nc" id="L195">			throw new ServerErrorException(&quot;Conversion not supported.&quot;, parameter, ex);</span>
+		}
+<span class="nc" id="L197">		catch (TypeMismatchException ex) {</span>
+<span class="nc" id="L198">			throw new ServerWebInputException(&quot;Type mismatch.&quot;, parameter, ex);</span>
+<span class="fc" id="L199">		}</span>
+<span class="fc" id="L200">		return value;</span>
+	}
+
+	/**
+	 * Resolve the default value, if any.
+	 */
+	private Mono&lt;Object&gt; getDefaultValue(NamedValueInfo namedValueInfo, MethodParameter parameter,
+			BindingContext bindingContext, Model model, ServerWebExchange exchange) {
+
+<span class="fc" id="L209">		return Mono.fromSupplier(() -&gt; {</span>
+<span class="fc" id="L210">			Object value = null;</span>
+<span class="fc bfc" id="L211" title="All 2 branches covered.">			if (namedValueInfo.defaultValue != null) {</span>
+<span class="fc" id="L212">				value = resolveStringValue(namedValueInfo.defaultValue);</span>
+			}
+<span class="fc bfc" id="L214" title="All 4 branches covered.">			else if (namedValueInfo.required &amp;&amp; !parameter.isOptional()) {</span>
+<span class="nc" id="L215">				handleMissingValue(namedValueInfo.name, parameter, exchange);</span>
+			}
+<span class="fc" id="L217">			value = handleNullValue(namedValueInfo.name, value, parameter.getNestedParameterType());</span>
+<span class="fc" id="L218">			value = applyConversion(value, namedValueInfo, parameter, bindingContext, exchange);</span>
+<span class="fc" id="L219">			handleResolvedValue(value, namedValueInfo.name, parameter, model, exchange);</span>
+<span class="fc" id="L220">			return value;</span>
+		});
+	}
+
+	/**
+	 * Invoked when a named value is required, but
+	 * {@link #resolveName(String, MethodParameter, ServerWebExchange)} returned
+	 * {@code null} and there is no default value. Subclasses typically throw an
+	 * exception in this case.
+	 * @param name the name for the value
+	 * @param parameter the method parameter
+	 * @param exchange the current exchange
+	 */
+	@SuppressWarnings(&quot;UnusedParameters&quot;)
+	protected void handleMissingValue(String name, MethodParameter parameter, ServerWebExchange exchange) {
+<span class="nc" id="L235">		handleMissingValue(name, parameter);</span>
+<span class="nc" id="L236">	}</span>
+
+	/**
+	 * Invoked when a named value is required, but
+	 * {@link #resolveName(String, MethodParameter, ServerWebExchange)} returned
+	 * {@code null} and there is no default value. Subclasses typically throw an
+	 * exception in this case.
+	 * @param name the name for the value
+	 * @param parameter the method parameter
+	 */
+	protected void handleMissingValue(String name, MethodParameter parameter) {
+<span class="nc" id="L247">		String typeName = parameter.getNestedParameterType().getSimpleName();</span>
+<span class="nc" id="L248">		throw new ServerWebInputException(&quot;Missing argument '&quot; + name + &quot;' for method &quot; +</span>
+				&quot;parameter of type &quot; + typeName, parameter);
+	}
+
+	/**
+	 * A {@code null} results in a {@code false} value for {@code boolean}s or
+	 * an exception for other primitives.
+	 */
+	@Nullable
+	private Object handleNullValue(String name, @Nullable Object value, Class&lt;?&gt; paramType) {
+<span class="fc bfc" id="L258" title="All 2 branches covered.">		if (value == null) {</span>
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">			if (Boolean.TYPE.equals(paramType)) {</span>
+<span class="nc" id="L260">				return Boolean.FALSE;</span>
+			}
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">			else if (paramType.isPrimitive()) {</span>
+<span class="nc" id="L263">				throw new IllegalStateException(&quot;Optional &quot; + paramType.getSimpleName() +</span>
+						&quot; parameter '&quot; + name + &quot;' is present but cannot be translated into a&quot; +
+						&quot; null value due to being declared as a primitive type. &quot; +
+						&quot;Consider declaring it as object wrapper for the corresponding primitive type.&quot;);
+			}
+		}
+<span class="fc" id="L269">		return value;</span>
+	}
+
+	/**
+	 * Invoked after a value is resolved.
+	 * @param arg the resolved argument value
+	 * @param name the argument name
+	 * @param parameter the argument parameter type
+	 * @param model the model
+	 * @param exchange the current exchange
+	 */
+	@SuppressWarnings(&quot;UnusedParameters&quot;)
+	protected void handleResolvedValue(
+			@Nullable Object arg, String name, MethodParameter parameter, Model model, ServerWebExchange exchange) {
+<span class="fc" id="L283">	}</span>
+
+
+	/**
+	 * Represents the information about a named value, including name, whether
+	 * it's required and a default value.
+	 */
+	protected static class NamedValueInfo {
+
+		private final String name;
+
+		private final boolean required;
+
+		@Nullable
+		private final String defaultValue;
+
+<span class="fc" id="L299">		public NamedValueInfo(String name, boolean required, @Nullable String defaultValue) {</span>
+<span class="fc" id="L300">			this.name = name;</span>
+<span class="fc" id="L301">			this.required = required;</span>
+<span class="fc" id="L302">			this.defaultValue = defaultValue;</span>
+<span class="fc" id="L303">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

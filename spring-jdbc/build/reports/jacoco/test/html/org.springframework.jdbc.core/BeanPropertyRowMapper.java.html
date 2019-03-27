@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BeanPropertyRowMapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.core</a> &gt; <span class="el_source">BeanPropertyRowMapper.java</span></div><h1>BeanPropertyRowMapper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.core;
+
+import java.beans.PropertyDescriptor;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeanWrapper;
+import org.springframework.beans.NotWritablePropertyException;
+import org.springframework.beans.PropertyAccessorFactory;
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.support.DefaultConversionService;
+import org.springframework.dao.DataRetrievalFailureException;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
+import org.springframework.jdbc.support.JdbcUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link RowMapper} implementation that converts a row into a new instance
+ * of the specified mapped target class. The mapped target class must be a
+ * top-level class and it must have a default or no-arg constructor.
+ *
+ * &lt;p&gt;Column values are mapped based on matching the column name as obtained from result set
+ * meta-data to public setters for the corresponding properties. The names are matched either
+ * directly or by transforming a name separating the parts with underscores to the same name
+ * using &quot;camel&quot; case.
+ *
+ * &lt;p&gt;Mapping is provided for fields in the target class for many common types, e.g.:
+ * String, boolean, Boolean, byte, Byte, short, Short, int, Integer, long, Long,
+ * float, Float, double, Double, BigDecimal, {@code java.util.Date}, etc.
+ *
+ * &lt;p&gt;To facilitate mapping between columns and fields that don't have matching names,
+ * try using column aliases in the SQL statement like &quot;select fname as first_name from customer&quot;.
+ *
+ * &lt;p&gt;For 'null' values read from the database, we will attempt to call the setter, but in the case of
+ * Java primitives, this causes a TypeMismatchException. This class can be configured (using the
+ * primitivesDefaultedForNullValue property) to trap this exception and use the primitives default value.
+ * Be aware that if you use the values from the generated bean to update the database the primitive value
+ * will have been set to the primitive's default value instead of null.
+ *
+ * &lt;p&gt;Please note that this class is designed to provide convenience rather than high performance.
+ * For best performance, consider using a custom {@link RowMapper} implementation.
+ *
+ * @author Thomas Risberg
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @param &lt;T&gt; the result type
+ */
+public class BeanPropertyRowMapper&lt;T&gt; implements RowMapper&lt;T&gt; {
+
+	/** Logger available to subclasses. */
+<span class="pc" id="L81">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	/** The class we are mapping to. */
+	@Nullable
+	private Class&lt;T&gt; mappedClass;
+
+	/** Whether we're strictly validating. */
+<span class="pc" id="L88">	private boolean checkFullyPopulated = false;</span>
+
+	/** Whether we're defaulting primitives when mapping a null value. */
+<span class="pc" id="L91">	private boolean primitivesDefaultedForNullValue = false;</span>
+
+	/** ConversionService for binding JDBC values to bean properties. */
+<span class="pc" id="L94">	@Nullable</span>
+<span class="pc" id="L95">	private ConversionService conversionService = DefaultConversionService.getSharedInstance();</span>
+
+	/** Map of the fields we provide mapping for. */
+	@Nullable
+	private Map&lt;String, PropertyDescriptor&gt; mappedFields;
+
+	/** Set of bean properties we provide mapping for. */
+	@Nullable
+	private Set&lt;String&gt; mappedProperties;
+
+
+	/**
+	 * Create a new {@code BeanPropertyRowMapper} for bean-style configuration.
+	 * @see #setMappedClass
+	 * @see #setCheckFullyPopulated
+	 */
+<span class="nc" id="L111">	public BeanPropertyRowMapper() {</span>
+<span class="nc" id="L112">	}</span>
+
+	/**
+	 * Create a new {@code BeanPropertyRowMapper}, accepting unpopulated
+	 * properties in the target bean.
+	 * &lt;p&gt;Consider using the {@link #newInstance} factory method instead,
+	 * which allows for specifying the mapped type once only.
+	 * @param mappedClass the class that each row should be mapped to
+	 */
+<span class="fc" id="L121">	public BeanPropertyRowMapper(Class&lt;T&gt; mappedClass) {</span>
+<span class="fc" id="L122">		initialize(mappedClass);</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Create a new {@code BeanPropertyRowMapper}.
+	 * @param mappedClass the class that each row should be mapped to
+	 * @param checkFullyPopulated whether we're strictly validating that
+	 * all bean properties have been mapped from corresponding database fields
+	 */
+<span class="fc" id="L131">	public BeanPropertyRowMapper(Class&lt;T&gt; mappedClass, boolean checkFullyPopulated) {</span>
+<span class="fc" id="L132">		initialize(mappedClass);</span>
+<span class="fc" id="L133">		this.checkFullyPopulated = checkFullyPopulated;</span>
+<span class="fc" id="L134">	}</span>
+
+
+	/**
+	 * Set the class that each row should be mapped to.
+	 */
+	public void setMappedClass(Class&lt;T&gt; mappedClass) {
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">		if (this.mappedClass == null) {</span>
+<span class="nc" id="L142">			initialize(mappedClass);</span>
+		}
+		else {
+<span class="fc bfc" id="L145" title="All 2 branches covered.">			if (this.mappedClass != mappedClass) {</span>
+<span class="fc" id="L146">				throw new InvalidDataAccessApiUsageException(&quot;The mapped class can not be reassigned to map to &quot; +</span>
+						mappedClass + &quot; since it is already providing mapping for &quot; + this.mappedClass);
+			}
+		}
+<span class="fc" id="L150">	}</span>
+
+	/**
+	 * Get the class that we are mapping to.
+	 */
+	@Nullable
+	public final Class&lt;T&gt; getMappedClass() {
+<span class="nc" id="L157">		return this.mappedClass;</span>
+	}
+
+	/**
+	 * Set whether we're strictly validating that all bean properties have been mapped
+	 * from corresponding database fields.
+	 * &lt;p&gt;Default is {@code false}, accepting unpopulated properties in the target bean.
+	 */
+	public void setCheckFullyPopulated(boolean checkFullyPopulated) {
+<span class="nc" id="L166">		this.checkFullyPopulated = checkFullyPopulated;</span>
+<span class="nc" id="L167">	}</span>
+
+	/**
+	 * Return whether we're strictly validating that all bean properties have been
+	 * mapped from corresponding database fields.
+	 */
+	public boolean isCheckFullyPopulated() {
+<span class="fc" id="L174">		return this.checkFullyPopulated;</span>
+	}
+
+	/**
+	 * Set whether we're defaulting Java primitives in the case of mapping a null value
+	 * from corresponding database fields.
+	 * &lt;p&gt;Default is {@code false}, throwing an exception when nulls are mapped to Java primitives.
+	 */
+	public void setPrimitivesDefaultedForNullValue(boolean primitivesDefaultedForNullValue) {
+<span class="nc" id="L183">		this.primitivesDefaultedForNullValue = primitivesDefaultedForNullValue;</span>
+<span class="nc" id="L184">	}</span>
+
+	/**
+	 * Return whether we're defaulting Java primitives in the case of mapping a null value
+	 * from corresponding database fields.
+	 */
+	public boolean isPrimitivesDefaultedForNullValue() {
+<span class="nc" id="L191">		return this.primitivesDefaultedForNullValue;</span>
+	}
+
+	/**
+	 * Set a {@link ConversionService} for binding JDBC values to bean properties,
+	 * or {@code null} for none.
+	 * &lt;p&gt;Default is a {@link DefaultConversionService}, as of Spring 4.3. This
+	 * provides support for {@code java.time} conversion and other special types.
+	 * @since 4.3
+	 * @see #initBeanWrapper(BeanWrapper)
+	 */
+	public void setConversionService(@Nullable ConversionService conversionService) {
+<span class="nc" id="L203">		this.conversionService = conversionService;</span>
+<span class="nc" id="L204">	}</span>
+
+	/**
+	 * Return a {@link ConversionService} for binding JDBC values to bean properties,
+	 * or {@code null} if none.
+	 * @since 4.3
+	 */
+	@Nullable
+	public ConversionService getConversionService() {
+<span class="fc" id="L213">		return this.conversionService;</span>
+	}
+
+
+	/**
+	 * Initialize the mapping meta-data for the given class.
+	 * @param mappedClass the mapped class
+	 */
+	protected void initialize(Class&lt;T&gt; mappedClass) {
+<span class="fc" id="L222">		this.mappedClass = mappedClass;</span>
+<span class="fc" id="L223">		this.mappedFields = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L224">		this.mappedProperties = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L225">		PropertyDescriptor[] pds = BeanUtils.getPropertyDescriptors(mappedClass);</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">		for (PropertyDescriptor pd : pds) {</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">			if (pd.getWriteMethod() != null) {</span>
+<span class="fc" id="L228">				this.mappedFields.put(lowerCaseName(pd.getName()), pd);</span>
+<span class="fc" id="L229">				String underscoredName = underscoreName(pd.getName());</span>
+<span class="fc bfc" id="L230" title="All 2 branches covered.">				if (!lowerCaseName(pd.getName()).equals(underscoredName)) {</span>
+<span class="fc" id="L231">					this.mappedFields.put(underscoredName, pd);</span>
+				}
+<span class="fc" id="L233">				this.mappedProperties.add(pd.getName());</span>
+			}
+		}
+<span class="fc" id="L236">	}</span>
+
+	/**
+	 * Convert a name in camelCase to an underscored name in lower case.
+	 * Any upper case letters are converted to lower case with a preceding underscore.
+	 * @param name the original name
+	 * @return the converted name
+	 * @since 4.2
+	 * @see #lowerCaseName
+	 */
+	protected String underscoreName(String name) {
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">		if (!StringUtils.hasLength(name)) {</span>
+<span class="nc" id="L248">			return &quot;&quot;;</span>
+		}
+<span class="fc" id="L250">		StringBuilder result = new StringBuilder();</span>
+<span class="fc" id="L251">		result.append(lowerCaseName(name.substring(0, 1)));</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">		for (int i = 1; i &lt; name.length(); i++) {</span>
+<span class="fc" id="L253">			String s = name.substring(i, i + 1);</span>
+<span class="fc" id="L254">			String slc = lowerCaseName(s);</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">			if (!s.equals(slc)) {</span>
+<span class="fc" id="L256">				result.append(&quot;_&quot;).append(slc);</span>
+			}
+			else {
+<span class="fc" id="L259">				result.append(s);</span>
+			}
+		}
+<span class="fc" id="L262">		return result.toString();</span>
+	}
+
+	/**
+	 * Convert the given name to lower case.
+	 * By default, conversions will happen within the US locale.
+	 * @param name the original name
+	 * @return the converted name
+	 * @since 4.2
+	 */
+	protected String lowerCaseName(String name) {
+<span class="fc" id="L273">		return name.toLowerCase(Locale.US);</span>
+	}
+
+
+	/**
+	 * Extract the values for all columns in the current row.
+	 * &lt;p&gt;Utilizes public setters and result set meta-data.
+	 * @see java.sql.ResultSetMetaData
+	 */
+	@Override
+	public T mapRow(ResultSet rs, int rowNumber) throws SQLException {
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">		Assert.state(this.mappedClass != null, &quot;Mapped class was not specified&quot;);</span>
+<span class="fc" id="L285">		T mappedObject = BeanUtils.instantiateClass(this.mappedClass);</span>
+<span class="fc" id="L286">		BeanWrapper bw = PropertyAccessorFactory.forBeanPropertyAccess(mappedObject);</span>
+<span class="fc" id="L287">		initBeanWrapper(bw);</span>
+
+<span class="fc" id="L289">		ResultSetMetaData rsmd = rs.getMetaData();</span>
+<span class="fc" id="L290">		int columnCount = rsmd.getColumnCount();</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">		Set&lt;String&gt; populatedProperties = (isCheckFullyPopulated() ? new HashSet&lt;&gt;() : null);</span>
+
+<span class="fc bfc" id="L293" title="All 2 branches covered.">		for (int index = 1; index &lt;= columnCount; index++) {</span>
+<span class="fc" id="L294">			String column = JdbcUtils.lookupColumnName(rsmd, index);</span>
+<span class="fc" id="L295">			String field = lowerCaseName(StringUtils.delete(column, &quot; &quot;));</span>
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">			PropertyDescriptor pd = (this.mappedFields != null ? this.mappedFields.get(field) : null);</span>
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">			if (pd != null) {</span>
+				try {
+<span class="fc" id="L299">					Object value = getColumnValue(rs, index, pd);</span>
+<span class="pc bpc" id="L300" title="2 of 4 branches missed.">					if (rowNumber == 0 &amp;&amp; logger.isDebugEnabled()) {</span>
+<span class="nc" id="L301">						logger.debug(&quot;Mapping column '&quot; + column + &quot;' to property '&quot; + pd.getName() +</span>
+<span class="nc" id="L302">								&quot;' of type '&quot; + ClassUtils.getQualifiedName(pd.getPropertyType()) + &quot;'&quot;);</span>
+					}
+					try {
+<span class="fc" id="L305">						bw.setPropertyValue(pd.getName(), value);</span>
+					}
+<span class="fc" id="L307">					catch (TypeMismatchException ex) {</span>
+<span class="pc bpc" id="L308" title="2 of 4 branches missed.">						if (value == null &amp;&amp; this.primitivesDefaultedForNullValue) {</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">							if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L310">								logger.debug(&quot;Intercepted TypeMismatchException for row &quot; + rowNumber +</span>
+										&quot; and column '&quot; + column + &quot;' with null value when setting property '&quot; +
+<span class="nc" id="L312">										pd.getName() + &quot;' of type '&quot; +</span>
+<span class="nc" id="L313">										ClassUtils.getQualifiedName(pd.getPropertyType()) +</span>
+										&quot;' on object: &quot; + mappedObject, ex);
+							}
+						}
+						else {
+<span class="fc" id="L318">							throw ex;</span>
+						}
+<span class="fc" id="L320">					}</span>
+<span class="fc bfc" id="L321" title="All 2 branches covered.">					if (populatedProperties != null) {</span>
+<span class="fc" id="L322">						populatedProperties.add(pd.getName());</span>
+					}
+				}
+<span class="nc" id="L325">				catch (NotWritablePropertyException ex) {</span>
+<span class="nc" id="L326">					throw new DataRetrievalFailureException(</span>
+<span class="nc" id="L327">							&quot;Unable to map column '&quot; + column + &quot;' to property '&quot; + pd.getName() + &quot;'&quot;, ex);</span>
+<span class="fc" id="L328">				}</span>
+			}
+			else {
+				// No PropertyDescriptor found
+<span class="nc bnc" id="L332" title="All 4 branches missed.">				if (rowNumber == 0 &amp;&amp; logger.isDebugEnabled()) {</span>
+<span class="nc" id="L333">					logger.debug(&quot;No property found for column '&quot; + column + &quot;' mapped to field '&quot; + field + &quot;'&quot;);</span>
+				}
+			}
+		}
+
+<span class="fc bfc" id="L338" title="All 4 branches covered.">		if (populatedProperties != null &amp;&amp; !populatedProperties.equals(this.mappedProperties)) {</span>
+<span class="fc" id="L339">			throw new InvalidDataAccessApiUsageException(&quot;Given ResultSet does not contain all fields &quot; +</span>
+<span class="fc" id="L340">					&quot;necessary to populate object of class [&quot; + this.mappedClass.getName() + &quot;]: &quot; +</span>
+					this.mappedProperties);
+		}
+
+<span class="fc" id="L344">		return mappedObject;</span>
+	}
+
+	/**
+	 * Initialize the given BeanWrapper to be used for row mapping.
+	 * To be called for each row.
+	 * &lt;p&gt;The default implementation applies the configured {@link ConversionService},
+	 * if any. Can be overridden in subclasses.
+	 * @param bw the BeanWrapper to initialize
+	 * @see #getConversionService()
+	 * @see BeanWrapper#setConversionService
+	 */
+	protected void initBeanWrapper(BeanWrapper bw) {
+<span class="fc" id="L357">		ConversionService cs = getConversionService();</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">		if (cs != null) {</span>
+<span class="fc" id="L359">			bw.setConversionService(cs);</span>
+		}
+<span class="fc" id="L361">	}</span>
+
+	/**
+	 * Retrieve a JDBC object value for the specified column.
+	 * &lt;p&gt;The default implementation calls
+	 * {@link JdbcUtils#getResultSetValue(java.sql.ResultSet, int, Class)}.
+	 * Subclasses may override this to check specific value types upfront,
+	 * or to post-process values return from {@code getResultSetValue}.
+	 * @param rs is the ResultSet holding the data
+	 * @param index is the column index
+	 * @param pd the bean property that each result object is expected to match
+	 * @return the Object value
+	 * @throws SQLException in case of extraction failure
+	 * @see org.springframework.jdbc.support.JdbcUtils#getResultSetValue(java.sql.ResultSet, int, Class)
+	 */
+	@Nullable
+	protected Object getColumnValue(ResultSet rs, int index, PropertyDescriptor pd) throws SQLException {
+<span class="fc" id="L378">		return JdbcUtils.getResultSetValue(rs, index, pd.getPropertyType());</span>
+	}
+
+
+	/**
+	 * Static factory method to create a new {@code BeanPropertyRowMapper}
+	 * (with the mapped class specified only once).
+	 * @param mappedClass the class that each row should be mapped to
+	 */
+	public static &lt;T&gt; BeanPropertyRowMapper&lt;T&gt; newInstance(Class&lt;T&gt; mappedClass) {
+<span class="nc" id="L388">		return new BeanPropertyRowMapper&lt;&gt;(mappedClass);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MergedAnnotations.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.annotation</a> &gt; <span class="el_source">MergedAnnotations.java</span></div><h1>MergedAnnotations.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.annotation;
+
+import java.lang.annotation.Annotation;
+import java.lang.annotation.Inherited;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Method;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
+
+import org.springframework.lang.Nullable;
+
+/**
+ * Provides access to a collection of merged annotations, usually obtained
+ * from a source such as a {@link Class} or {@link Method}. Each merged
+ * annotation represent a view where the attribute values may be &quot;merged&quot; from
+ * different source values, typically:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;Explicit and Implicit {@link AliasFor @AliasFor} declarations on one or
+ * attributes within the annotation.&lt;/li&gt;
+ * &lt;li&gt;Explicit {@link AliasFor @AliasFor} declarations for a
+ * meta-annotation.&lt;/li&gt;
+ * &lt;li&gt;Convention based attribute aliases for a meta-annotation&lt;/li&gt;
+ * &lt;li&gt;From a meta-annotation declaration.&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;For example, a {@code @PostMapping} annotation might be defined as follows:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;#064;Retention(RetentionPolicy.RUNTIME)
+ * &amp;#064;RequestMapping(method = RequestMethod.POST)
+ * public &amp;#064;interface PostMapping {
+ *
+ * 	&amp;#064;AliasFor(attribute = &quot;path&quot;)
+ * 	String[] value() default {};
+ *
+ * 	&amp;#064;AliasFor(attribute = &quot;value&quot;)
+ * 	String[] path() default {};
+ *
+ * }
+ * &lt;/pre&gt;
+ *
+ * If a method is annotated with {@code @PostMapping(&quot;/home&quot;)} it will contain
+ * merged annotations for both {@code @PostMapping} and the meta-annotation
+ * {@code @RequestMapping}. The merged view of the {@code @RequestMapping}
+ * annotation will contain the following attributes:
+ *
+ * &lt;p&gt;&lt;table&gt;
+ * &lt;tr&gt;
+ * &lt;th&gt;Name&lt;/th&gt;
+ * &lt;th&gt;Value&lt;/th&gt;
+ * &lt;th&gt;Source&lt;/th&gt;
+ * &lt;/tr&gt;
+ * &lt;tr&gt;
+ * &lt;td&gt;value&lt;/td&gt;
+ * &lt;td&gt;&quot;/home&quot;&lt;/td&gt;
+ * &lt;td&gt;Declared {@code @PostMapping}&lt;/td&gt;
+ * &lt;/tr&gt;
+ * &lt;tr&gt;
+ * &lt;td&gt;path&lt;/td&gt;
+ * &lt;td&gt;&quot;/home&quot;&lt;/td&gt;
+ * &lt;td&gt;Explicit {@code @AliasFor}&lt;/td&gt;
+ * &lt;/tr&gt;
+ * &lt;tr&gt;
+ * &lt;td&gt;method&lt;/td&gt;
+ * &lt;td&gt;RequestMethod.POST&lt;/td&gt;
+ * &lt;td&gt;Declared meta-annotation&lt;/td&gt;
+ * &lt;/tr&gt;
+ * &lt;/table&gt;
+ *
+ * &lt;p&gt;{@link MergedAnnotations} can be obtained {@link #from(AnnotatedElement)
+ * from} any Java {@link AnnotatedElement}. They may also used for sources that
+ * don't use reflection (such as those that directly parse bytecode).
+ *
+ * &lt;p&gt;Different {@link SearchStrategy search strategies} can be used to locate
+ * related source elements that contain the annotations to be aggregated
+ * together. For example, {@link SearchStrategy#EXHAUSTIVE} will search both
+ * superclasses and implemented interfaces.
+ *
+ * &lt;p&gt;From a {@link MergedAnnotations} instance you can either {@link #get(String)}
+ * a single annotation, or {@link #stream() stream all annotations} or just
+ * those that match {@link #stream(String) a specific type}. You can also
+ * quickly tell if an annotation {@link #isPresent(String) is present}.
+ *
+ * &lt;p&gt;Here are some typical examples:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * // is an annotation present or meta-present
+ * mergedAnnotations.isPresent(ExampleAnnotation.class);
+ *
+ * // get the merged &quot;value&quot; attribute of ExampleAnnotation (either direct or
+ * // meta-present)
+ * mergedAnnotations.get(ExampleAnnotation.class).getString(&quot;value&quot;);
+ *
+ * // get all meta-annotations but no direct annotations
+ * mergedAnnotations.stream().anyMatch(MergedAnnotation::isMetaPresent);
+ *
+ * // get all ExampleAnnotation declarations (include any meta-annotations) and
+ * // print the merged &quot;value&quot; attributes
+ * mergedAnnotations.stream(ExampleAnnotation.class).map(
+ * 		a -&gt; a.getString(&quot;value&quot;)).forEach(System.out::println);
+ * &lt;/pre&gt;
+ *
+ * @author Phillip Webb
+ * @since 5.2
+ * @see MergedAnnotation
+ * @see MergedAnnotationCollectors
+ * @see MergedAnnotationPredicates
+ * @see MergedAnnotationSelectors
+ */
+public interface MergedAnnotations extends Iterable&lt;MergedAnnotation&lt;Annotation&gt;&gt; {
+
+	/**
+	 * Return if the specified annotation is either directly present, or
+	 * meta-present. Equivalent to calling
+	 * {@code get(annotationType).isPresent()}.
+	 * @param annotationType the annotation type to check
+	 * @return {@code true} if the annotation is present
+	 */
+	&lt;A extends Annotation&gt; boolean isPresent(Class&lt;A&gt; annotationType);
+
+	/**
+	 * Return if the specified annotation is directly present. Equivalent to
+	 * calling {@code get(annotationType).isDirectlyPresent()}.
+	 * @param annotationType the annotation type to check
+	 * @return {@code true} if the annotation is present
+	 */
+	boolean isPresent(String annotationType);
+
+	/**
+	 * Return if the specified annotation is directly present. Equivalent to
+	 * calling {@code get(annotationType).isDirectlyPresent()}.
+	 * @param annotationType the annotation type to check
+	 * @return {@code true} if the annotation is present
+	 */
+	&lt;A extends Annotation&gt; boolean isDirectlyPresent(Class&lt;A&gt; annotationType);
+
+	/**
+	 * Return if the specified annotation is either directly present, or
+	 * meta-present. Equivalent to calling
+	 * {@code get(annotationType).isPresent()}.
+	 * @param annotationType the annotation type to check
+	 * @return {@code true} if the annotation is present
+	 */
+	boolean isDirectlyPresent(String annotationType);
+
+	/**
+	 * Return the {@link MergedAnnotationSelectors#nearest() nearest} matching
+	 * annotation or meta-annotation of the specified type, or
+	 * {@link MergedAnnotation#missing()} if none is present.
+	 * @param annotationType the annotation type to get
+	 * @return a {@link MergedAnnotation} instance
+	 */
+	&lt;A extends Annotation&gt; MergedAnnotation&lt;A&gt; get(Class&lt;A&gt; annotationType);
+
+	/**
+	 * Return the {@link MergedAnnotationSelectors#nearest() nearest} matching
+	 * annotation or meta-annotation of the specified type, or
+	 * {@link MergedAnnotation#missing()} if none is present.
+	 * @param annotationType the annotation type to get
+	 * @param predicate a predicate that must match, or {@code null} if only
+	 * type matching is required
+	 * @return a {@link MergedAnnotation} instance
+	 * @see MergedAnnotationPredicates
+	 */
+	&lt;A extends Annotation&gt; MergedAnnotation&lt;A&gt; get(Class&lt;A&gt; annotationType,
+			@Nullable Predicate&lt;? super MergedAnnotation&lt;A&gt;&gt; predicate);
+
+	/**
+	 * Return a matching annotation or meta-annotation of the specified type, or
+	 * {@link MergedAnnotation#missing()} if none is present.
+	 * @param annotationType the annotation type to get
+	 * @param predicate a predicate that must match, or {@code null} if only
+	 * type matching is required
+	 * @param selector a selector used to choose the most appropriate annotation
+	 * within an aggregate, or {@code null} to select the
+	 * {@link MergedAnnotationSelectors#nearest() nearest}.
+	 * @return a {@link MergedAnnotation} instance
+	 * @see MergedAnnotationPredicates
+	 * @see MergedAnnotationSelectors
+	 */
+	&lt;A extends Annotation&gt; MergedAnnotation&lt;A&gt; get(Class&lt;A&gt; annotationType,
+			@Nullable Predicate&lt;? super MergedAnnotation&lt;A&gt;&gt; predicate,
+			@Nullable MergedAnnotationSelector&lt;A&gt; selector);
+
+	/**
+	 * Return the {@link MergedAnnotationSelectors#nearest() nearest} matching
+	 * annotation or meta-annotation of the specified type, or
+	 * {@link MergedAnnotation#missing()} if none is present.
+	 * @param annotationType the annotation type to get
+	 * @return a {@link MergedAnnotation} instance
+	 */
+	&lt;A extends Annotation&gt; MergedAnnotation&lt;A&gt; get(String annotationType);
+
+	/**
+	 * Return the {@link MergedAnnotationSelectors#nearest() nearest} matching
+	 * annotation or meta-annotation of the specified type, or
+	 * {@link MergedAnnotation#missing()} if none is present.
+	 * @param annotationType the annotation type to get
+	 * @param predicate a predicate that must match, or {@code null} if only
+	 * type matching is required
+	 * @return a {@link MergedAnnotation} instance
+	 * @see MergedAnnotationPredicates
+	 */
+	&lt;A extends Annotation&gt; MergedAnnotation&lt;A&gt; get(String annotationType,
+			@Nullable Predicate&lt;? super MergedAnnotation&lt;A&gt;&gt; predicate);
+
+	/**
+	 * Return a matching annotation or meta-annotation of the specified type, or
+	 * {@link MergedAnnotation#missing()} if none is present.
+	 * @param annotationType the annotation type to get
+	 * @param predicate a predicate that must match, or {@code null} if only
+	 * type matching is required
+	 * @param selector a selector used to choose the most appropriate annotation
+	 * within an aggregate, or {@code null} to select the
+	 * {@link MergedAnnotationSelectors#nearest() nearest}.
+	 * @return a {@link MergedAnnotation} instance
+	 * @see MergedAnnotationPredicates
+	 * @see MergedAnnotationSelectors
+	 */
+	&lt;A extends Annotation&gt; MergedAnnotation&lt;A&gt; get(String annotationType,
+			@Nullable Predicate&lt;? super MergedAnnotation&lt;A&gt;&gt; predicate,
+			@Nullable MergedAnnotationSelector&lt;A&gt; selector);
+
+	/**
+	 * Stream all annotations and meta-annotations that match the specified
+	 * type. The resulting stream follows the same ordering rules are
+	 * {@link #stream()}.
+	 * @param annotationType the annotation type to match
+	 * @return a stream of matching annotations
+	 */
+	&lt;A extends Annotation&gt; Stream&lt;MergedAnnotation&lt;A&gt;&gt; stream(Class&lt;A&gt; annotationType);
+
+	/**
+	 * Stream all annotations and meta-annotations that match the specified
+	 * type.The resulting stream follows the same ordering rules are
+	 * {@link #stream()}.
+	 * @param annotationType the annotation type to match
+	 * @return a stream of matching annotations
+	 */
+	&lt;A extends Annotation&gt; Stream&lt;MergedAnnotation&lt;A&gt;&gt; stream(String annotationType);
+
+	/**
+	 * Stream all contained annotations and meta-annotations contained in this
+	 * collection. The resulting stream is ordered first by the
+	 * {@link MergedAnnotation#getAggregateIndex() aggregate index}, and then by
+	 * the annotation depth (with the closest annotations first). This ordering
+	 * means that, for most use-cases, the most suitable annotations appear
+	 * earliest in the stream.
+	 * @return a stream of annotations
+	 */
+	Stream&lt;MergedAnnotation&lt;Annotation&gt;&gt; stream();
+
+
+	/**
+	 * Create a new {@link MergedAnnotations} instance containing all
+	 * annotations and meta-annotations from the specified element. The
+	 * resulting instance will not include any inherited annotations, if you
+	 * want to include those as well you should use
+	 * {@link #from(AnnotatedElement, SearchStrategy)} with an appropriate
+	 * {@link SearchStrategy}.
+	 * @param element the source element
+	 * @return a {@link MergedAnnotations} instance containing the element
+	 * annotations
+	 */
+	static MergedAnnotations from(AnnotatedElement element) {
+<span class="fc" id="L283">		return from(element, SearchStrategy.DIRECT);</span>
+	}
+
+	/**
+	 * Create a new {@link MergedAnnotations} instance containing all
+	 * annotations and meta-annotations from the specified element and,
+	 * depending on the {@link SearchStrategy}, related inherited elements.
+	 * @param element the source element
+	 * @param searchStrategy the search strategy to use
+	 * @return a {@link MergedAnnotations} instance containing the merged
+	 * element annotations
+	 */
+	static MergedAnnotations from(AnnotatedElement element, SearchStrategy searchStrategy) {
+<span class="fc" id="L296">		return from(element, searchStrategy, RepeatableContainers.standardRepeatables(), AnnotationFilter.PLAIN);</span>
+	}
+
+	/**
+	 * Create a new {@link MergedAnnotations} instance containing all
+	 * annotations and meta-annotations from the specified element and,
+	 * depending on the {@link SearchStrategy}, related inherited elements.
+	 * @param element the source element
+	 * @param searchStrategy the search strategy to use
+	 * @param repeatableContainers the repeatable containers that may be used by
+	 * the element annotations or the meta-annotations
+	 * @param annotationFilter an annotation filter used to restrict the
+	 * annotations considered
+	 * @return a {@link MergedAnnotations} instance containing the merged
+	 * element annotations
+	 */
+	static MergedAnnotations from(AnnotatedElement element, SearchStrategy searchStrategy,
+			RepeatableContainers repeatableContainers, AnnotationFilter annotationFilter) {
+
+<span class="fc" id="L315">		return TypeMappedAnnotations.from(element, searchStrategy, repeatableContainers, annotationFilter);</span>
+	}
+
+	/**
+	 * Create a new {@link MergedAnnotations} instance from the specified
+	 * annotations.
+	 * @param annotations the annotations to include
+	 * @return a {@link MergedAnnotations} instance containing the annotations
+	 * @see #from(Object, Annotation...)
+	 */
+	static MergedAnnotations from(Annotation... annotations) {
+<span class="nc" id="L326">		return from(null, annotations);</span>
+	}
+
+	/**
+	 * Create a new {@link MergedAnnotations} instance from the specified
+	 * annotations.
+	 * @param source the source for the annotations. This source is used only
+	 * for information and logging. It does not need to &lt;em&gt;actually&lt;/em&gt;
+	 * contain the specified annotations and it will not be searched.
+	 * @param annotations the annotations to include
+	 * @return a {@link MergedAnnotations} instance containing the annotations
+	 * @see #from(Annotation...)
+	 * @see #from(AnnotatedElement)
+	 */
+	static MergedAnnotations from(@Nullable Object source, Annotation... annotations) {
+<span class="nc" id="L341">		return from(source, annotations, RepeatableContainers.standardRepeatables(), AnnotationFilter.PLAIN);</span>
+	}
+
+	/**
+	 * Create a new {@link MergedAnnotations} instance from the specified
+	 * annotations.
+	 * @param source the source for the annotations. This source is used only
+	 * for information and logging. It does not need to &lt;em&gt;actually&lt;/em&gt;
+	 * contain the specified annotations and it will not be searched.
+	 * @param annotations the annotations to include
+	 * @param repeatableContainers the repeatable containers that may be used by
+	 * meta-annotations
+	 * @param annotationFilter an annotation filter used to restrict the
+	 * annotations considered
+	 * @return a {@link MergedAnnotations} instance containing the annotations
+	 */
+	static MergedAnnotations from(@Nullable Object source, Annotation[] annotations,
+			RepeatableContainers repeatableContainers, AnnotationFilter annotationFilter) {
+
+<span class="nc" id="L360">		return TypeMappedAnnotations.from(source, annotations, repeatableContainers, annotationFilter);</span>
+	}
+
+
+	/**
+	 * Search strategies supported by
+	 * {@link MergedAnnotations#from(AnnotatedElement, SearchStrategy)}. Each
+	 * strategy creates a different set of aggregates that will be combined to
+	 * create the final {@link MergedAnnotations}.
+	 */
+<span class="fc" id="L370">	enum SearchStrategy {</span>
+
+		/**
+		 * Find only directly declared annotations, without considering
+		 * {@link Inherited @Inherited} annotations and without searching
+		 * super-classes or implemented interfaces.
+		 */
+<span class="fc" id="L377">		DIRECT,</span>
+
+		/**
+		 * Find all directly declared annotations as well any
+		 * {@link Inherited @Inherited} super-class annotations. This strategy
+		 * is only really useful when used with {@link Class} types since the
+		 * {@link Inherited @Inherited} annotation is ignored for all other
+		 * {@link AnnotatedElement annotated elements}. This strategy does not
+		 * search implemented interfaces.
+		 */
+<span class="fc" id="L387">		INHERITED_ANNOTATIONS,</span>
+
+		/**
+		 * Find all directly declared and super-class annotations. This strategy
+		 * is similar to {@link #INHERITED_ANNOTATIONS} except the annotations
+		 * do not need to be meta-annotated with {@link Inherited @Inherited}.
+		 * This strategy does not search implemented interfaces.
+		 */
+<span class="fc" id="L395">		SUPER_CLASS,</span>
+
+		/**
+		 * Perform a full search of all related elements, include those on any
+		 * super-classes or implemented interfaces. Superclass annotations do
+		 * not need to be meta-annotated with {@link Inherited @Inherited}.
+		 */
+<span class="fc" id="L402">		EXHAUSTIVE</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,1096 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConfigurationClassParser.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.annotation</a> &gt; <span class="el_source">ConfigurationClassParser.java</span></div><h1>ConfigurationClassParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.annotation;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.net.UnknownHostException;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringJoiner;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinitionHolder;
+import org.springframework.beans.factory.parsing.Location;
+import org.springframework.beans.factory.parsing.Problem;
+import org.springframework.beans.factory.parsing.ProblemReporter;
+import org.springframework.beans.factory.support.AbstractBeanDefinition;
+import org.springframework.beans.factory.support.BeanDefinitionReader;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.BeanNameGenerator;
+import org.springframework.context.annotation.ConfigurationCondition.ConfigurationPhase;
+import org.springframework.context.annotation.DeferredImportSelector.Group;
+import org.springframework.core.NestedIOException;
+import org.springframework.core.OrderComparator;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.AnnotationAttributes;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.env.CompositePropertySource;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.MutablePropertySources;
+import org.springframework.core.env.PropertySource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.DefaultPropertySourceFactory;
+import org.springframework.core.io.support.EncodedResource;
+import org.springframework.core.io.support.PropertySourceFactory;
+import org.springframework.core.io.support.ResourcePropertySource;
+import org.springframework.core.type.AnnotationMetadata;
+import org.springframework.core.type.MethodMetadata;
+import org.springframework.core.type.StandardAnnotationMetadata;
+import org.springframework.core.type.classreading.MetadataReader;
+import org.springframework.core.type.classreading.MetadataReaderFactory;
+import org.springframework.core.type.filter.AssignableTypeFilter;
+import org.springframework.lang.Nullable;
+import org.springframework.stereotype.Component;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+
+/**
+ * Parses a {@link Configuration} class definition, populating a collection of
+ * {@link ConfigurationClass} objects (parsing a single Configuration class may result in
+ * any number of ConfigurationClass objects because one Configuration class may import
+ * another using the {@link Import} annotation).
+ *
+ * &lt;p&gt;This class helps separate the concern of parsing the structure of a Configuration
+ * class from the concern of registering BeanDefinition objects based on the content of
+ * that model (with the exception of {@code @ComponentScan} annotations which need to be
+ * registered immediately).
+ *
+ * &lt;p&gt;This ASM-based implementation avoids reflection and eager class loading in order to
+ * interoperate effectively with lazy class loading in a Spring ApplicationContext.
+ *
+ * @author Chris Beams
+ * @author Juergen Hoeller
+ * @author Phillip Webb
+ * @author Sam Brannen
+ * @author Stephane Nicoll
+ * @since 3.0
+ * @see ConfigurationClassBeanDefinitionReader
+ */
+class ConfigurationClassParser {
+
+<span class="fc" id="L111">	private static final PropertySourceFactory DEFAULT_PROPERTY_SOURCE_FACTORY = new DefaultPropertySourceFactory();</span>
+
+<span class="fc" id="L113">	private static final Comparator&lt;DeferredImportSelectorHolder&gt; DEFERRED_IMPORT_COMPARATOR =</span>
+<span class="fc" id="L114">			(o1, o2) -&gt; AnnotationAwareOrderComparator.INSTANCE.compare(o1.getImportSelector(), o2.getImportSelector());</span>
+
+
+<span class="fc" id="L117">	private final Log logger = LogFactory.getLog(getClass());</span>
+
+	private final MetadataReaderFactory metadataReaderFactory;
+
+	private final ProblemReporter problemReporter;
+
+	private final Environment environment;
+
+	private final ResourceLoader resourceLoader;
+
+	private final BeanDefinitionRegistry registry;
+
+	private final ComponentScanAnnotationParser componentScanParser;
+
+	private final ConditionEvaluator conditionEvaluator;
+
+<span class="fc" id="L133">	private final Map&lt;ConfigurationClass, ConfigurationClass&gt; configurationClasses = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L135">	private final Map&lt;String, ConfigurationClass&gt; knownSuperclasses = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L137">	private final List&lt;String&gt; propertySourceNames = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L139">	private final ImportStack importStack = new ImportStack();</span>
+
+<span class="fc" id="L141">	private final DeferredImportSelectorHandler deferredImportSelectorHandler = new DeferredImportSelectorHandler();</span>
+
+<span class="fc" id="L143">	private final SourceClass objectSourceClass = new SourceClass(Object.class);</span>
+
+
+	/**
+	 * Create a new {@link ConfigurationClassParser} instance that will be used
+	 * to populate the set of configuration classes.
+	 */
+	public ConfigurationClassParser(MetadataReaderFactory metadataReaderFactory,
+			ProblemReporter problemReporter, Environment environment, ResourceLoader resourceLoader,
+<span class="fc" id="L152">			BeanNameGenerator componentScanBeanNameGenerator, BeanDefinitionRegistry registry) {</span>
+
+<span class="fc" id="L154">		this.metadataReaderFactory = metadataReaderFactory;</span>
+<span class="fc" id="L155">		this.problemReporter = problemReporter;</span>
+<span class="fc" id="L156">		this.environment = environment;</span>
+<span class="fc" id="L157">		this.resourceLoader = resourceLoader;</span>
+<span class="fc" id="L158">		this.registry = registry;</span>
+<span class="fc" id="L159">		this.componentScanParser = new ComponentScanAnnotationParser(</span>
+				environment, resourceLoader, componentScanBeanNameGenerator, registry);
+<span class="fc" id="L161">		this.conditionEvaluator = new ConditionEvaluator(registry, environment, resourceLoader);</span>
+<span class="fc" id="L162">	}</span>
+
+
+	public void parse(Set&lt;BeanDefinitionHolder&gt; configCandidates) {
+<span class="fc bfc" id="L166" title="All 2 branches covered.">		for (BeanDefinitionHolder holder : configCandidates) {</span>
+<span class="fc" id="L167">			BeanDefinition bd = holder.getBeanDefinition();</span>
+			try {
+<span class="fc bfc" id="L169" title="All 2 branches covered.">				if (bd instanceof AnnotatedBeanDefinition) {</span>
+<span class="fc" id="L170">					parse(((AnnotatedBeanDefinition) bd).getMetadata(), holder.getBeanName());</span>
+				}
+<span class="pc bpc" id="L172" title="1 of 4 branches missed.">				else if (bd instanceof AbstractBeanDefinition &amp;&amp; ((AbstractBeanDefinition) bd).hasBeanClass()) {</span>
+<span class="fc" id="L173">					parse(((AbstractBeanDefinition) bd).getBeanClass(), holder.getBeanName());</span>
+				}
+				else {
+<span class="fc" id="L176">					parse(bd.getBeanClassName(), holder.getBeanName());</span>
+				}
+			}
+<span class="fc" id="L179">			catch (BeanDefinitionStoreException ex) {</span>
+<span class="fc" id="L180">				throw ex;</span>
+			}
+<span class="fc" id="L182">			catch (Throwable ex) {</span>
+<span class="fc" id="L183">				throw new BeanDefinitionStoreException(</span>
+<span class="fc" id="L184">						&quot;Failed to parse configuration class [&quot; + bd.getBeanClassName() + &quot;]&quot;, ex);</span>
+<span class="fc" id="L185">			}</span>
+<span class="fc" id="L186">		}</span>
+
+<span class="fc" id="L188">		this.deferredImportSelectorHandler.process();</span>
+<span class="fc" id="L189">	}</span>
+
+	protected final void parse(@Nullable String className, String beanName) throws IOException {
+<span class="fc" id="L192">		Assert.notNull(className, &quot;No bean class name for configuration class bean definition&quot;);</span>
+<span class="fc" id="L193">		MetadataReader reader = this.metadataReaderFactory.getMetadataReader(className);</span>
+<span class="fc" id="L194">		processConfigurationClass(new ConfigurationClass(reader, beanName));</span>
+<span class="fc" id="L195">	}</span>
+
+	protected final void parse(Class&lt;?&gt; clazz, String beanName) throws IOException {
+<span class="fc" id="L198">		processConfigurationClass(new ConfigurationClass(clazz, beanName));</span>
+<span class="fc" id="L199">	}</span>
+
+	protected final void parse(AnnotationMetadata metadata, String beanName) throws IOException {
+<span class="fc" id="L202">		processConfigurationClass(new ConfigurationClass(metadata, beanName));</span>
+<span class="fc" id="L203">	}</span>
+
+	/**
+	 * Validate each {@link ConfigurationClass} object.
+	 * @see ConfigurationClass#validate
+	 */
+	public void validate() {
+<span class="fc bfc" id="L210" title="All 2 branches covered.">		for (ConfigurationClass configClass : this.configurationClasses.keySet()) {</span>
+<span class="fc" id="L211">			configClass.validate(this.problemReporter);</span>
+<span class="fc" id="L212">		}</span>
+<span class="fc" id="L213">	}</span>
+
+	public Set&lt;ConfigurationClass&gt; getConfigurationClasses() {
+<span class="fc" id="L216">		return this.configurationClasses.keySet();</span>
+	}
+
+
+	protected void processConfigurationClass(ConfigurationClass configClass) throws IOException {
+<span class="fc bfc" id="L221" title="All 2 branches covered.">		if (this.conditionEvaluator.shouldSkip(configClass.getMetadata(), ConfigurationPhase.PARSE_CONFIGURATION)) {</span>
+<span class="fc" id="L222">			return;</span>
+		}
+
+<span class="fc" id="L225">		ConfigurationClass existingClass = this.configurationClasses.get(configClass);</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">		if (existingClass != null) {</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">			if (configClass.isImported()) {</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">				if (existingClass.isImported()) {</span>
+<span class="fc" id="L229">					existingClass.mergeImportedBy(configClass);</span>
+				}
+				// Otherwise ignore new imported config class; existing non-imported class overrides it.
+<span class="fc" id="L232">				return;</span>
+			}
+			else {
+				// Explicit bean definition found, probably replacing an import.
+				// Let's remove the old one and go with the new one.
+<span class="fc" id="L237">				this.configurationClasses.remove(configClass);</span>
+<span class="fc" id="L238">				this.knownSuperclasses.values().removeIf(configClass::equals);</span>
+			}
+		}
+
+		// Recursively process the configuration class and its superclass hierarchy.
+<span class="fc" id="L243">		SourceClass sourceClass = asSourceClass(configClass);</span>
+		do {
+<span class="fc" id="L245">			sourceClass = doProcessConfigurationClass(configClass, sourceClass);</span>
+		}
+<span class="fc bfc" id="L247" title="All 2 branches covered.">		while (sourceClass != null);</span>
+
+<span class="fc" id="L249">		this.configurationClasses.put(configClass, configClass);</span>
+<span class="fc" id="L250">	}</span>
+
+	/**
+	 * Apply processing and build a complete {@link ConfigurationClass} by reading the
+	 * annotations, members and methods from the source class. This method can be called
+	 * multiple times as relevant sources are discovered.
+	 * @param configClass the configuration class being build
+	 * @param sourceClass a source class
+	 * @return the superclass, or {@code null} if none found or previously processed
+	 */
+	@Nullable
+	protected final SourceClass doProcessConfigurationClass(ConfigurationClass configClass, SourceClass sourceClass)
+			throws IOException {
+
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		if (configClass.getMetadata().isAnnotated(Component.class.getName())) {</span>
+			// Recursively process any member (nested) classes first
+<span class="fc" id="L266">			processMemberClasses(configClass, sourceClass);</span>
+		}
+
+		// Process any @PropertySource annotations
+<span class="fc bfc" id="L270" title="All 2 branches covered.">		for (AnnotationAttributes propertySource : AnnotationConfigUtils.attributesForRepeatable(</span>
+<span class="fc" id="L271">				sourceClass.getMetadata(), PropertySources.class,</span>
+				org.springframework.context.annotation.PropertySource.class)) {
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">			if (this.environment instanceof ConfigurableEnvironment) {</span>
+<span class="fc" id="L274">				processPropertySource(propertySource);</span>
+			}
+			else {
+<span class="nc" id="L277">				logger.info(&quot;Ignoring @PropertySource annotation on [&quot; + sourceClass.getMetadata().getClassName() +</span>
+						&quot;]. Reason: Environment must implement ConfigurableEnvironment&quot;);
+			}
+<span class="fc" id="L280">		}</span>
+
+		// Process any @ComponentScan annotations
+<span class="fc" id="L283">		Set&lt;AnnotationAttributes&gt; componentScans = AnnotationConfigUtils.attributesForRepeatable(</span>
+<span class="fc" id="L284">				sourceClass.getMetadata(), ComponentScans.class, ComponentScan.class);</span>
+<span class="fc bfc" id="L285" title="All 2 branches covered.">		if (!componentScans.isEmpty() &amp;&amp;</span>
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">				!this.conditionEvaluator.shouldSkip(sourceClass.getMetadata(), ConfigurationPhase.REGISTER_BEAN)) {</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">			for (AnnotationAttributes componentScan : componentScans) {</span>
+				// The config class is annotated with @ComponentScan -&gt; perform the scan immediately
+<span class="fc" id="L289">				Set&lt;BeanDefinitionHolder&gt; scannedBeanDefinitions =</span>
+<span class="fc" id="L290">						this.componentScanParser.parse(componentScan, sourceClass.getMetadata().getClassName());</span>
+				// Check the set of scanned definitions for any further config classes and parse recursively if needed
+<span class="fc bfc" id="L292" title="All 2 branches covered.">				for (BeanDefinitionHolder holder : scannedBeanDefinitions) {</span>
+<span class="fc" id="L293">					BeanDefinition bdCand = holder.getBeanDefinition().getOriginatingBeanDefinition();</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">					if (bdCand == null) {</span>
+<span class="fc" id="L295">						bdCand = holder.getBeanDefinition();</span>
+					}
+<span class="fc bfc" id="L297" title="All 2 branches covered.">					if (ConfigurationClassUtils.checkConfigurationClassCandidate(bdCand, this.metadataReaderFactory)) {</span>
+<span class="fc" id="L298">						parse(bdCand.getBeanClassName(), holder.getBeanName());</span>
+					}
+<span class="fc" id="L300">				}</span>
+<span class="fc" id="L301">			}</span>
+		}
+
+		// Process any @Import annotations
+<span class="fc" id="L305">		processImports(configClass, sourceClass, getImports(sourceClass), true);</span>
+
+		// Process any @ImportResource annotations
+<span class="fc" id="L308">		AnnotationAttributes importResource =</span>
+<span class="fc" id="L309">				AnnotationConfigUtils.attributesFor(sourceClass.getMetadata(), ImportResource.class);</span>
+<span class="fc bfc" id="L310" title="All 2 branches covered.">		if (importResource != null) {</span>
+<span class="fc" id="L311">			String[] resources = importResource.getStringArray(&quot;locations&quot;);</span>
+<span class="fc" id="L312">			Class&lt;? extends BeanDefinitionReader&gt; readerClass = importResource.getClass(&quot;reader&quot;);</span>
+<span class="fc bfc" id="L313" title="All 2 branches covered.">			for (String resource : resources) {</span>
+<span class="fc" id="L314">				String resolvedResource = this.environment.resolveRequiredPlaceholders(resource);</span>
+<span class="fc" id="L315">				configClass.addImportedResource(resolvedResource, readerClass);</span>
+			}
+		}
+
+		// Process individual @Bean methods
+<span class="fc" id="L320">		Set&lt;MethodMetadata&gt; beanMethods = retrieveBeanMethodMetadata(sourceClass);</span>
+<span class="fc bfc" id="L321" title="All 2 branches covered.">		for (MethodMetadata methodMetadata : beanMethods) {</span>
+<span class="fc" id="L322">			configClass.addBeanMethod(new BeanMethod(methodMetadata, configClass));</span>
+<span class="fc" id="L323">		}</span>
+
+		// Process default methods on interfaces
+<span class="fc" id="L326">		processInterfaces(configClass, sourceClass);</span>
+
+		// Process superclass, if any
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">		if (sourceClass.getMetadata().hasSuperClass()) {</span>
+<span class="fc" id="L330">			String superclass = sourceClass.getMetadata().getSuperClassName();</span>
+<span class="pc bpc" id="L331" title="1 of 4 branches missed.">			if (superclass != null &amp;&amp; !superclass.startsWith(&quot;java&quot;) &amp;&amp;</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">					!this.knownSuperclasses.containsKey(superclass)) {</span>
+<span class="fc" id="L333">				this.knownSuperclasses.put(superclass, configClass);</span>
+				// Superclass found, return its annotation metadata and recurse
+<span class="fc" id="L335">				return sourceClass.getSuperClass();</span>
+			}
+		}
+
+		// No superclass -&gt; processing is complete
+<span class="fc" id="L340">		return null;</span>
+	}
+
+	/**
+	 * Register member (nested) classes that happen to be configuration classes themselves.
+	 */
+	private void processMemberClasses(ConfigurationClass configClass, SourceClass sourceClass) throws IOException {
+<span class="fc" id="L347">		Collection&lt;SourceClass&gt; memberClasses = sourceClass.getMemberClasses();</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">		if (!memberClasses.isEmpty()) {</span>
+<span class="fc" id="L349">			List&lt;SourceClass&gt; candidates = new ArrayList&lt;&gt;(memberClasses.size());</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">			for (SourceClass memberClass : memberClasses) {</span>
+<span class="fc bfc" id="L351" title="All 2 branches covered.">				if (ConfigurationClassUtils.isConfigurationCandidate(memberClass.getMetadata()) &amp;&amp;</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">						!memberClass.getMetadata().getClassName().equals(configClass.getMetadata().getClassName())) {</span>
+<span class="fc" id="L353">					candidates.add(memberClass);</span>
+				}
+<span class="fc" id="L355">			}</span>
+<span class="fc" id="L356">			OrderComparator.sort(candidates);</span>
+<span class="fc bfc" id="L357" title="All 2 branches covered.">			for (SourceClass candidate : candidates) {</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">				if (this.importStack.contains(configClass)) {</span>
+<span class="nc" id="L359">					this.problemReporter.error(new CircularImportProblem(configClass, this.importStack));</span>
+				}
+				else {
+<span class="fc" id="L362">					this.importStack.push(configClass);</span>
+					try {
+<span class="fc" id="L364">						processConfigurationClass(candidate.asConfigClass(configClass));</span>
+					}
+					finally {
+<span class="fc" id="L367">						this.importStack.pop();</span>
+					}
+				}
+<span class="fc" id="L370">			}</span>
+		}
+<span class="fc" id="L372">	}</span>
+
+	/**
+	 * Register default methods on interfaces implemented by the configuration class.
+	 */
+	private void processInterfaces(ConfigurationClass configClass, SourceClass sourceClass) throws IOException {
+<span class="fc bfc" id="L378" title="All 2 branches covered.">		for (SourceClass ifc : sourceClass.getInterfaces()) {</span>
+<span class="fc" id="L379">			Set&lt;MethodMetadata&gt; beanMethods = retrieveBeanMethodMetadata(ifc);</span>
+<span class="fc bfc" id="L380" title="All 2 branches covered.">			for (MethodMetadata methodMetadata : beanMethods) {</span>
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">				if (!methodMetadata.isAbstract()) {</span>
+					// A default method or other concrete method on a Java 8+ interface...
+<span class="fc" id="L383">					configClass.addBeanMethod(new BeanMethod(methodMetadata, configClass));</span>
+				}
+<span class="fc" id="L385">			}</span>
+<span class="fc" id="L386">			processInterfaces(configClass, ifc);</span>
+<span class="fc" id="L387">		}</span>
+<span class="fc" id="L388">	}</span>
+
+	/**
+	 * Retrieve the metadata for all &lt;code&gt;@Bean&lt;/code&gt; methods.
+	 */
+	private Set&lt;MethodMetadata&gt; retrieveBeanMethodMetadata(SourceClass sourceClass) {
+<span class="fc" id="L394">		AnnotationMetadata original = sourceClass.getMetadata();</span>
+<span class="fc" id="L395">		Set&lt;MethodMetadata&gt; beanMethods = original.getAnnotatedMethods(Bean.class.getName());</span>
+<span class="fc bfc" id="L396" title="All 4 branches covered.">		if (beanMethods.size() &gt; 1 &amp;&amp; original instanceof StandardAnnotationMetadata) {</span>
+			// Try reading the class file via ASM for deterministic declaration order...
+			// Unfortunately, the JVM's standard reflection returns methods in arbitrary
+			// order, even between different runs of the same application on the same JVM.
+			try {
+<span class="fc" id="L401">				AnnotationMetadata asm =</span>
+<span class="fc" id="L402">						this.metadataReaderFactory.getMetadataReader(original.getClassName()).getAnnotationMetadata();</span>
+<span class="fc" id="L403">				Set&lt;MethodMetadata&gt; asmMethods = asm.getAnnotatedMethods(Bean.class.getName());</span>
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">				if (asmMethods.size() &gt;= beanMethods.size()) {</span>
+<span class="fc" id="L405">					Set&lt;MethodMetadata&gt; selectedMethods = new LinkedHashSet&lt;&gt;(asmMethods.size());</span>
+<span class="fc bfc" id="L406" title="All 2 branches covered.">					for (MethodMetadata asmMethod : asmMethods) {</span>
+<span class="pc bpc" id="L407" title="1 of 2 branches missed.">						for (MethodMetadata beanMethod : beanMethods) {</span>
+<span class="fc bfc" id="L408" title="All 2 branches covered.">							if (beanMethod.getMethodName().equals(asmMethod.getMethodName())) {</span>
+<span class="fc" id="L409">								selectedMethods.add(beanMethod);</span>
+<span class="fc" id="L410">								break;</span>
+							}
+<span class="fc" id="L412">						}</span>
+<span class="fc" id="L413">					}</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">					if (selectedMethods.size() == beanMethods.size()) {</span>
+						// All reflection-detected methods found in ASM method set -&gt; proceed
+<span class="fc" id="L416">						beanMethods = selectedMethods;</span>
+					}
+				}
+			}
+<span class="nc" id="L420">			catch (IOException ex) {</span>
+<span class="nc" id="L421">				logger.debug(&quot;Failed to read class file via ASM for determining @Bean method order&quot;, ex);</span>
+				// No worries, let's continue with the reflection metadata we started with...
+<span class="fc" id="L423">			}</span>
+		}
+<span class="fc" id="L425">		return beanMethods;</span>
+	}
+
+
+	/**
+	 * Process the given &lt;code&gt;@PropertySource&lt;/code&gt; annotation metadata.
+	 * @param propertySource metadata for the &lt;code&gt;@PropertySource&lt;/code&gt; annotation found
+	 * @throws IOException if loading a property source failed
+	 */
+	private void processPropertySource(AnnotationAttributes propertySource) throws IOException {
+<span class="fc" id="L435">		String name = propertySource.getString(&quot;name&quot;);</span>
+<span class="fc bfc" id="L436" title="All 2 branches covered.">		if (!StringUtils.hasLength(name)) {</span>
+<span class="fc" id="L437">			name = null;</span>
+		}
+<span class="fc" id="L439">		String encoding = propertySource.getString(&quot;encoding&quot;);</span>
+<span class="pc bpc" id="L440" title="1 of 2 branches missed.">		if (!StringUtils.hasLength(encoding)) {</span>
+<span class="fc" id="L441">			encoding = null;</span>
+		}
+<span class="fc" id="L443">		String[] locations = propertySource.getStringArray(&quot;value&quot;);</span>
+<span class="fc bfc" id="L444" title="All 2 branches covered.">		Assert.isTrue(locations.length &gt; 0, &quot;At least one @PropertySource(value) location is required&quot;);</span>
+<span class="fc" id="L445">		boolean ignoreResourceNotFound = propertySource.getBoolean(&quot;ignoreResourceNotFound&quot;);</span>
+
+<span class="fc" id="L447">		Class&lt;? extends PropertySourceFactory&gt; factoryClass = propertySource.getClass(&quot;factory&quot;);</span>
+<span class="fc bfc" id="L448" title="All 2 branches covered.">		PropertySourceFactory factory = (factoryClass == PropertySourceFactory.class ?</span>
+<span class="fc" id="L449">				DEFAULT_PROPERTY_SOURCE_FACTORY : BeanUtils.instantiateClass(factoryClass));</span>
+
+<span class="fc bfc" id="L451" title="All 2 branches covered.">		for (String location : locations) {</span>
+			try {
+<span class="fc" id="L453">				String resolvedLocation = this.environment.resolveRequiredPlaceholders(location);</span>
+<span class="fc" id="L454">				Resource resource = this.resourceLoader.getResource(resolvedLocation);</span>
+<span class="fc" id="L455">				addPropertySource(factory.createPropertySource(name, new EncodedResource(resource, encoding)));</span>
+			}
+<span class="fc" id="L457">			catch (IllegalArgumentException | FileNotFoundException | UnknownHostException ex) {</span>
+				// Placeholders not resolvable or resource not found when trying to open it
+<span class="fc bfc" id="L459" title="All 2 branches covered.">				if (ignoreResourceNotFound) {</span>
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">					if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L461">						logger.info(&quot;Properties location [&quot; + location + &quot;] not resolvable: &quot; + ex.getMessage());</span>
+					}
+				}
+				else {
+<span class="fc" id="L465">					throw ex;</span>
+				}
+<span class="fc" id="L467">			}</span>
+		}
+<span class="fc" id="L469">	}</span>
+
+	private void addPropertySource(PropertySource&lt;?&gt; propertySource) {
+<span class="fc" id="L472">		String name = propertySource.getName();</span>
+<span class="fc" id="L473">		MutablePropertySources propertySources = ((ConfigurableEnvironment) this.environment).getPropertySources();</span>
+
+<span class="fc bfc" id="L475" title="All 2 branches covered.">		if (this.propertySourceNames.contains(name)) {</span>
+			// We've already added a version, we need to extend it
+<span class="fc" id="L477">			PropertySource&lt;?&gt; existing = propertySources.get(name);</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">			if (existing != null) {</span>
+<span class="pc bpc" id="L479" title="1 of 2 branches missed.">				PropertySource&lt;?&gt; newSource = (propertySource instanceof ResourcePropertySource ?</span>
+<span class="pc" id="L480">						((ResourcePropertySource) propertySource).withResourceName() : propertySource);</span>
+<span class="pc bpc" id="L481" title="1 of 2 branches missed.">				if (existing instanceof CompositePropertySource) {</span>
+<span class="nc" id="L482">					((CompositePropertySource) existing).addFirstPropertySource(newSource);</span>
+				}
+				else {
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">					if (existing instanceof ResourcePropertySource) {</span>
+<span class="fc" id="L486">						existing = ((ResourcePropertySource) existing).withResourceName();</span>
+					}
+<span class="fc" id="L488">					CompositePropertySource composite = new CompositePropertySource(name);</span>
+<span class="fc" id="L489">					composite.addPropertySource(newSource);</span>
+<span class="fc" id="L490">					composite.addPropertySource(existing);</span>
+<span class="fc" id="L491">					propertySources.replace(name, composite);</span>
+				}
+<span class="fc" id="L493">				return;</span>
+			}
+		}
+
+<span class="fc bfc" id="L497" title="All 2 branches covered.">		if (this.propertySourceNames.isEmpty()) {</span>
+<span class="fc" id="L498">			propertySources.addLast(propertySource);</span>
+		}
+		else {
+<span class="fc" id="L501">			String firstProcessed = this.propertySourceNames.get(this.propertySourceNames.size() - 1);</span>
+<span class="fc" id="L502">			propertySources.addBefore(firstProcessed, propertySource);</span>
+		}
+<span class="fc" id="L504">		this.propertySourceNames.add(name);</span>
+<span class="fc" id="L505">	}</span>
+
+
+	/**
+	 * Returns {@code @Import} class, considering all meta-annotations.
+	 */
+	private Set&lt;SourceClass&gt; getImports(SourceClass sourceClass) throws IOException {
+<span class="fc" id="L512">		Set&lt;SourceClass&gt; imports = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L513">		Set&lt;SourceClass&gt; visited = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L514">		collectImports(sourceClass, imports, visited);</span>
+<span class="fc" id="L515">		return imports;</span>
+	}
+
+	/**
+	 * Recursively collect all declared {@code @Import} values. Unlike most
+	 * meta-annotations it is valid to have several {@code @Import}s declared with
+	 * different values; the usual process of returning values from the first
+	 * meta-annotation on a class is not sufficient.
+	 * &lt;p&gt;For example, it is common for a {@code @Configuration} class to declare direct
+	 * {@code @Import}s in addition to meta-imports originating from an {@code @Enable}
+	 * annotation.
+	 * @param sourceClass the class to search
+	 * @param imports the imports collected so far
+	 * @param visited used to track visited classes to prevent infinite recursion
+	 * @throws IOException if there is any problem reading metadata from the named class
+	 */
+	private void collectImports(SourceClass sourceClass, Set&lt;SourceClass&gt; imports, Set&lt;SourceClass&gt; visited)
+			throws IOException {
+
+<span class="fc bfc" id="L534" title="All 2 branches covered.">		if (visited.add(sourceClass)) {</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">			for (SourceClass annotation : sourceClass.getAnnotations()) {</span>
+<span class="fc" id="L536">				String annName = annotation.getMetadata().getClassName();</span>
+<span class="fc bfc" id="L537" title="All 4 branches covered.">				if (!annName.startsWith(&quot;java&quot;) &amp;&amp; !annName.equals(Import.class.getName())) {</span>
+<span class="fc" id="L538">					collectImports(annotation, imports, visited);</span>
+				}
+<span class="fc" id="L540">			}</span>
+<span class="fc" id="L541">			imports.addAll(sourceClass.getAnnotationAttributes(Import.class.getName(), &quot;value&quot;));</span>
+		}
+<span class="fc" id="L543">	}</span>
+
+
+
+	private void processImports(ConfigurationClass configClass, SourceClass currentSourceClass,
+			Collection&lt;SourceClass&gt; importCandidates, boolean checkForCircularImports) {
+
+<span class="fc bfc" id="L550" title="All 2 branches covered.">		if (importCandidates.isEmpty()) {</span>
+<span class="fc" id="L551">			return;</span>
+		}
+
+<span class="fc bfc" id="L554" title="All 4 branches covered.">		if (checkForCircularImports &amp;&amp; isChainedImportOnStack(configClass)) {</span>
+<span class="nc" id="L555">			this.problemReporter.error(new CircularImportProblem(configClass, this.importStack));</span>
+		}
+		else {
+<span class="fc" id="L558">			this.importStack.push(configClass);</span>
+			try {
+<span class="fc bfc" id="L560" title="All 2 branches covered.">				for (SourceClass candidate : importCandidates) {</span>
+<span class="fc bfc" id="L561" title="All 2 branches covered.">					if (candidate.isAssignable(ImportSelector.class)) {</span>
+						// Candidate class is an ImportSelector -&gt; delegate to it to determine imports
+<span class="fc" id="L563">						Class&lt;?&gt; candidateClass = candidate.loadClass();</span>
+<span class="fc" id="L564">						ImportSelector selector = BeanUtils.instantiateClass(candidateClass, ImportSelector.class);</span>
+<span class="fc" id="L565">						ParserStrategyUtils.invokeAwareMethods(</span>
+								selector, this.environment, this.resourceLoader, this.registry);
+<span class="fc bfc" id="L567" title="All 2 branches covered.">						if (selector instanceof DeferredImportSelector) {</span>
+<span class="fc" id="L568">							this.deferredImportSelectorHandler.handle(</span>
+									configClass, (DeferredImportSelector) selector);
+						}
+						else {
+<span class="fc" id="L572">							String[] importClassNames = selector.selectImports(currentSourceClass.getMetadata());</span>
+<span class="fc" id="L573">							Collection&lt;SourceClass&gt; importSourceClasses = asSourceClasses(importClassNames);</span>
+<span class="fc" id="L574">							processImports(configClass, currentSourceClass, importSourceClasses, false);</span>
+						}
+<span class="fc" id="L576">					}</span>
+<span class="fc bfc" id="L577" title="All 2 branches covered.">					else if (candidate.isAssignable(ImportBeanDefinitionRegistrar.class)) {</span>
+						// Candidate class is an ImportBeanDefinitionRegistrar -&gt;
+						// delegate to it to register additional bean definitions
+<span class="fc" id="L580">						Class&lt;?&gt; candidateClass = candidate.loadClass();</span>
+<span class="fc" id="L581">						ImportBeanDefinitionRegistrar registrar =</span>
+<span class="fc" id="L582">								BeanUtils.instantiateClass(candidateClass, ImportBeanDefinitionRegistrar.class);</span>
+<span class="fc" id="L583">						ParserStrategyUtils.invokeAwareMethods(</span>
+								registrar, this.environment, this.resourceLoader, this.registry);
+<span class="fc" id="L585">						configClass.addImportBeanDefinitionRegistrar(registrar, currentSourceClass.getMetadata());</span>
+<span class="fc" id="L586">					}</span>
+					else {
+						// Candidate class not an ImportSelector or ImportBeanDefinitionRegistrar -&gt;
+						// process it as an @Configuration class
+<span class="fc" id="L590">						this.importStack.registerImport(</span>
+<span class="fc" id="L591">								currentSourceClass.getMetadata(), candidate.getMetadata().getClassName());</span>
+<span class="fc" id="L592">						processConfigurationClass(candidate.asConfigClass(configClass));</span>
+					}
+<span class="fc" id="L594">				}</span>
+			}
+<span class="fc" id="L596">			catch (BeanDefinitionStoreException ex) {</span>
+<span class="fc" id="L597">				throw ex;</span>
+			}
+<span class="fc" id="L599">			catch (Throwable ex) {</span>
+<span class="fc" id="L600">				throw new BeanDefinitionStoreException(</span>
+						&quot;Failed to process import candidates for configuration class [&quot; +
+<span class="fc" id="L602">						configClass.getMetadata().getClassName() + &quot;]&quot;, ex);</span>
+			}
+			finally {
+<span class="fc" id="L605">				this.importStack.pop();</span>
+			}
+		}
+<span class="fc" id="L608">	}</span>
+
+	private boolean isChainedImportOnStack(ConfigurationClass configClass) {
+<span class="fc bfc" id="L611" title="All 2 branches covered.">		if (this.importStack.contains(configClass)) {</span>
+<span class="fc" id="L612">			String configClassName = configClass.getMetadata().getClassName();</span>
+<span class="fc" id="L613">			AnnotationMetadata importingClass = this.importStack.getImportingClassFor(configClassName);</span>
+<span class="fc bfc" id="L614" title="All 2 branches covered.">			while (importingClass != null) {</span>
+<span class="fc bfc" id="L615" title="All 2 branches covered.">				if (configClassName.equals(importingClass.getClassName())) {</span>
+<span class="fc" id="L616">					return true;</span>
+				}
+<span class="fc" id="L618">				importingClass = this.importStack.getImportingClassFor(importingClass.getClassName());</span>
+			}
+		}
+<span class="fc" id="L621">		return false;</span>
+	}
+
+	ImportRegistry getImportRegistry() {
+<span class="fc" id="L625">		return this.importStack;</span>
+	}
+
+
+	/**
+	 * Factory method to obtain a {@link SourceClass} from a {@link ConfigurationClass}.
+	 */
+	private SourceClass asSourceClass(ConfigurationClass configurationClass) throws IOException {
+<span class="fc" id="L633">		AnnotationMetadata metadata = configurationClass.getMetadata();</span>
+<span class="fc bfc" id="L634" title="All 2 branches covered.">		if (metadata instanceof StandardAnnotationMetadata) {</span>
+<span class="fc" id="L635">			return asSourceClass(((StandardAnnotationMetadata) metadata).getIntrospectedClass());</span>
+		}
+<span class="fc" id="L637">		return asSourceClass(metadata.getClassName());</span>
+	}
+
+	/**
+	 * Factory method to obtain a {@link SourceClass} from a {@link Class}.
+	 */
+	SourceClass asSourceClass(@Nullable Class&lt;?&gt; classType) throws IOException {
+<span class="pc bpc" id="L644" title="1 of 4 branches missed.">		if (classType == null || classType.getName().startsWith(&quot;java.lang.annotation&quot;)) {</span>
+<span class="fc" id="L645">			return this.objectSourceClass;</span>
+		}
+		try {
+			// Sanity test that we can reflectively read annotations,
+			// including Class attributes; if not -&gt; fall back to ASM
+<span class="fc bfc" id="L650" title="All 2 branches covered.">			for (Annotation ann : classType.getAnnotations()) {</span>
+<span class="fc" id="L651">				AnnotationUtils.validateAnnotation(ann);</span>
+			}
+<span class="fc" id="L653">			return new SourceClass(classType);</span>
+		}
+<span class="nc" id="L655">		catch (Throwable ex) {</span>
+			// Enforce ASM via class name resolution
+<span class="nc" id="L657">			return asSourceClass(classType.getName());</span>
+		}
+	}
+
+	/**
+	 * Factory method to obtain {@link SourceClass SourceClasss} from class names.
+	 */
+	private Collection&lt;SourceClass&gt; asSourceClasses(String... classNames) throws IOException {
+<span class="fc" id="L665">		List&lt;SourceClass&gt; annotatedClasses = new ArrayList&lt;&gt;(classNames.length);</span>
+<span class="fc bfc" id="L666" title="All 2 branches covered.">		for (String className : classNames) {</span>
+<span class="fc" id="L667">			annotatedClasses.add(asSourceClass(className));</span>
+		}
+<span class="fc" id="L669">		return annotatedClasses;</span>
+	}
+
+	/**
+	 * Factory method to obtain a {@link SourceClass} from a class name.
+	 */
+	SourceClass asSourceClass(@Nullable String className) throws IOException {
+<span class="pc bpc" id="L676" title="1 of 4 branches missed.">		if (className == null || className.startsWith(&quot;java.lang.annotation&quot;)) {</span>
+<span class="fc" id="L677">			return this.objectSourceClass;</span>
+		}
+<span class="pc bpc" id="L679" title="1 of 2 branches missed.">		if (className.startsWith(&quot;java&quot;)) {</span>
+			// Never use ASM for core java types
+			try {
+<span class="nc" id="L682">				return new SourceClass(ClassUtils.forName(className,</span>
+<span class="nc" id="L683">						this.resourceLoader.getClassLoader()));</span>
+			}
+<span class="nc" id="L685">			catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L686">				throw new NestedIOException(</span>
+						&quot;Failed to load class [&quot; + className + &quot;]&quot;, ex);
+			}
+		}
+<span class="fc" id="L690">		return new SourceClass(</span>
+<span class="fc" id="L691">				this.metadataReaderFactory.getMetadataReader(className));</span>
+	}
+
+
+	@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L696">	private static class ImportStack extends ArrayDeque&lt;ConfigurationClass&gt; implements ImportRegistry {</span>
+
+<span class="fc" id="L698">		private final MultiValueMap&lt;String, AnnotationMetadata&gt; imports = new LinkedMultiValueMap&lt;&gt;();</span>
+
+		public void registerImport(AnnotationMetadata importingClass, String importedClass) {
+<span class="fc" id="L701">			this.imports.add(importedClass, importingClass);</span>
+<span class="fc" id="L702">		}</span>
+
+		@Override
+		@Nullable
+		public AnnotationMetadata getImportingClassFor(String importedClass) {
+<span class="fc" id="L707">			return CollectionUtils.lastElement(this.imports.get(importedClass));</span>
+		}
+
+		@Override
+		public void removeImportingClass(String importingClass) {
+<span class="fc bfc" id="L712" title="All 2 branches covered.">			for (List&lt;AnnotationMetadata&gt; list : this.imports.values()) {</span>
+<span class="fc bfc" id="L713" title="All 2 branches covered.">				for (Iterator&lt;AnnotationMetadata&gt; iterator = list.iterator(); iterator.hasNext();) {</span>
+<span class="fc bfc" id="L714" title="All 2 branches covered.">					if (iterator.next().getClassName().equals(importingClass)) {</span>
+<span class="fc" id="L715">						iterator.remove();</span>
+<span class="fc" id="L716">						break;</span>
+					}
+				}
+<span class="fc" id="L719">			}</span>
+<span class="fc" id="L720">		}</span>
+
+		/**
+		 * Given a stack containing (in order)
+		 * &lt;ul&gt;
+		 * &lt;li&gt;com.acme.Foo&lt;/li&gt;
+		 * &lt;li&gt;com.acme.Bar&lt;/li&gt;
+		 * &lt;li&gt;com.acme.Baz&lt;/li&gt;
+		 * &lt;/ul&gt;
+		 * return &quot;[Foo-&gt;Bar-&gt;Baz]&quot;.
+		 */
+		@Override
+		public String toString() {
+<span class="fc" id="L733">			StringJoiner joiner = new StringJoiner(&quot;-&gt;&quot;, &quot;[&quot;, &quot;]&quot;);</span>
+<span class="fc bfc" id="L734" title="All 2 branches covered.">			for (ConfigurationClass configurationClass : this) {</span>
+<span class="fc" id="L735">				joiner.add(configurationClass.getSimpleName());</span>
+<span class="fc" id="L736">			}</span>
+<span class="fc" id="L737">			return joiner.toString();</span>
+		}
+	}
+
+
+<span class="fc" id="L742">	private class DeferredImportSelectorHandler {</span>
+
+<span class="fc" id="L744">		@Nullable</span>
+		private List&lt;DeferredImportSelectorHolder&gt; deferredImportSelectors = new ArrayList&lt;&gt;();
+
+		/**
+		 * Handle the specified {@link DeferredImportSelector}. If deferred import
+		 * selectors are being collected, this registers this instance to the list. If
+		 * they are being processed, the {@link DeferredImportSelector} is also processed
+		 * immediately according to its {@link DeferredImportSelector.Group}.
+		 * @param configClass the source configuration class
+		 * @param importSelector the selector to handle
+		 */
+		public void handle(ConfigurationClass configClass, DeferredImportSelector importSelector) {
+<span class="fc" id="L756">			DeferredImportSelectorHolder holder = new DeferredImportSelectorHolder(</span>
+					configClass, importSelector);
+<span class="fc bfc" id="L758" title="All 2 branches covered.">			if (this.deferredImportSelectors == null) {</span>
+<span class="fc" id="L759">				DeferredImportSelectorGroupingHandler handler = new DeferredImportSelectorGroupingHandler();</span>
+<span class="fc" id="L760">				handler.register(holder);</span>
+<span class="fc" id="L761">				handler.processGroupImports();</span>
+<span class="fc" id="L762">			}</span>
+			else {
+<span class="fc" id="L764">				this.deferredImportSelectors.add(holder);</span>
+			}
+<span class="fc" id="L766">		}</span>
+
+		public void process() {
+<span class="fc" id="L769">			List&lt;DeferredImportSelectorHolder&gt; deferredImports = this.deferredImportSelectors;</span>
+<span class="fc" id="L770">			this.deferredImportSelectors = null;</span>
+			try {
+<span class="pc bpc" id="L772" title="1 of 2 branches missed.">				if (deferredImports != null) {</span>
+<span class="fc" id="L773">					DeferredImportSelectorGroupingHandler handler = new DeferredImportSelectorGroupingHandler();</span>
+<span class="fc" id="L774">					deferredImports.sort(DEFERRED_IMPORT_COMPARATOR);</span>
+<span class="fc" id="L775">					deferredImports.forEach(handler::register);</span>
+<span class="fc" id="L776">					handler.processGroupImports();</span>
+				}
+			}
+			finally {
+<span class="fc" id="L780">				this.deferredImportSelectors = new ArrayList&lt;&gt;();</span>
+			}
+<span class="fc" id="L782">		}</span>
+
+	}
+
+
+<span class="fc" id="L787">	private class DeferredImportSelectorGroupingHandler {</span>
+
+<span class="fc" id="L789">		private final Map&lt;Object, DeferredImportSelectorGrouping&gt; groupings = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L791">		private final Map&lt;AnnotationMetadata, ConfigurationClass&gt; configurationClasses = new HashMap&lt;&gt;();</span>
+
+		public void register(DeferredImportSelectorHolder deferredImport) {
+<span class="fc" id="L794">			Class&lt;? extends Group&gt; group = deferredImport.getImportSelector()</span>
+<span class="fc" id="L795">					.getImportGroup();</span>
+<span class="fc bfc" id="L796" title="All 2 branches covered.">			DeferredImportSelectorGrouping grouping = this.groupings.computeIfAbsent(</span>
+					(group != null ? group : deferredImport),
+<span class="fc" id="L798">					key -&gt; new DeferredImportSelectorGrouping(createGroup(group)));</span>
+<span class="fc" id="L799">			grouping.add(deferredImport);</span>
+<span class="fc" id="L800">			this.configurationClasses.put(deferredImport.getConfigurationClass().getMetadata(),</span>
+<span class="fc" id="L801">					deferredImport.getConfigurationClass());</span>
+<span class="fc" id="L802">		}</span>
+
+		public void processGroupImports() {
+<span class="fc bfc" id="L805" title="All 2 branches covered.">			for (DeferredImportSelectorGrouping grouping : this.groupings.values()) {</span>
+<span class="fc" id="L806">				grouping.getImports().forEach(entry -&gt; {</span>
+<span class="fc" id="L807">					ConfigurationClass configurationClass = this.configurationClasses.get(</span>
+<span class="fc" id="L808">							entry.getMetadata());</span>
+					try {
+<span class="fc" id="L810">						processImports(configurationClass, asSourceClass(configurationClass),</span>
+<span class="fc" id="L811">								asSourceClasses(entry.getImportClassName()), false);</span>
+					}
+<span class="nc" id="L813">					catch (BeanDefinitionStoreException ex) {</span>
+<span class="nc" id="L814">						throw ex;</span>
+					}
+<span class="nc" id="L816">					catch (Throwable ex) {</span>
+<span class="nc" id="L817">						throw new BeanDefinitionStoreException(</span>
+								&quot;Failed to process import candidates for configuration class [&quot; +
+<span class="nc" id="L819">										configurationClass.getMetadata().getClassName() + &quot;]&quot;, ex);</span>
+<span class="fc" id="L820">					}</span>
+<span class="fc" id="L821">				});</span>
+<span class="fc" id="L822">			}</span>
+<span class="fc" id="L823">		}</span>
+
+		private Group createGroup(@Nullable Class&lt;? extends Group&gt; type) {
+<span class="fc bfc" id="L826" title="All 2 branches covered.">			Class&lt;? extends Group&gt; effectiveType = (type != null ? type</span>
+					: DefaultDeferredImportSelectorGroup.class);
+<span class="fc" id="L828">			Group group = BeanUtils.instantiateClass(effectiveType);</span>
+<span class="fc" id="L829">			ParserStrategyUtils.invokeAwareMethods(group,</span>
+<span class="fc" id="L830">					ConfigurationClassParser.this.environment,</span>
+<span class="fc" id="L831">					ConfigurationClassParser.this.resourceLoader,</span>
+<span class="fc" id="L832">					ConfigurationClassParser.this.registry);</span>
+<span class="fc" id="L833">			return group;</span>
+		}
+
+	}
+
+
+	private static class DeferredImportSelectorHolder {
+
+		private final ConfigurationClass configurationClass;
+
+		private final DeferredImportSelector importSelector;
+
+<span class="fc" id="L845">		public DeferredImportSelectorHolder(ConfigurationClass configClass, DeferredImportSelector selector) {</span>
+<span class="fc" id="L846">			this.configurationClass = configClass;</span>
+<span class="fc" id="L847">			this.importSelector = selector;</span>
+<span class="fc" id="L848">		}</span>
+
+		public ConfigurationClass getConfigurationClass() {
+<span class="fc" id="L851">			return this.configurationClass;</span>
+		}
+
+		public DeferredImportSelector getImportSelector() {
+<span class="fc" id="L855">			return this.importSelector;</span>
+		}
+	}
+
+
+	private static class DeferredImportSelectorGrouping {
+
+		private final DeferredImportSelector.Group group;
+
+<span class="fc" id="L864">		private final List&lt;DeferredImportSelectorHolder&gt; deferredImports = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L866">		DeferredImportSelectorGrouping(Group group) {</span>
+<span class="fc" id="L867">			this.group = group;</span>
+<span class="fc" id="L868">		}</span>
+
+		public void add(DeferredImportSelectorHolder deferredImport) {
+<span class="fc" id="L871">			this.deferredImports.add(deferredImport);</span>
+<span class="fc" id="L872">		}</span>
+
+		/**
+		 * Return the imports defined by the group.
+		 * @return each import with its associated configuration class
+		 */
+		public Iterable&lt;Group.Entry&gt; getImports() {
+<span class="fc bfc" id="L879" title="All 2 branches covered.">			for (DeferredImportSelectorHolder deferredImport : this.deferredImports) {</span>
+<span class="fc" id="L880">				this.group.process(deferredImport.getConfigurationClass().getMetadata(),</span>
+<span class="fc" id="L881">						deferredImport.getImportSelector());</span>
+<span class="fc" id="L882">			}</span>
+<span class="fc" id="L883">			return this.group.selectImports();</span>
+		}
+	}
+
+
+<span class="fc" id="L888">	private static class DefaultDeferredImportSelectorGroup implements Group {</span>
+
+<span class="fc" id="L890">		private final List&lt;Entry&gt; imports = new ArrayList&lt;&gt;();</span>
+
+		@Override
+		public void process(AnnotationMetadata metadata, DeferredImportSelector selector) {
+<span class="fc bfc" id="L894" title="All 2 branches covered.">			for (String importClassName : selector.selectImports(metadata)) {</span>
+<span class="fc" id="L895">				this.imports.add(new Entry(metadata, importClassName));</span>
+			}
+<span class="fc" id="L897">		}</span>
+
+		@Override
+		public Iterable&lt;Entry&gt; selectImports() {
+<span class="fc" id="L901">			return this.imports;</span>
+		}
+	}
+
+
+	/**
+	 * Simple wrapper that allows annotated source classes to be dealt with
+	 * in a uniform manner, regardless of how they are loaded.
+	 */
+	private class SourceClass implements Ordered {
+
+		private final Object source;  // Class or MetadataReader
+
+		private final AnnotationMetadata metadata;
+
+<span class="fc" id="L916">		public SourceClass(Object source) {</span>
+<span class="fc" id="L917">			this.source = source;</span>
+<span class="fc bfc" id="L918" title="All 2 branches covered.">			if (source instanceof Class) {</span>
+<span class="fc" id="L919">				this.metadata = new StandardAnnotationMetadata((Class&lt;?&gt;) source, true);</span>
+			}
+			else {
+<span class="fc" id="L922">				this.metadata = ((MetadataReader) source).getAnnotationMetadata();</span>
+			}
+<span class="fc" id="L924">		}</span>
+
+		public final AnnotationMetadata getMetadata() {
+<span class="fc" id="L927">			return this.metadata;</span>
+		}
+
+		@Override
+		public int getOrder() {
+<span class="fc" id="L932">			Integer order = ConfigurationClassUtils.getOrder(this.metadata);</span>
+<span class="pc bpc" id="L933" title="1 of 2 branches missed.">			return (order != null ? order : Ordered.LOWEST_PRECEDENCE);</span>
+		}
+
+		public Class&lt;?&gt; loadClass() throws ClassNotFoundException {
+<span class="fc bfc" id="L937" title="All 2 branches covered.">			if (this.source instanceof Class) {</span>
+<span class="fc" id="L938">				return (Class&lt;?&gt;) this.source;</span>
+			}
+<span class="fc" id="L940">			String className = ((MetadataReader) this.source).getClassMetadata().getClassName();</span>
+<span class="fc" id="L941">			return ClassUtils.forName(className, resourceLoader.getClassLoader());</span>
+		}
+
+		public boolean isAssignable(Class&lt;?&gt; clazz) throws IOException {
+<span class="fc bfc" id="L945" title="All 2 branches covered.">			if (this.source instanceof Class) {</span>
+<span class="fc" id="L946">				return clazz.isAssignableFrom((Class&lt;?&gt;) this.source);</span>
+			}
+<span class="fc" id="L948">			return new AssignableTypeFilter(clazz).match((MetadataReader) this.source, metadataReaderFactory);</span>
+		}
+
+		public ConfigurationClass asConfigClass(ConfigurationClass importedBy) {
+<span class="fc bfc" id="L952" title="All 2 branches covered.">			if (this.source instanceof Class) {</span>
+<span class="fc" id="L953">				return new ConfigurationClass((Class&lt;?&gt;) this.source, importedBy);</span>
+			}
+<span class="fc" id="L955">			return new ConfigurationClass((MetadataReader) this.source, importedBy);</span>
+		}
+
+		public Collection&lt;SourceClass&gt; getMemberClasses() throws IOException {
+<span class="fc" id="L959">			Object sourceToProcess = this.source;</span>
+<span class="fc bfc" id="L960" title="All 2 branches covered.">			if (sourceToProcess instanceof Class) {</span>
+<span class="fc" id="L961">				Class&lt;?&gt; sourceClass = (Class&lt;?&gt;) sourceToProcess;</span>
+				try {
+<span class="fc" id="L963">					Class&lt;?&gt;[] declaredClasses = sourceClass.getDeclaredClasses();</span>
+<span class="fc" id="L964">					List&lt;SourceClass&gt; members = new ArrayList&lt;&gt;(declaredClasses.length);</span>
+<span class="fc bfc" id="L965" title="All 2 branches covered.">					for (Class&lt;?&gt; declaredClass : declaredClasses) {</span>
+<span class="fc" id="L966">						members.add(asSourceClass(declaredClass));</span>
+					}
+<span class="fc" id="L968">					return members;</span>
+				}
+<span class="nc" id="L970">				catch (NoClassDefFoundError err) {</span>
+					// getDeclaredClasses() failed because of non-resolvable dependencies
+					// -&gt; fall back to ASM below
+<span class="nc" id="L973">					sourceToProcess = metadataReaderFactory.getMetadataReader(sourceClass.getName());</span>
+				}
+			}
+
+			// ASM-based resolution - safe for non-resolvable classes as well
+<span class="fc" id="L978">			MetadataReader sourceReader = (MetadataReader) sourceToProcess;</span>
+<span class="fc" id="L979">			String[] memberClassNames = sourceReader.getClassMetadata().getMemberClassNames();</span>
+<span class="fc" id="L980">			List&lt;SourceClass&gt; members = new ArrayList&lt;&gt;(memberClassNames.length);</span>
+<span class="fc bfc" id="L981" title="All 2 branches covered.">			for (String memberClassName : memberClassNames) {</span>
+				try {
+<span class="fc" id="L983">					members.add(asSourceClass(memberClassName));</span>
+				}
+<span class="nc" id="L985">				catch (IOException ex) {</span>
+					// Let's skip it if it's not resolvable - we're just looking for candidates
+<span class="nc bnc" id="L987" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L988">						logger.debug(&quot;Failed to resolve member class [&quot; + memberClassName +</span>
+								&quot;] - not considering it as a configuration class candidate&quot;);
+					}
+<span class="fc" id="L991">				}</span>
+			}
+<span class="fc" id="L993">			return members;</span>
+		}
+
+		public SourceClass getSuperClass() throws IOException {
+<span class="fc bfc" id="L997" title="All 2 branches covered.">			if (this.source instanceof Class) {</span>
+<span class="fc" id="L998">				return asSourceClass(((Class&lt;?&gt;) this.source).getSuperclass());</span>
+			}
+<span class="fc" id="L1000">			return asSourceClass(((MetadataReader) this.source).getClassMetadata().getSuperClassName());</span>
+		}
+
+		public Set&lt;SourceClass&gt; getInterfaces() throws IOException {
+<span class="fc" id="L1004">			Set&lt;SourceClass&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L1005" title="All 2 branches covered.">			if (this.source instanceof Class) {</span>
+<span class="fc" id="L1006">				Class&lt;?&gt; sourceClass = (Class&lt;?&gt;) this.source;</span>
+<span class="fc bfc" id="L1007" title="All 2 branches covered.">				for (Class&lt;?&gt; ifcClass : sourceClass.getInterfaces()) {</span>
+<span class="fc" id="L1008">					result.add(asSourceClass(ifcClass));</span>
+				}
+<span class="fc" id="L1010">			}</span>
+			else {
+<span class="fc bfc" id="L1012" title="All 2 branches covered.">				for (String className : this.metadata.getInterfaceNames()) {</span>
+<span class="fc" id="L1013">					result.add(asSourceClass(className));</span>
+				}
+			}
+<span class="fc" id="L1016">			return result;</span>
+		}
+
+		public Set&lt;SourceClass&gt; getAnnotations() {
+<span class="fc" id="L1020">			Set&lt;SourceClass&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L1021" title="All 2 branches covered.">			for (String className : this.metadata.getAnnotationTypes()) {</span>
+				try {
+<span class="fc" id="L1023">					result.add(getRelated(className));</span>
+				}
+<span class="nc" id="L1025">				catch (Throwable ex) {</span>
+					// An annotation not present on the classpath is being ignored
+					// by the JVM's class loading -&gt; ignore here as well.
+<span class="fc" id="L1028">				}</span>
+<span class="fc" id="L1029">			}</span>
+<span class="fc" id="L1030">			return result;</span>
+		}
+
+		public Collection&lt;SourceClass&gt; getAnnotationAttributes(String annType, String attribute) throws IOException {
+<span class="fc" id="L1034">			Map&lt;String, Object&gt; annotationAttributes = this.metadata.getAnnotationAttributes(annType, true);</span>
+<span class="pc bpc" id="L1035" title="1 of 4 branches missed.">			if (annotationAttributes == null || !annotationAttributes.containsKey(attribute)) {</span>
+<span class="fc" id="L1036">				return Collections.emptySet();</span>
+			}
+<span class="fc" id="L1038">			String[] classNames = (String[]) annotationAttributes.get(attribute);</span>
+<span class="fc" id="L1039">			Set&lt;SourceClass&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L1040" title="All 2 branches covered.">			for (String className : classNames) {</span>
+<span class="fc" id="L1041">				result.add(getRelated(className));</span>
+			}
+<span class="fc" id="L1043">			return result;</span>
+		}
+
+		private SourceClass getRelated(String className) throws IOException {
+<span class="fc bfc" id="L1047" title="All 2 branches covered.">			if (this.source instanceof Class) {</span>
+				try {
+<span class="fc" id="L1049">					Class&lt;?&gt; clazz = ClassUtils.forName(className, ((Class&lt;?&gt;) this.source).getClassLoader());</span>
+<span class="fc" id="L1050">					return asSourceClass(clazz);</span>
+				}
+<span class="nc" id="L1052">				catch (ClassNotFoundException ex) {</span>
+					// Ignore -&gt; fall back to ASM next, except for core java types.
+<span class="nc bnc" id="L1054" title="All 2 branches missed.">					if (className.startsWith(&quot;java&quot;)) {</span>
+<span class="nc" id="L1055">						throw new NestedIOException(&quot;Failed to load class [&quot; + className + &quot;]&quot;, ex);</span>
+					}
+<span class="nc" id="L1057">					return new SourceClass(metadataReaderFactory.getMetadataReader(className));</span>
+				}
+			}
+<span class="fc" id="L1060">			return asSourceClass(className);</span>
+		}
+
+		@Override
+		public boolean equals(Object other) {
+<span class="pc bpc" id="L1065" title="2 of 4 branches missed.">			return (this == other || (other instanceof SourceClass &amp;&amp;</span>
+<span class="pc bpc" id="L1066" title="1 of 2 branches missed.">					this.metadata.getClassName().equals(((SourceClass) other).metadata.getClassName())));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L1071">			return this.metadata.getClassName().hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L1076">			return this.metadata.getClassName();</span>
+		}
+	}
+
+
+	/**
+	 * {@link Problem} registered upon detection of a circular {@link Import}.
+	 */
+	private static class CircularImportProblem extends Problem {
+
+		public CircularImportProblem(ConfigurationClass attemptedImport, Deque&lt;ConfigurationClass&gt; importStack) {
+<span class="fc" id="L1087">			super(String.format(&quot;A circular @Import has been detected: &quot; +</span>
+					&quot;Illegal attempt by @Configuration class '%s' to import class '%s' as '%s' is &quot; +
+<span class="fc" id="L1089">					&quot;already present in the current import stack %s&quot;, importStack.element().getSimpleName(),</span>
+<span class="fc" id="L1090">					attemptedImport.getSimpleName(), attemptedImport.getSimpleName(), importStack),</span>
+<span class="fc" id="L1091">					new Location(importStack.element().getResource(), attemptedImport.getMetadata()));</span>
+<span class="fc" id="L1092">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

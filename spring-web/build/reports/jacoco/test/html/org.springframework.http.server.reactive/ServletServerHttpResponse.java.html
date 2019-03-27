@@ -1,0 +1,378 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ServletServerHttpResponse.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">ServletServerHttpResponse.java</span></div><h1>ServletServerHttpResponse.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.Charset;
+import javax.servlet.AsyncContext;
+import javax.servlet.AsyncEvent;
+import javax.servlet.AsyncListener;
+import javax.servlet.ServletOutputStream;
+import javax.servlet.WriteListener;
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletResponse;
+
+import org.reactivestreams.Processor;
+import org.reactivestreams.Publisher;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseCookie;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+
+/**
+ * Adapt {@link ServerHttpResponse} to the Servlet {@link HttpServletResponse}.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+class ServletServerHttpResponse extends AbstractListenerServerHttpResponse {
+
+	private final HttpServletResponse response;
+
+	private final ServletOutputStream outputStream;
+
+	private final int bufferSize;
+
+	@Nullable
+	private volatile ResponseBodyFlushProcessor bodyFlushProcessor;
+
+	@Nullable
+	private volatile ResponseBodyProcessor bodyProcessor;
+
+	private volatile boolean flushOnNext;
+
+	private final ServletServerHttpRequest request;
+
+	public ServletServerHttpResponse(HttpServletResponse response, AsyncContext asyncContext,
+			DataBufferFactory bufferFactory, int bufferSize, ServletServerHttpRequest request) throws IOException {
+
+<span class="nc" id="L70">		this(new HttpHeaders(), response, asyncContext, bufferFactory, bufferSize, request);</span>
+<span class="nc" id="L71">	}</span>
+
+	public ServletServerHttpResponse(HttpHeaders headers, HttpServletResponse response, AsyncContext asyncContext,
+			DataBufferFactory bufferFactory, int bufferSize, ServletServerHttpRequest request) throws IOException {
+
+<span class="fc" id="L76">		super(bufferFactory, headers);</span>
+
+<span class="fc" id="L78">		Assert.notNull(response, &quot;HttpServletResponse must not be null&quot;);</span>
+<span class="fc" id="L79">		Assert.notNull(bufferFactory, &quot;DataBufferFactory must not be null&quot;);</span>
+<span class="pc bpc" id="L80" title="1 of 2 branches missed.">		Assert.isTrue(bufferSize &gt; 0, &quot;Buffer size must be greater than 0&quot;);</span>
+
+<span class="fc" id="L82">		this.response = response;</span>
+<span class="fc" id="L83">		this.outputStream = response.getOutputStream();</span>
+<span class="fc" id="L84">		this.bufferSize = bufferSize;</span>
+<span class="fc" id="L85">		this.request = request;</span>
+
+<span class="fc" id="L87">		asyncContext.addListener(new ResponseAsyncListener());</span>
+
+		// Tomcat expects WriteListener registration on initial thread
+<span class="fc" id="L90">		response.getOutputStream().setWriteListener(new ResponseBodyWriteListener());</span>
+<span class="fc" id="L91">	}</span>
+
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; T getNativeResponse() {
+<span class="fc" id="L97">		return (T) this.response;</span>
+	}
+
+	@Override
+	public HttpStatus getStatusCode() {
+<span class="fc" id="L102">		HttpStatus httpStatus = super.getStatusCode();</span>
+<span class="pc bpc" id="L103" title="1 of 2 branches missed.">		return httpStatus != null ? httpStatus : HttpStatus.resolve(this.response.getStatus());</span>
+	}
+
+	@Override
+	protected void applyStatusCode() {
+<span class="fc" id="L108">		Integer statusCode = getStatusCodeValue();</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">		if (statusCode != null) {</span>
+<span class="nc" id="L110">			this.response.setStatus(statusCode);</span>
+		}
+<span class="fc" id="L112">	}</span>
+
+	@Override
+	protected void applyHeaders() {
+<span class="nc" id="L116">		getHeaders().forEach((headerName, headerValues) -&gt; {</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">			for (String headerValue : headerValues) {</span>
+<span class="nc" id="L118">				this.response.addHeader(headerName, headerValue);</span>
+<span class="nc" id="L119">			}</span>
+<span class="nc" id="L120">		});</span>
+<span class="nc" id="L121">		MediaType contentType = getHeaders().getContentType();</span>
+<span class="nc bnc" id="L122" title="All 4 branches missed.">		if (this.response.getContentType() == null &amp;&amp; contentType != null) {</span>
+<span class="nc" id="L123">			this.response.setContentType(contentType.toString());</span>
+		}
+<span class="nc bnc" id="L125" title="All 2 branches missed.">		Charset charset = (contentType != null ? contentType.getCharset() : null);</span>
+<span class="nc bnc" id="L126" title="All 4 branches missed.">		if (this.response.getCharacterEncoding() == null &amp;&amp; charset != null) {</span>
+<span class="nc" id="L127">			this.response.setCharacterEncoding(charset.name());</span>
+		}
+<span class="nc" id="L129">	}</span>
+
+	@Override
+	protected void applyCookies() {
+<span class="fc bfc" id="L133" title="All 2 branches covered.">		for (String name : getCookies().keySet()) {</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">			for (ResponseCookie httpCookie : getCookies().get(name)) {</span>
+<span class="fc" id="L135">				Cookie cookie = new Cookie(name, httpCookie.getValue());</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">				if (!httpCookie.getMaxAge().isNegative()) {</span>
+<span class="fc" id="L137">					cookie.setMaxAge((int) httpCookie.getMaxAge().getSeconds());</span>
+				}
+<span class="fc bfc" id="L139" title="All 2 branches covered.">				if (httpCookie.getDomain() != null) {</span>
+<span class="fc" id="L140">					cookie.setDomain(httpCookie.getDomain());</span>
+				}
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">				if (httpCookie.getPath() != null) {</span>
+<span class="fc" id="L143">					cookie.setPath(httpCookie.getPath());</span>
+				}
+<span class="fc" id="L145">				cookie.setSecure(httpCookie.isSecure());</span>
+<span class="fc" id="L146">				cookie.setHttpOnly(httpCookie.isHttpOnly());</span>
+<span class="fc" id="L147">				this.response.addCookie(cookie);</span>
+<span class="fc" id="L148">			}</span>
+<span class="fc" id="L149">		}</span>
+<span class="fc" id="L150">	}</span>
+
+	@Override
+	protected Processor&lt;? super Publisher&lt;? extends DataBuffer&gt;, Void&gt; createBodyFlushProcessor() {
+<span class="fc" id="L154">		ResponseBodyFlushProcessor processor = new ResponseBodyFlushProcessor();</span>
+<span class="fc" id="L155">		this.bodyFlushProcessor = processor;</span>
+<span class="fc" id="L156">		return processor;</span>
+	}
+
+	/**
+	 * Write the DataBuffer to the response body OutputStream.
+	 * Invoked only when {@link ServletOutputStream#isReady()} returns &quot;true&quot;
+	 * and the readable bytes in the DataBuffer is greater than 0.
+	 * @return the number of bytes written
+	 */
+	protected int writeToOutputStream(DataBuffer dataBuffer) throws IOException {
+<span class="nc" id="L166">		ServletOutputStream outputStream = this.outputStream;</span>
+<span class="nc" id="L167">		InputStream input = dataBuffer.asInputStream();</span>
+<span class="nc" id="L168">		int bytesWritten = 0;</span>
+<span class="nc" id="L169">		byte[] buffer = new byte[this.bufferSize];</span>
+		int bytesRead;
+<span class="nc bnc" id="L171" title="All 4 branches missed.">		while (outputStream.isReady() &amp;&amp; (bytesRead = input.read(buffer)) != -1) {</span>
+<span class="nc" id="L172">			outputStream.write(buffer, 0, bytesRead);</span>
+<span class="nc" id="L173">			bytesWritten += bytesRead;</span>
+		}
+<span class="nc" id="L175">		return bytesWritten;</span>
+	}
+
+	private void flush() throws IOException {
+<span class="fc" id="L179">		ServletOutputStream outputStream = this.outputStream;</span>
+<span class="fc bfc" id="L180" title="All 2 branches covered.">		if (outputStream.isReady()) {</span>
+			try {
+<span class="fc" id="L182">				outputStream.flush();</span>
+<span class="fc" id="L183">				this.flushOnNext = false;</span>
+			}
+<span class="nc" id="L185">			catch (IOException ex) {</span>
+<span class="nc" id="L186">				this.flushOnNext = true;</span>
+<span class="nc" id="L187">				throw ex;</span>
+<span class="fc" id="L188">			}</span>
+		}
+		else {
+<span class="fc" id="L191">			this.flushOnNext = true;</span>
+		}
+<span class="fc" id="L193">	}</span>
+
+	private boolean isWritePossible() {
+<span class="fc" id="L196">		return this.outputStream.isReady();</span>
+	}
+
+
+<span class="fc" id="L200">	private final class ResponseAsyncListener implements AsyncListener {</span>
+
+		@Override
+<span class="nc" id="L203">		public void onStartAsync(AsyncEvent event) {}</span>
+
+		@Override
+		public void onTimeout(AsyncEvent event) {
+<span class="nc" id="L207">			Throwable ex = event.getThrowable();</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">			ex = (ex != null ? ex : new IllegalStateException(&quot;Async operation timeout.&quot;));</span>
+<span class="nc" id="L209">			handleError(ex);</span>
+<span class="nc" id="L210">		}</span>
+
+		@Override
+		public void onError(AsyncEvent event) {
+<span class="nc" id="L214">			handleError(event.getThrowable());</span>
+<span class="nc" id="L215">		}</span>
+
+		void handleError(Throwable ex) {
+<span class="nc" id="L218">			ResponseBodyFlushProcessor flushProcessor = bodyFlushProcessor;</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">			if (flushProcessor != null) {</span>
+<span class="nc" id="L220">				flushProcessor.cancel();</span>
+<span class="nc" id="L221">				flushProcessor.onError(ex);</span>
+			}
+
+<span class="nc" id="L224">			ResponseBodyProcessor processor = bodyProcessor;</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">			if (processor != null) {</span>
+<span class="nc" id="L226">				processor.cancel();</span>
+<span class="nc" id="L227">				processor.onError(ex);</span>
+			}
+<span class="nc" id="L229">		}</span>
+
+		@Override
+		public void onComplete(AsyncEvent event) {
+<span class="fc" id="L233">			ResponseBodyFlushProcessor flushProcessor = bodyFlushProcessor;</span>
+<span class="fc bfc" id="L234" title="All 2 branches covered.">			if (flushProcessor != null) {</span>
+<span class="fc" id="L235">				flushProcessor.cancel();</span>
+<span class="fc" id="L236">				flushProcessor.onComplete();</span>
+			}
+
+<span class="fc" id="L239">			ResponseBodyProcessor processor = bodyProcessor;</span>
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">			if (processor != null) {</span>
+<span class="nc" id="L241">				processor.cancel();</span>
+<span class="nc" id="L242">				processor.onComplete();</span>
+			}
+<span class="fc" id="L244">		}</span>
+	}
+
+
+<span class="fc" id="L248">	private class ResponseBodyWriteListener implements WriteListener {</span>
+
+		@Override
+		public void onWritePossible() throws IOException {
+<span class="fc" id="L252">			ResponseBodyProcessor processor = bodyProcessor;</span>
+<span class="fc bfc" id="L253" title="All 2 branches covered.">			if (processor != null) {</span>
+<span class="fc" id="L254">				processor.onWritePossible();</span>
+			}
+			else {
+<span class="fc" id="L257">				ResponseBodyFlushProcessor flushProcessor = bodyFlushProcessor;</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">				if (flushProcessor != null) {</span>
+<span class="fc" id="L259">					flushProcessor.onFlushPossible();</span>
+				}
+			}
+<span class="fc" id="L262">		}</span>
+
+		@Override
+		public void onError(Throwable ex) {
+<span class="nc" id="L266">			ResponseBodyProcessor processor = bodyProcessor;</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">			if (processor != null) {</span>
+<span class="nc" id="L268">				processor.cancel();</span>
+<span class="nc" id="L269">				processor.onError(ex);</span>
+			}
+			else {
+<span class="nc" id="L272">				ResponseBodyFlushProcessor flushProcessor = bodyFlushProcessor;</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">				if (flushProcessor != null) {</span>
+<span class="nc" id="L274">					flushProcessor.cancel();</span>
+<span class="nc" id="L275">					flushProcessor.onError(ex);</span>
+				}
+			}
+<span class="nc" id="L278">		}</span>
+	}
+
+
+	private class ResponseBodyFlushProcessor extends AbstractListenerWriteFlushProcessor&lt;DataBuffer&gt; {
+
+<span class="fc" id="L284">		public ResponseBodyFlushProcessor() {</span>
+<span class="fc" id="L285">			super(request.getLogPrefix());</span>
+<span class="fc" id="L286">		}</span>
+
+		@Override
+		protected Processor&lt;? super DataBuffer, Void&gt; createWriteProcessor() {
+<span class="fc" id="L290">			ResponseBodyProcessor processor = new ResponseBodyProcessor();</span>
+<span class="fc" id="L291">			bodyProcessor = processor;</span>
+<span class="fc" id="L292">			return processor;</span>
+		}
+
+		@Override
+		protected void flush() throws IOException {
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">			if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L298">				rsWriteFlushLogger.trace(getLogPrefix() + &quot;Flush attempt&quot;);</span>
+			}
+<span class="fc" id="L300">			ServletServerHttpResponse.this.flush();</span>
+<span class="fc" id="L301">		}</span>
+
+		@Override
+		protected boolean isWritePossible() {
+<span class="fc" id="L305">			return ServletServerHttpResponse.this.isWritePossible();</span>
+		}
+
+		@Override
+		protected boolean isFlushPending() {
+<span class="fc" id="L310">			return flushOnNext;</span>
+		}
+	}
+
+
+	private class ResponseBodyProcessor extends AbstractListenerWriteProcessor&lt;DataBuffer&gt; {
+
+
+<span class="fc" id="L318">		public ResponseBodyProcessor() {</span>
+<span class="fc" id="L319">			super(request.getLogPrefix());</span>
+<span class="fc" id="L320">		}</span>
+
+		@Override
+		protected boolean isWritePossible() {
+<span class="fc" id="L324">			return ServletServerHttpResponse.this.isWritePossible();</span>
+		}
+
+		@Override
+		protected boolean isDataEmpty(DataBuffer dataBuffer) {
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">			return dataBuffer.readableByteCount() == 0;</span>
+		}
+
+		@Override
+		protected boolean write(DataBuffer dataBuffer) throws IOException {
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">			if (ServletServerHttpResponse.this.flushOnNext) {</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">				if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L336">					rsWriteLogger.trace(getLogPrefix() + &quot;Flush attempt&quot;);</span>
+				}
+<span class="nc" id="L338">				flush();</span>
+			}
+
+<span class="fc" id="L341">			boolean ready = ServletServerHttpResponse.this.isWritePossible();</span>
+<span class="fc" id="L342">			int remaining = dataBuffer.readableByteCount();</span>
+<span class="pc bpc" id="L343" title="2 of 4 branches missed.">			if (ready &amp;&amp; remaining &gt; 0) {</span>
+				// In case of IOException, onError handling should call discardData(DataBuffer)..
+<span class="fc" id="L345">				int written = writeToOutputStream(dataBuffer);</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L347">					logger.trace(getLogPrefix() + &quot;Wrote &quot; + written + &quot; of &quot; + remaining + &quot; bytes&quot;);</span>
+				}
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">				else if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L350">					rsWriteLogger.trace(getLogPrefix() + &quot;Wrote &quot; + written + &quot; of &quot; + remaining + &quot; bytes&quot;);</span>
+				}
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">				if (written == remaining) {</span>
+<span class="fc" id="L353">					DataBufferUtils.release(dataBuffer);</span>
+<span class="fc" id="L354">					return true;</span>
+				}
+<span class="nc" id="L356">			}</span>
+			else {
+<span class="nc bnc" id="L358" title="All 2 branches missed.">				if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L359">					rsWriteLogger.trace(getLogPrefix() + &quot;ready: &quot; + ready + &quot;, remaining: &quot; + remaining);</span>
+				}
+			}
+
+<span class="nc" id="L363">			return false;</span>
+		}
+
+		@Override
+		protected void writingComplete() {
+<span class="fc" id="L368">			bodyProcessor = null;</span>
+<span class="fc" id="L369">		}</span>
+
+		@Override
+		protected void discardData(DataBuffer dataBuffer) {
+<span class="nc" id="L373">			DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L374">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

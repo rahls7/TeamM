@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TomcatHttpHandlerAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">TomcatHttpHandlerAdapter.java</span></div><h1>TomcatHttpHandlerAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
+import javax.servlet.AsyncContext;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletResponse;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletRequestWrapper;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServletResponseWrapper;
+
+import org.apache.catalina.connector.CoyoteInputStream;
+import org.apache.catalina.connector.CoyoteOutputStream;
+import org.apache.catalina.connector.RequestFacade;
+import org.apache.catalina.connector.ResponseFacade;
+import org.apache.coyote.Request;
+import org.apache.coyote.Response;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * {@link ServletHttpHandlerAdapter} extension that uses Tomcat APIs for reading
+ * from the request and writing to the response with {@link ByteBuffer}.
+ *
+ * @author Violeta Georgieva
+ * @author Brian Clozel
+ * @since 5.0
+ * @see org.springframework.web.server.adapter.AbstractReactiveWebInitializer
+ */
+public class TomcatHttpHandlerAdapter extends ServletHttpHandlerAdapter {
+
+
+	public TomcatHttpHandlerAdapter(HttpHandler httpHandler) {
+<span class="fc" id="L60">		super(httpHandler);</span>
+<span class="fc" id="L61">	}</span>
+
+
+	@Override
+	protected ServletServerHttpRequest createRequest(HttpServletRequest request, AsyncContext asyncContext)
+			throws IOException, URISyntaxException {
+
+<span class="fc" id="L68">		Assert.notNull(getServletPath(), &quot;Servlet path is not initialized&quot;);</span>
+<span class="fc" id="L69">		return new TomcatServerHttpRequest(</span>
+<span class="fc" id="L70">				request, asyncContext, getServletPath(), getDataBufferFactory(), getBufferSize());</span>
+	}
+
+	@Override
+	protected ServletServerHttpResponse createResponse(HttpServletResponse response,
+			AsyncContext asyncContext, ServletServerHttpRequest request) throws IOException {
+
+<span class="fc" id="L77">		return new TomcatServerHttpResponse(</span>
+<span class="fc" id="L78">				response, asyncContext, getDataBufferFactory(), getBufferSize(), request);</span>
+	}
+
+
+	private static final class TomcatServerHttpRequest extends ServletServerHttpRequest {
+
+		private static final Field COYOTE_REQUEST_FIELD;
+
+		private final int bufferSize;
+
+		private final DataBufferFactory factory;
+
+		static {
+<span class="fc" id="L91">			Field field = ReflectionUtils.findField(RequestFacade.class, &quot;request&quot;);</span>
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">			Assert.state(field != null, &quot;Incompatible Tomcat implementation&quot;);</span>
+<span class="fc" id="L93">			ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L94">			COYOTE_REQUEST_FIELD = field;</span>
+<span class="fc" id="L95">		}</span>
+
+		TomcatServerHttpRequest(HttpServletRequest request, AsyncContext context,
+				String servletPath, DataBufferFactory factory, int bufferSize)
+				throws IOException, URISyntaxException {
+
+<span class="fc" id="L101">			super(createTomcatHttpHeaders(request), request, context, servletPath, factory, bufferSize);</span>
+<span class="fc" id="L102">			this.factory = factory;</span>
+<span class="fc" id="L103">			this.bufferSize = bufferSize;</span>
+<span class="fc" id="L104">		}</span>
+
+		private static HttpHeaders createTomcatHttpHeaders(HttpServletRequest request) {
+<span class="fc" id="L107">			RequestFacade requestFacade = getRequestFacade(request);</span>
+<span class="fc" id="L108">			org.apache.catalina.connector.Request connectorRequest = (org.apache.catalina.connector.Request)</span>
+<span class="fc" id="L109">					ReflectionUtils.getField(COYOTE_REQUEST_FIELD, requestFacade);</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">			Assert.state(connectorRequest != null, &quot;No Tomcat connector request&quot;);</span>
+<span class="fc" id="L111">			Request tomcatRequest = connectorRequest.getCoyoteRequest();</span>
+<span class="fc" id="L112">			TomcatHeadersAdapter headers = new TomcatHeadersAdapter(tomcatRequest.getMimeHeaders());</span>
+<span class="fc" id="L113">			return new HttpHeaders(headers);</span>
+		}
+
+		private static RequestFacade getRequestFacade(HttpServletRequest request) {
+<span class="pc bpc" id="L117" title="1 of 2 branches missed.">			if (request instanceof RequestFacade) {</span>
+<span class="fc" id="L118">				return (RequestFacade) request;</span>
+			}
+<span class="nc bnc" id="L120" title="All 2 branches missed.">			else if (request instanceof HttpServletRequestWrapper) {</span>
+<span class="nc" id="L121">				HttpServletRequestWrapper wrapper = (HttpServletRequestWrapper) request;</span>
+<span class="nc" id="L122">				HttpServletRequest wrappedRequest = (HttpServletRequest) wrapper.getRequest();</span>
+<span class="nc" id="L123">				return getRequestFacade(wrappedRequest);</span>
+			}
+			else {
+<span class="nc" id="L126">				throw new IllegalArgumentException(&quot;Cannot convert [&quot; + request.getClass() +</span>
+						&quot;] to org.apache.catalina.connector.RequestFacade&quot;);
+			}
+		}
+
+		@Override
+		protected DataBuffer readFromInputStream() throws IOException {
+<span class="fc" id="L133">			boolean release = true;</span>
+<span class="fc" id="L134">			int capacity = this.bufferSize;</span>
+<span class="fc" id="L135">			DataBuffer dataBuffer = this.factory.allocateBuffer(capacity);</span>
+			try {
+<span class="fc" id="L137">				ByteBuffer byteBuffer = dataBuffer.asByteBuffer(0, capacity);</span>
+<span class="fc" id="L138">				ServletRequest request = getNativeRequest();</span>
+<span class="fc" id="L139">				int read = ((CoyoteInputStream) request.getInputStream()).read(byteBuffer);</span>
+<span class="fc" id="L140">				logBytesRead(read);</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">				if (read &gt; 0) {</span>
+<span class="fc" id="L142">					dataBuffer.writePosition(read);</span>
+<span class="fc" id="L143">					release = false;</span>
+<span class="fc" id="L144">					return dataBuffer;</span>
+				}
+<span class="nc bnc" id="L146" title="All 2 branches missed.">				else if (read == -1) {</span>
+<span class="nc" id="L147">					return EOF_BUFFER;</span>
+				}
+				else {
+<span class="nc" id="L150">					return null;</span>
+				}
+			}
+			finally {
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">				if (release) {</span>
+<span class="nc" id="L155">					DataBufferUtils.release(dataBuffer);</span>
+				}
+			}
+		}
+	}
+
+
+	private static final class TomcatServerHttpResponse extends ServletServerHttpResponse {
+
+		private static final Field COYOTE_RESPONSE_FIELD;
+
+		static {
+<span class="fc" id="L167">			Field field = ReflectionUtils.findField(ResponseFacade.class, &quot;response&quot;);</span>
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">			Assert.state(field != null, &quot;Incompatible Tomcat implementation&quot;);</span>
+<span class="fc" id="L169">			ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L170">			COYOTE_RESPONSE_FIELD = field;</span>
+<span class="fc" id="L171">		}</span>
+
+		TomcatServerHttpResponse(HttpServletResponse response, AsyncContext context,
+				DataBufferFactory factory, int bufferSize, ServletServerHttpRequest request) throws IOException {
+
+<span class="fc" id="L176">			super(createTomcatHttpHeaders(response), response, context, factory, bufferSize, request);</span>
+<span class="fc" id="L177">		}</span>
+
+		private static HttpHeaders createTomcatHttpHeaders(HttpServletResponse response) {
+<span class="fc" id="L180">			ResponseFacade responseFacade = getResponseFacade(response);</span>
+<span class="fc" id="L181">			org.apache.catalina.connector.Response connectorResponse = (org.apache.catalina.connector.Response)</span>
+<span class="fc" id="L182">					ReflectionUtils.getField(COYOTE_RESPONSE_FIELD, responseFacade);</span>
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">			Assert.state(connectorResponse != null, &quot;No Tomcat connector response&quot;);</span>
+<span class="fc" id="L184">			Response tomcatResponse = connectorResponse.getCoyoteResponse();</span>
+<span class="fc" id="L185">			TomcatHeadersAdapter headers = new TomcatHeadersAdapter(tomcatResponse.getMimeHeaders());</span>
+<span class="fc" id="L186">			return new HttpHeaders(headers);</span>
+		}
+
+		private static ResponseFacade getResponseFacade(HttpServletResponse response) {
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">			if (response instanceof ResponseFacade) {</span>
+<span class="fc" id="L191">				return (ResponseFacade) response;</span>
+			}
+<span class="nc bnc" id="L193" title="All 2 branches missed.">			else if (response instanceof HttpServletResponseWrapper) {</span>
+<span class="nc" id="L194">				HttpServletResponseWrapper wrapper = (HttpServletResponseWrapper) response;</span>
+<span class="nc" id="L195">				HttpServletResponse wrappedResponse = (HttpServletResponse) wrapper.getResponse();</span>
+<span class="nc" id="L196">				return getResponseFacade(wrappedResponse);</span>
+			}
+			else {
+<span class="nc" id="L199">				throw new IllegalArgumentException(&quot;Cannot convert [&quot; + response.getClass() +</span>
+						&quot;] to org.apache.catalina.connector.ResponseFacade&quot;);
+			}
+		}
+
+		@Override
+		protected void applyHeaders() {
+<span class="fc" id="L206">			HttpServletResponse response = getNativeResponse();</span>
+<span class="fc" id="L207">			MediaType contentType = getHeaders().getContentType();</span>
+<span class="pc bpc" id="L208" title="2 of 4 branches missed.">			if (response.getContentType() == null &amp;&amp; contentType != null) {</span>
+<span class="nc" id="L209">				response.setContentType(contentType.toString());</span>
+			}
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">			Charset charset = (contentType != null ? contentType.getCharset() : null);</span>
+<span class="pc bpc" id="L212" title="3 of 4 branches missed.">			if (response.getCharacterEncoding() == null &amp;&amp; charset != null) {</span>
+<span class="nc" id="L213">				response.setCharacterEncoding(charset.name());</span>
+			}
+<span class="fc" id="L215">			long contentLength = getHeaders().getContentLength();</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">			if (contentLength != -1) {</span>
+<span class="fc" id="L217">				response.setContentLengthLong(contentLength);</span>
+			}
+<span class="fc" id="L219">		}</span>
+
+		@Override
+		protected int writeToOutputStream(DataBuffer dataBuffer) throws IOException {
+<span class="fc" id="L223">			ByteBuffer input = dataBuffer.asByteBuffer();</span>
+<span class="fc" id="L224">			int len = input.remaining();</span>
+<span class="fc" id="L225">			ServletResponse response = getNativeResponse();</span>
+<span class="fc" id="L226">			((CoyoteOutputStream) response.getOutputStream()).write(input);</span>
+<span class="fc" id="L227">			return len;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

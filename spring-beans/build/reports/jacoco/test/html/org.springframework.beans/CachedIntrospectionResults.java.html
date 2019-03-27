@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CachedIntrospectionResults.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans</a> &gt; <span class="el_source">CachedIntrospectionResults.java</span></div><h1>CachedIntrospectionResults.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans;
+
+import java.beans.BeanInfo;
+import java.beans.IntrospectionException;
+import java.beans.Introspector;
+import java.beans.PropertyDescriptor;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.SpringProperties;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.core.io.support.SpringFactoriesLoader;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.StringUtils;
+
+/**
+ * Internal class that caches JavaBeans {@link java.beans.PropertyDescriptor}
+ * information for a Java class. Not intended for direct use by application code.
+ *
+ * &lt;p&gt;Necessary for own caching of descriptors within the application's
+ * ClassLoader, rather than rely on the JDK's system-wide BeanInfo cache
+ * (in order to avoid leaks on ClassLoader shutdown).
+ *
+ * &lt;p&gt;Information is cached statically, so we don't need to create new
+ * objects of this class for every JavaBean we manipulate. Hence, this class
+ * implements the factory design pattern, using a private constructor and
+ * a static {@link #forClass(Class)} factory method to obtain instances.
+ *
+ * &lt;p&gt;Note that for caching to work effectively, some preconditions need to be met:
+ * Prefer an arrangement where the Spring jars live in the same ClassLoader as the
+ * application classes, which allows for clean caching along with the application's
+ * lifecycle in any case. For a web application, consider declaring a local
+ * {@link org.springframework.web.util.IntrospectorCleanupListener} in {@code web.xml}
+ * in case of a multi-ClassLoader layout, which will allow for effective caching as well.
+ *
+ * &lt;p&gt;In case of a non-clean ClassLoader arrangement without a cleanup listener having
+ * been set up, this class will fall back to a weak-reference-based caching model that
+ * recreates much-requested entries every time the garbage collector removed them. In
+ * such a scenario, consider the {@link #IGNORE_BEANINFO_PROPERTY_NAME} system property.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @since 05 May 2001
+ * @see #acceptClassLoader(ClassLoader)
+ * @see #clearClassLoader(ClassLoader)
+ * @see #forClass(Class)
+ */
+public final class CachedIntrospectionResults {
+
+	/**
+	 * System property that instructs Spring to use the {@link Introspector#IGNORE_ALL_BEANINFO}
+	 * mode when calling the JavaBeans {@link Introspector}: &quot;spring.beaninfo.ignore&quot;, with a
+	 * value of &quot;true&quot; skipping the search for {@code BeanInfo} classes (typically for scenarios
+	 * where no such classes are being defined for beans in the application in the first place).
+	 * &lt;p&gt;The default is &quot;false&quot;, considering all {@code BeanInfo} metadata classes, like for
+	 * standard {@link Introspector#getBeanInfo(Class)} calls. Consider switching this flag to
+	 * &quot;true&quot; if you experience repeated ClassLoader access for non-existing {@code BeanInfo}
+	 * classes, in case such access is expensive on startup or on lazy loading.
+	 * &lt;p&gt;Note that such an effect may also indicate a scenario where caching doesn't work
+	 * effectively: Prefer an arrangement where the Spring jars live in the same ClassLoader
+	 * as the application classes, which allows for clean caching along with the application's
+	 * lifecycle in any case. For a web application, consider declaring a local
+	 * {@link org.springframework.web.util.IntrospectorCleanupListener} in {@code web.xml}
+	 * in case of a multi-ClassLoader layout, which will allow for effective caching as well.
+	 * @see Introspector#getBeanInfo(Class, int)
+	 */
+	public static final String IGNORE_BEANINFO_PROPERTY_NAME = &quot;spring.beaninfo.ignore&quot;;
+
+
+<span class="fc" id="L96">	private static final boolean shouldIntrospectorIgnoreBeaninfoClasses =</span>
+<span class="fc" id="L97">			SpringProperties.getFlag(IGNORE_BEANINFO_PROPERTY_NAME);</span>
+
+	/** Stores the BeanInfoFactory instances. */
+<span class="fc" id="L100">	private static List&lt;BeanInfoFactory&gt; beanInfoFactories = SpringFactoriesLoader.loadFactories(</span>
+<span class="fc" id="L101">			BeanInfoFactory.class, CachedIntrospectionResults.class.getClassLoader());</span>
+
+<span class="fc" id="L103">	private static final Log logger = LogFactory.getLog(CachedIntrospectionResults.class);</span>
+
+	/**
+	 * Set of ClassLoaders that this CachedIntrospectionResults class will always
+	 * accept classes from, even if the classes do not qualify as cache-safe.
+	 */
+<span class="fc" id="L109">	static final Set&lt;ClassLoader&gt; acceptedClassLoaders =</span>
+<span class="fc" id="L110">			Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(16));</span>
+
+	/**
+	 * Map keyed by Class containing CachedIntrospectionResults, strongly held.
+	 * This variant is being used for cache-safe bean classes.
+	 */
+<span class="fc" id="L116">	static final ConcurrentMap&lt;Class&lt;?&gt;, CachedIntrospectionResults&gt; strongClassCache =</span>
+			new ConcurrentHashMap&lt;&gt;(64);
+
+	/**
+	 * Map keyed by Class containing CachedIntrospectionResults, softly held.
+	 * This variant is being used for non-cache-safe bean classes.
+	 */
+<span class="fc" id="L123">	static final ConcurrentMap&lt;Class&lt;?&gt;, CachedIntrospectionResults&gt; softClassCache =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(64);
+
+
+	/**
+	 * Accept the given ClassLoader as cache-safe, even if its classes would
+	 * not qualify as cache-safe in this CachedIntrospectionResults class.
+	 * &lt;p&gt;This configuration method is only relevant in scenarios where the Spring
+	 * classes reside in a 'common' ClassLoader (e.g. the system ClassLoader)
+	 * whose lifecycle is not coupled to the application. In such a scenario,
+	 * CachedIntrospectionResults would by default not cache any of the application's
+	 * classes, since they would create a leak in the common ClassLoader.
+	 * &lt;p&gt;Any {@code acceptClassLoader} call at application startup should
+	 * be paired with a {@link #clearClassLoader} call at application shutdown.
+	 * @param classLoader the ClassLoader to accept
+	 */
+	public static void acceptClassLoader(@Nullable ClassLoader classLoader) {
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">		if (classLoader != null) {</span>
+<span class="fc" id="L141">			acceptedClassLoaders.add(classLoader);</span>
+		}
+<span class="fc" id="L143">	}</span>
+
+	/**
+	 * Clear the introspection cache for the given ClassLoader, removing the
+	 * introspection results for all classes underneath that ClassLoader, and
+	 * removing the ClassLoader (and its children) from the acceptance list.
+	 * @param classLoader the ClassLoader to clear the cache for
+	 */
+	public static void clearClassLoader(@Nullable ClassLoader classLoader) {
+<span class="fc" id="L152">		acceptedClassLoaders.removeIf(registeredLoader -&gt;</span>
+<span class="fc" id="L153">				isUnderneathClassLoader(registeredLoader, classLoader));</span>
+<span class="fc" id="L154">		strongClassCache.keySet().removeIf(beanClass -&gt;</span>
+<span class="fc" id="L155">				isUnderneathClassLoader(beanClass.getClassLoader(), classLoader));</span>
+<span class="fc" id="L156">		softClassCache.keySet().removeIf(beanClass -&gt;</span>
+<span class="nc" id="L157">				isUnderneathClassLoader(beanClass.getClassLoader(), classLoader));</span>
+<span class="fc" id="L158">	}</span>
+
+	/**
+	 * Create CachedIntrospectionResults for the given bean class.
+	 * @param beanClass the bean class to analyze
+	 * @return the corresponding CachedIntrospectionResults
+	 * @throws BeansException in case of introspection failure
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	static CachedIntrospectionResults forClass(Class&lt;?&gt; beanClass) throws BeansException {
+<span class="fc" id="L168">		CachedIntrospectionResults results = strongClassCache.get(beanClass);</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">		if (results != null) {</span>
+<span class="fc" id="L170">			return results;</span>
+		}
+<span class="fc" id="L172">		results = softClassCache.get(beanClass);</span>
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">		if (results != null) {</span>
+<span class="nc" id="L174">			return results;</span>
+		}
+
+<span class="fc" id="L177">		results = new CachedIntrospectionResults(beanClass);</span>
+		ConcurrentMap&lt;Class&lt;?&gt;, CachedIntrospectionResults&gt; classCacheToUse;
+
+<span class="fc bfc" id="L180" title="All 2 branches covered.">		if (ClassUtils.isCacheSafe(beanClass, CachedIntrospectionResults.class.getClassLoader()) ||</span>
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">				isClassLoaderAccepted(beanClass.getClassLoader())) {</span>
+<span class="fc" id="L182">			classCacheToUse = strongClassCache;</span>
+		}
+		else {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L186">				logger.debug(&quot;Not strongly caching class [&quot; + beanClass.getName() + &quot;] because it is not cache-safe&quot;);</span>
+			}
+<span class="nc" id="L188">			classCacheToUse = softClassCache;</span>
+		}
+
+<span class="fc" id="L191">		CachedIntrospectionResults existing = classCacheToUse.putIfAbsent(beanClass, results);</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">		return (existing != null ? existing : results);</span>
+	}
+
+	/**
+	 * Check whether this CachedIntrospectionResults class is configured
+	 * to accept the given ClassLoader.
+	 * @param classLoader the ClassLoader to check
+	 * @return whether the given ClassLoader is accepted
+	 * @see #acceptClassLoader
+	 */
+	private static boolean isClassLoaderAccepted(ClassLoader classLoader) {
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">		for (ClassLoader acceptedLoader : acceptedClassLoaders) {</span>
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">			if (isUnderneathClassLoader(classLoader, acceptedLoader)) {</span>
+<span class="fc" id="L205">				return true;</span>
+			}
+<span class="nc" id="L207">		}</span>
+<span class="nc" id="L208">		return false;</span>
+	}
+
+	/**
+	 * Check whether the given ClassLoader is underneath the given parent,
+	 * that is, whether the parent is within the candidate's hierarchy.
+	 * @param candidate the candidate ClassLoader to check
+	 * @param parent the parent ClassLoader to check for
+	 */
+	private static boolean isUnderneathClassLoader(@Nullable ClassLoader candidate, @Nullable ClassLoader parent) {
+<span class="fc bfc" id="L218" title="All 2 branches covered.">		if (candidate == parent) {</span>
+<span class="fc" id="L219">			return true;</span>
+		}
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">		if (candidate == null) {</span>
+<span class="nc" id="L222">			return false;</span>
+		}
+<span class="fc" id="L224">		ClassLoader classLoaderToCheck = candidate;</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		while (classLoaderToCheck != null) {</span>
+<span class="fc" id="L226">			classLoaderToCheck = classLoaderToCheck.getParent();</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">			if (classLoaderToCheck == parent) {</span>
+<span class="fc" id="L228">				return true;</span>
+			}
+		}
+<span class="fc" id="L231">		return false;</span>
+	}
+
+	/**
+	 * Retrieve a {@link BeanInfo} descriptor for the given target class.
+	 * @param beanClass the target class to introspect
+	 * @return the resulting {@code BeanInfo} descriptor (never {@code null})
+	 * @throws IntrospectionException from the underlying {@link Introspector}
+	 */
+	private static BeanInfo getBeanInfo(Class&lt;?&gt; beanClass) throws IntrospectionException {
+<span class="fc bfc" id="L241" title="All 2 branches covered.">		for (BeanInfoFactory beanInfoFactory : beanInfoFactories) {</span>
+<span class="fc" id="L242">			BeanInfo beanInfo = beanInfoFactory.getBeanInfo(beanClass);</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">			if (beanInfo != null) {</span>
+<span class="fc" id="L244">				return beanInfo;</span>
+			}
+<span class="fc" id="L246">		}</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">		return (shouldIntrospectorIgnoreBeaninfoClasses ?</span>
+<span class="pc" id="L248">				Introspector.getBeanInfo(beanClass, Introspector.IGNORE_ALL_BEANINFO) :</span>
+<span class="fc" id="L249">				Introspector.getBeanInfo(beanClass));</span>
+	}
+
+
+	/** The BeanInfo object for the introspected bean class. */
+	private final BeanInfo beanInfo;
+
+	/** PropertyDescriptor objects keyed by property name String. */
+	private final Map&lt;String, PropertyDescriptor&gt; propertyDescriptorCache;
+
+	/** TypeDescriptor objects keyed by PropertyDescriptor. */
+	private final ConcurrentMap&lt;PropertyDescriptor, TypeDescriptor&gt; typeDescriptorCache;
+
+
+	/**
+	 * Create a new CachedIntrospectionResults instance for the given class.
+	 * @param beanClass the bean class to analyze
+	 * @throws BeansException in case of introspection failure
+	 */
+<span class="fc" id="L268">	private CachedIntrospectionResults(Class&lt;?&gt; beanClass) throws BeansException {</span>
+		try {
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L271">				logger.trace(&quot;Getting BeanInfo for class [&quot; + beanClass.getName() + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L273">			this.beanInfo = getBeanInfo(beanClass);</span>
+
+<span class="pc bpc" id="L275" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L276">				logger.trace(&quot;Caching PropertyDescriptors for class [&quot; + beanClass.getName() + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L278">			this.propertyDescriptorCache = new LinkedHashMap&lt;&gt;();</span>
+
+			// This call is slow so we do it once.
+<span class="fc" id="L281">			PropertyDescriptor[] pds = this.beanInfo.getPropertyDescriptors();</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">			for (PropertyDescriptor pd : pds) {</span>
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">				if (Class.class == beanClass &amp;&amp;</span>
+<span class="nc bnc" id="L284" title="All 4 branches missed.">						(&quot;classLoader&quot;.equals(pd.getName()) ||  &quot;protectionDomain&quot;.equals(pd.getName()))) {</span>
+					// Ignore Class.getClassLoader() and getProtectionDomain() methods - nobody needs to bind to those
+<span class="nc" id="L286">					continue;</span>
+				}
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L289">					logger.trace(&quot;Found bean property '&quot; + pd.getName() + &quot;'&quot; +</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">							(pd.getPropertyType() != null ? &quot; of type [&quot; + pd.getPropertyType().getName() + &quot;]&quot; : &quot;&quot;) +</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">							(pd.getPropertyEditorClass() != null ?</span>
+<span class="nc" id="L292">									&quot;; editor [&quot; + pd.getPropertyEditorClass().getName() + &quot;]&quot; : &quot;&quot;));</span>
+				}
+<span class="fc" id="L294">				pd = buildGenericTypeAwarePropertyDescriptor(beanClass, pd);</span>
+<span class="fc" id="L295">				this.propertyDescriptorCache.put(pd.getName(), pd);</span>
+			}
+
+			// Explicitly check implemented interfaces for setter/getter methods as well,
+			// in particular for Java 8 default methods...
+<span class="fc" id="L300">			Class&lt;?&gt; currClass = beanClass;</span>
+<span class="fc bfc" id="L301" title="All 4 branches covered.">			while (currClass != null &amp;&amp; currClass != Object.class) {</span>
+<span class="fc" id="L302">				introspectInterfaces(beanClass, currClass);</span>
+<span class="fc" id="L303">				currClass = currClass.getSuperclass();</span>
+			}
+
+<span class="fc" id="L306">			this.typeDescriptorCache = new ConcurrentReferenceHashMap&lt;&gt;();</span>
+		}
+<span class="nc" id="L308">		catch (IntrospectionException ex) {</span>
+<span class="nc" id="L309">			throw new FatalBeanException(&quot;Failed to obtain BeanInfo for class [&quot; + beanClass.getName() + &quot;]&quot;, ex);</span>
+<span class="fc" id="L310">		}</span>
+<span class="fc" id="L311">	}</span>
+
+	private void introspectInterfaces(Class&lt;?&gt; beanClass, Class&lt;?&gt; currClass) throws IntrospectionException {
+<span class="fc bfc" id="L314" title="All 2 branches covered.">		for (Class&lt;?&gt; ifc : currClass.getInterfaces()) {</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">			if (!ClassUtils.isJavaLanguageInterface(ifc)) {</span>
+<span class="fc bfc" id="L316" title="All 2 branches covered.">				for (PropertyDescriptor pd : getBeanInfo(ifc).getPropertyDescriptors()) {</span>
+<span class="fc" id="L317">					PropertyDescriptor existingPd = this.propertyDescriptorCache.get(pd.getName());</span>
+<span class="fc bfc" id="L318" title="All 2 branches covered.">					if (existingPd == null ||</span>
+<span class="fc bfc" id="L319" title="All 4 branches covered.">							(existingPd.getReadMethod() == null &amp;&amp; pd.getReadMethod() != null)) {</span>
+						// GenericTypeAwarePropertyDescriptor leniently resolves a set* write method
+						// against a declared read method, so we prefer read method descriptors here.
+<span class="fc" id="L322">						pd = buildGenericTypeAwarePropertyDescriptor(beanClass, pd);</span>
+<span class="fc" id="L323">						this.propertyDescriptorCache.put(pd.getName(), pd);</span>
+					}
+				}
+<span class="fc" id="L326">				introspectInterfaces(ifc, ifc);</span>
+			}
+		}
+<span class="fc" id="L329">	}</span>
+
+
+	BeanInfo getBeanInfo() {
+<span class="fc" id="L333">		return this.beanInfo;</span>
+	}
+
+	Class&lt;?&gt; getBeanClass() {
+<span class="fc" id="L337">		return this.beanInfo.getBeanDescriptor().getBeanClass();</span>
+	}
+
+	@Nullable
+	PropertyDescriptor getPropertyDescriptor(String name) {
+<span class="fc" id="L342">		PropertyDescriptor pd = this.propertyDescriptorCache.get(name);</span>
+<span class="fc bfc" id="L343" title="All 4 branches covered.">		if (pd == null &amp;&amp; StringUtils.hasLength(name)) {</span>
+			// Same lenient fallback checking as in Property...
+<span class="fc" id="L345">			pd = this.propertyDescriptorCache.get(StringUtils.uncapitalize(name));</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">			if (pd == null) {</span>
+<span class="fc" id="L347">				pd = this.propertyDescriptorCache.get(StringUtils.capitalize(name));</span>
+			}
+		}
+<span class="pc bpc" id="L350" title="1 of 4 branches missed.">		return (pd == null || pd instanceof GenericTypeAwarePropertyDescriptor ? pd :</span>
+<span class="nc" id="L351">				buildGenericTypeAwarePropertyDescriptor(getBeanClass(), pd));</span>
+	}
+
+	PropertyDescriptor[] getPropertyDescriptors() {
+<span class="fc" id="L355">		PropertyDescriptor[] pds = new PropertyDescriptor[this.propertyDescriptorCache.size()];</span>
+<span class="fc" id="L356">		int i = 0;</span>
+<span class="fc bfc" id="L357" title="All 2 branches covered.">		for (PropertyDescriptor pd : this.propertyDescriptorCache.values()) {</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">			pds[i] = (pd instanceof GenericTypeAwarePropertyDescriptor ? pd :</span>
+<span class="pc" id="L359">					buildGenericTypeAwarePropertyDescriptor(getBeanClass(), pd));</span>
+<span class="fc" id="L360">			i++;</span>
+<span class="fc" id="L361">		}</span>
+<span class="fc" id="L362">		return pds;</span>
+	}
+
+	private PropertyDescriptor buildGenericTypeAwarePropertyDescriptor(Class&lt;?&gt; beanClass, PropertyDescriptor pd) {
+		try {
+<span class="fc" id="L367">			return new GenericTypeAwarePropertyDescriptor(beanClass, pd.getName(), pd.getReadMethod(),</span>
+<span class="fc" id="L368">					pd.getWriteMethod(), pd.getPropertyEditorClass());</span>
+		}
+<span class="nc" id="L370">		catch (IntrospectionException ex) {</span>
+<span class="nc" id="L371">			throw new FatalBeanException(&quot;Failed to re-introspect class [&quot; + beanClass.getName() + &quot;]&quot;, ex);</span>
+		}
+	}
+
+	TypeDescriptor addTypeDescriptor(PropertyDescriptor pd, TypeDescriptor td) {
+<span class="fc" id="L376">		TypeDescriptor existing = this.typeDescriptorCache.putIfAbsent(pd, td);</span>
+<span class="pc bpc" id="L377" title="1 of 2 branches missed.">		return (existing != null ? existing : td);</span>
+	}
+
+	@Nullable
+	TypeDescriptor getTypeDescriptor(PropertyDescriptor pd) {
+<span class="fc" id="L382">		return this.typeDescriptorCache.get(pd);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

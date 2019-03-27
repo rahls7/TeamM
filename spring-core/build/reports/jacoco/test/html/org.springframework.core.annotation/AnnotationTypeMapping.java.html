@@ -1,0 +1,651 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AnnotationTypeMapping.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.annotation</a> &gt; <span class="el_source">AnnotationTypeMapping.java</span></div><h1>AnnotationTypeMapping.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.annotation;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.BiFunction;
+
+import org.springframework.core.annotation.AnnotationTypeMapping.MirrorSets.MirrorSet;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Provides mapping information for a single annotation (or meta-annotation) in
+ * the context of a root annotation type.
+ *
+ * @author Phillip Webb
+ * @since 5.2
+ * @see AnnotationTypeMappings
+ */
+final class AnnotationTypeMapping {
+
+	@Nullable
+	private final AnnotationTypeMapping parent;
+
+	private final AnnotationTypeMapping root;
+
+	private final int depth;
+
+	private final Class&lt;? extends Annotation&gt; annotationType;
+
+	@Nullable
+	private final Annotation annotation;
+
+	private final AttributeMethods attributes;
+
+	private final MirrorSets mirrorSets;
+
+	private final int[] aliasMappings;
+
+	private final int[] conventionMappings;
+
+	private final int[] annotationValueMappings;
+
+	private final AnnotationTypeMapping[] annotationValueSource;
+
+	private final Map&lt;Method, List&lt;Method&gt;&gt; aliasedBy;
+
+<span class="fc" id="L76">	private final Set&lt;Method&gt; claimedAliases = new HashSet&lt;&gt;();</span>
+
+
+	AnnotationTypeMapping(@Nullable AnnotationTypeMapping parent,
+<span class="fc" id="L80">			Class&lt;? extends Annotation&gt; annotationType, @Nullable Annotation annotation) {</span>
+
+<span class="fc" id="L82">		this.parent = parent;</span>
+<span class="fc bfc" id="L83" title="All 2 branches covered.">		this.root = (parent != null ? parent.getRoot() : this);</span>
+<span class="fc bfc" id="L84" title="All 2 branches covered.">		this.depth = (parent == null ? 0 : parent.getDepth() + 1);</span>
+<span class="fc" id="L85">		this.annotationType = annotationType;</span>
+<span class="fc" id="L86">		this.annotation = annotation;</span>
+<span class="fc" id="L87">		this.attributes = AttributeMethods.forAnnotationType(annotationType);</span>
+<span class="fc" id="L88">		this.mirrorSets = new MirrorSets();</span>
+<span class="fc" id="L89">		this.aliasMappings = filledIntArray(this.attributes.size());</span>
+<span class="fc" id="L90">		this.conventionMappings = filledIntArray(this.attributes.size());</span>
+<span class="fc" id="L91">		this.annotationValueMappings = filledIntArray(this.attributes.size());</span>
+<span class="fc" id="L92">		this.annotationValueSource = new AnnotationTypeMapping[this.attributes.size()];</span>
+<span class="fc" id="L93">		this.aliasedBy = resolveAliasedForTargets();</span>
+<span class="fc" id="L94">		processAliases();</span>
+<span class="fc" id="L95">		addConventionMappings();</span>
+<span class="fc" id="L96">		addConventionAnnotationValues();</span>
+<span class="fc" id="L97">	}</span>
+
+
+	private Map&lt;Method, List&lt;Method&gt;&gt; resolveAliasedForTargets() {
+<span class="fc" id="L101">		Map&lt;Method, List&lt;Method&gt;&gt; aliasedBy = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">		for (int i = 0; i &lt; this.attributes.size(); i++) {</span>
+<span class="fc" id="L103">			Method attribute = this.attributes.get(i);</span>
+<span class="fc" id="L104">			AliasFor aliasFor = AnnotationsScanner.getDeclaredAnnotation(attribute, AliasFor.class);</span>
+<span class="fc bfc" id="L105" title="All 2 branches covered.">			if (aliasFor != null) {</span>
+<span class="fc" id="L106">				Method target = resolveAliasTarget(attribute, aliasFor);</span>
+<span class="fc" id="L107">				aliasedBy.computeIfAbsent(target, key -&gt; new ArrayList&lt;&gt;()).add(attribute);</span>
+			}
+		}
+<span class="fc" id="L110">		return Collections.unmodifiableMap(aliasedBy);</span>
+	}
+
+	private Method resolveAliasTarget(Method attribute, AliasFor aliasFor) {
+<span class="fc" id="L114">		return resolveAliasTarget(attribute, aliasFor, true);</span>
+	}
+
+	private Method resolveAliasTarget(Method attribute, AliasFor aliasFor, boolean checkAliasPair) {
+<span class="fc bfc" id="L118" title="All 4 branches covered.">		if (StringUtils.hasText(aliasFor.value()) &amp;&amp; StringUtils.hasText(aliasFor.attribute())) {</span>
+<span class="fc" id="L119">			throw new AnnotationConfigurationException(String.format(</span>
+					&quot;In @AliasFor declared on %s, attribute 'attribute' and its alias 'value' &quot; +
+					&quot;are present with values of '%s' and '%s', but only one is permitted.&quot;,
+<span class="fc" id="L122">					AttributeMethods.describe(attribute), aliasFor.attribute(),</span>
+<span class="fc" id="L123">					aliasFor.value()));</span>
+		}
+<span class="fc" id="L125">		Class&lt;? extends Annotation&gt; targetAnnotation = aliasFor.annotation();</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">		if (targetAnnotation == Annotation.class) {</span>
+<span class="fc" id="L127">			targetAnnotation = this.annotationType;</span>
+		}
+<span class="fc" id="L129">		String targetAttributeName = aliasFor.attribute();</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">		if (!StringUtils.hasLength(targetAttributeName)) {</span>
+<span class="fc" id="L131">			targetAttributeName = aliasFor.value();</span>
+		}
+<span class="fc bfc" id="L133" title="All 2 branches covered.">		if (!StringUtils.hasLength(targetAttributeName)) {</span>
+<span class="fc" id="L134">			targetAttributeName = attribute.getName();</span>
+		}
+<span class="fc" id="L136">		Method target = AttributeMethods.forAnnotationType(targetAnnotation).get(targetAttributeName);</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">		if (target == null) {</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">			if (targetAnnotation == this.annotationType) {</span>
+<span class="fc" id="L139">				throw new AnnotationConfigurationException(String.format(</span>
+						&quot;@AliasFor declaration on %s declares an alias for '%s' which is not present.&quot;,
+<span class="fc" id="L141">						AttributeMethods.describe(attribute), targetAttributeName));</span>
+			}
+<span class="fc" id="L143">			throw new AnnotationConfigurationException(String.format(</span>
+					&quot;%s is declared as an @AliasFor nonexistent %s.&quot;,
+<span class="fc" id="L145">					StringUtils.capitalize(AttributeMethods.describe(attribute)),</span>
+<span class="fc" id="L146">					AttributeMethods.describe(targetAnnotation, targetAttributeName)));</span>
+		}
+<span class="fc bfc" id="L148" title="All 2 branches covered.">		if (target == attribute) {</span>
+<span class="fc" id="L149">			throw new AnnotationConfigurationException(String.format(</span>
+					&quot;@AliasFor declaration on %s points to itself. &quot; +
+					&quot;Specify 'annotation' to point to a same-named attribute on a meta-annotation.&quot;,
+<span class="fc" id="L152">					AttributeMethods.describe(attribute)));</span>
+		}
+<span class="fc bfc" id="L154" title="All 2 branches covered.">		if (!isCompatibleReturnType(attribute.getReturnType(), target.getReturnType())) {</span>
+<span class="fc" id="L155">			throw new AnnotationConfigurationException(String.format(</span>
+					&quot;Misconfigured aliases: %s and %s must declare the same return type.&quot;,
+<span class="fc" id="L157">					AttributeMethods.describe(attribute),</span>
+<span class="fc" id="L158">					AttributeMethods.describe(target)));</span>
+		}
+<span class="fc bfc" id="L160" title="All 4 branches covered.">		if (isAliasPair(target) &amp;&amp; checkAliasPair) {</span>
+<span class="fc" id="L161">			AliasFor targetAliasFor = target.getAnnotation(AliasFor.class);</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">			if (targetAliasFor == null) {</span>
+<span class="fc" id="L163">				throw new AnnotationConfigurationException(String.format(</span>
+						&quot;%s must be declared as an @AliasFor '%s'.&quot;,
+<span class="fc" id="L165">						StringUtils.capitalize(AttributeMethods.describe(target)),</span>
+<span class="fc" id="L166">						attribute.getName()));</span>
+			}
+<span class="fc" id="L168">			Method mirror = resolveAliasTarget(target, targetAliasFor, false);</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">			if (mirror != attribute) {</span>
+<span class="fc" id="L170">				throw new AnnotationConfigurationException(String.format(</span>
+						&quot;%s must be declared as an @AliasFor '%s', not '%s'.&quot;,
+<span class="fc" id="L172">						StringUtils.capitalize(AttributeMethods.describe(target)),</span>
+<span class="fc" id="L173">						attribute.getName(), mirror.getName()));</span>
+			}
+		}
+<span class="fc" id="L176">		return target;</span>
+	}
+
+	private boolean isAliasPair(Method target) {
+<span class="fc" id="L180">		return target.getDeclaringClass().equals(this.annotationType);</span>
+	}
+
+	private boolean isCompatibleReturnType(Class&lt;?&gt; attributeType, Class&lt;?&gt; targetType) {
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		return Objects.equals(attributeType, targetType) ||</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">				Objects.equals(attributeType, targetType.getComponentType());</span>
+	}
+
+	private void processAliases() {
+<span class="fc" id="L189">		List&lt;Method&gt; aliases = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">		for (int i = 0; i &lt; this.attributes.size(); i++) {</span>
+<span class="fc" id="L191">			aliases.clear();</span>
+<span class="fc" id="L192">			aliases.add(this.attributes.get(i));</span>
+<span class="fc" id="L193">			collectAliases(aliases);</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">			if (aliases.size() &gt; 1) {</span>
+<span class="fc" id="L195">				processAliases(i, aliases);</span>
+			}
+		}
+<span class="fc" id="L198">	}</span>
+
+	private void collectAliases(List&lt;Method&gt; aliases) {
+<span class="fc" id="L201">		AnnotationTypeMapping mapping = this;</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">		while (mapping != null) {</span>
+<span class="fc" id="L203">			int size = aliases.size();</span>
+<span class="fc bfc" id="L204" title="All 2 branches covered.">			for (int j = 0; j &lt; size; j++) {</span>
+<span class="fc" id="L205">				List&lt;Method&gt; additional = mapping.aliasedBy.get(aliases.get(j));</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">				if (additional != null) {</span>
+<span class="fc" id="L207">					aliases.addAll(additional);</span>
+				}
+			}
+<span class="fc" id="L210">			mapping = mapping.parent;</span>
+<span class="fc" id="L211">		}</span>
+<span class="fc" id="L212">	}</span>
+
+	private void processAliases(int attributeIndex, List&lt;Method&gt; aliases) {
+<span class="fc" id="L215">		int rootAttributeIndex = getFirstRootAttributeIndex(aliases);</span>
+<span class="fc" id="L216">		AnnotationTypeMapping mapping = this;</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">		while (mapping != null) {</span>
+<span class="fc bfc" id="L218" title="All 4 branches covered.">			if (rootAttributeIndex != -1 &amp;&amp; mapping != this.root) {</span>
+<span class="fc bfc" id="L219" title="All 2 branches covered.">				for (int i = 0; i &lt; mapping.attributes.size(); i++) {</span>
+<span class="fc bfc" id="L220" title="All 2 branches covered.">					if (aliases.contains(mapping.attributes.get(i))) {</span>
+<span class="fc" id="L221">						mapping.aliasMappings[i] = rootAttributeIndex;</span>
+					}
+				}
+			}
+<span class="fc" id="L225">			mapping.mirrorSets.updateFrom(aliases);</span>
+<span class="fc" id="L226">			mapping.claimedAliases.addAll(aliases);</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">			if (mapping.annotation != null) {</span>
+<span class="fc" id="L228">				int[] resolvedMirrors = mapping.mirrorSets.resolve(null,</span>
+						mapping.annotation, ReflectionUtils::invokeMethod);
+<span class="fc bfc" id="L230" title="All 2 branches covered.">				for (int i = 0; i &lt; mapping.attributes.size(); i++) {</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">					if (aliases.contains(mapping.attributes.get(i))) {</span>
+<span class="fc" id="L232">						this.annotationValueMappings[attributeIndex] = resolvedMirrors[i];</span>
+<span class="fc" id="L233">						this.annotationValueSource[attributeIndex] = mapping;</span>
+					}
+				}
+			}
+<span class="fc" id="L237">			mapping = mapping.parent;</span>
+		}
+<span class="fc" id="L239">	}</span>
+
+	private int getFirstRootAttributeIndex(Collection&lt;Method&gt; aliases) {
+<span class="fc" id="L242">		AttributeMethods rootAttributes = this.root.getAttributes();</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">		for (int i = 0; i &lt; rootAttributes.size(); i++) {</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">			if (aliases.contains(rootAttributes.get(i))) {</span>
+<span class="fc" id="L245">				return i;</span>
+			}
+		}
+<span class="fc" id="L248">		return -1;</span>
+	}
+
+	private void addConventionMappings() {
+<span class="fc bfc" id="L252" title="All 2 branches covered.">		if (this.depth == 0) {</span>
+<span class="fc" id="L253">			return;</span>
+		}
+<span class="fc" id="L255">		AttributeMethods rootAttributes = this.root.getAttributes();</span>
+<span class="fc" id="L256">		int[] mappings = this.conventionMappings;</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">		for (int i = 0; i &lt; mappings.length; i++) {</span>
+<span class="fc" id="L258">			String name = this.attributes.get(i).getName();</span>
+<span class="fc" id="L259">			MirrorSet mirrors = getMirrorSets().getAssigned(i);</span>
+<span class="fc" id="L260">			int mapped = rootAttributes.indexOf(name);</span>
+<span class="fc bfc" id="L261" title="All 4 branches covered.">			if (!MergedAnnotation.VALUE.equals(name) &amp;&amp; mapped != -1) {</span>
+<span class="fc" id="L262">				mappings[i] = mapped;</span>
+<span class="fc bfc" id="L263" title="All 2 branches covered.">				if (mirrors != null) {</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">					for (int j = 0; j &lt; mirrors.size(); j++) {</span>
+<span class="fc" id="L265">						mappings[mirrors.getAttributeIndex(j)] = mapped;</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L270">	}</span>
+
+	private void addConventionAnnotationValues() {
+<span class="fc bfc" id="L273" title="All 2 branches covered.">		for (int i = 0; i &lt; this.attributes.size(); i++) {</span>
+<span class="fc" id="L274">			Method attribute = this.attributes.get(i);</span>
+<span class="fc" id="L275">			AnnotationTypeMapping mapping = this;</span>
+<span class="pc bpc" id="L276" title="1 of 4 branches missed.">			while (mapping != null &amp;&amp; mapping.depth &gt; 0) {</span>
+<span class="fc" id="L277">				int mapped = mapping.getAttributes().indexOf(attribute.getName());</span>
+<span class="fc bfc" id="L278" title="All 6 branches covered.">				if (mapped != -1 &amp;&amp; (this.annotationValueMappings[i] == -1 ||</span>
+						this.annotationValueSource[i].depth &gt; mapping.depth)) {
+<span class="fc" id="L280">					this.annotationValueMappings[i] = mapped;</span>
+<span class="fc" id="L281">					this.annotationValueSource[i] = mapping;</span>
+				}
+<span class="fc" id="L283">				mapping = mapping.parent;</span>
+<span class="fc" id="L284">			}</span>
+		}
+<span class="fc" id="L286">	}</span>
+
+	/**
+	 * Method called after all mappings have been set. At this point no further
+	 * lookups from child mappings will occur.
+	 */
+	void afterAllMappingsSet() {
+<span class="fc" id="L293">		validateAllAliasesClaimed();</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">		for (int i = 0; i &lt; this.mirrorSets.size(); i++) {</span>
+<span class="fc" id="L295">			validateMirrorSet(this.mirrorSets.get(i));</span>
+		}
+<span class="fc" id="L297">		this.claimedAliases.clear();</span>
+<span class="fc" id="L298">	}</span>
+
+	private void validateAllAliasesClaimed() {
+<span class="fc bfc" id="L301" title="All 2 branches covered.">		for (int i = 0; i &lt; this.attributes.size(); i++) {</span>
+<span class="fc" id="L302">			Method attribute = this.attributes.get(i);</span>
+<span class="fc" id="L303">			AliasFor aliasFor = AnnotationsScanner.getDeclaredAnnotation(attribute, AliasFor.class);</span>
+<span class="fc bfc" id="L304" title="All 4 branches covered.">			if (aliasFor != null &amp;&amp; !this.claimedAliases.contains(attribute)) {</span>
+<span class="fc" id="L305">				Method target = resolveAliasTarget(attribute, aliasFor);</span>
+<span class="fc" id="L306">				throw new AnnotationConfigurationException(String.format(</span>
+						&quot;@AliasFor declaration on %s declares an alias for %s which is not meta-present.&quot;,
+<span class="fc" id="L308">						AttributeMethods.describe(attribute), AttributeMethods.describe(target)));</span>
+			}
+		}
+<span class="fc" id="L311">	}</span>
+
+	private void validateMirrorSet(MirrorSet mirrorSet) {
+<span class="fc" id="L314">		Method firstAttribute = mirrorSet.get(0);</span>
+<span class="fc" id="L315">		Object firstDefaultValue = firstAttribute.getDefaultValue();</span>
+<span class="fc bfc" id="L316" title="All 2 branches covered.">		for (int i = 1; i &lt;= mirrorSet.size() - 1; i++) {</span>
+<span class="fc" id="L317">			Method mirrorAttribute = mirrorSet.get(i);</span>
+<span class="fc" id="L318">			Object mirrorDefaultValue = mirrorAttribute.getDefaultValue();</span>
+<span class="fc bfc" id="L319" title="All 4 branches covered.">			if (firstDefaultValue == null || mirrorDefaultValue == null) {</span>
+<span class="fc" id="L320">				throw new AnnotationConfigurationException(String.format(</span>
+						&quot;Misconfigured aliases: %s and %s must declare default values.&quot;,
+<span class="fc" id="L322">						AttributeMethods.describe(firstAttribute), AttributeMethods.describe(mirrorAttribute)));</span>
+			}
+<span class="fc bfc" id="L324" title="All 2 branches covered.">			if (!ObjectUtils.nullSafeEquals(firstDefaultValue, mirrorDefaultValue)) {</span>
+<span class="fc" id="L325">				throw new AnnotationConfigurationException(String.format(</span>
+						&quot;Misconfigured aliases: %s and %s must declare the same default value.&quot;,
+<span class="fc" id="L327">						AttributeMethods.describe(firstAttribute), AttributeMethods.describe(mirrorAttribute)));</span>
+			}
+		}
+<span class="fc" id="L330">	}</span>
+
+	/**
+	 * Return the root mapping.
+	 * @return the root mapping
+	 */
+	AnnotationTypeMapping getRoot() {
+<span class="fc" id="L337">		return this.root;</span>
+	}
+
+	/**
+	 * Return the parent mapping or {@code null}.
+	 * @return the parent mapping
+	 */
+	@Nullable
+	AnnotationTypeMapping getParent() {
+<span class="fc" id="L346">		return this.parent;</span>
+	}
+
+	/**
+	 * Return the depth of this mapping.
+	 * @return the depth of the mapping
+	 */
+	int getDepth() {
+<span class="fc" id="L354">		return this.depth;</span>
+	}
+
+	/**
+	 * Return the type of the mapped annotation.
+	 * @return the annotation type
+	 */
+	Class&lt;? extends Annotation&gt; getAnnotationType() {
+<span class="fc" id="L362">		return this.annotationType;</span>
+	}
+
+	/**
+	 * Return the source annotation for this mapping. This will be the
+	 * meta-annotation, or {@code null} if this is the root mapping.
+	 * @return the source annotation of the mapping
+	 */
+	@Nullable
+	Annotation getAnnotation() {
+<span class="fc" id="L372">		return this.annotation;</span>
+	}
+
+	/**
+	 * Return the annotation attributes for the mapping annotation type.
+	 * @return the attribute methods
+	 */
+	AttributeMethods getAttributes() {
+<span class="fc" id="L380">		return this.attributes;</span>
+	}
+
+	/**
+	 * Return the related index of an alias mapped attribute, or {@code -1} if
+	 * there is no mapping. The resulting value is the index of the attribute on
+	 * the root annotation that can be invoked in order to obtain the actual
+	 * value.
+	 * @param attributeIndex the attribute index of the source attribute
+	 * @return the mapped attribute index or {@code -1}
+	 */
+	int getAliasMapping(int attributeIndex) {
+<span class="fc" id="L392">		return this.aliasMappings[attributeIndex];</span>
+	}
+
+	/**
+	 * Return the related index of a convention mapped attribute, or {@code -1}
+	 * if there is no mapping. The resulting value is the index of the attribute
+	 * on the root annotation that can be invoked in order to obtain the actual
+	 * value.
+	 * @param attributeIndex the attribute index of the source attribute
+	 * @return the mapped attribute index or {@code -1}
+	 */
+	int getConventionMapping(int attributeIndex) {
+<span class="fc" id="L404">		return this.conventionMappings[attributeIndex];</span>
+	}
+
+	/**
+	 * Return a mapped attribute value from the most suitable
+	 * {@link #getAnnotation() meta-annotation}. The resulting value is obtained
+	 * from the closest meta-annotation, taking into consideration both
+	 * convention and alias based mapping rules. For root mappings, this method
+	 * will always return {@code null}.
+	 * @param attributeIndex the attribute index of the source attribute
+	 * @return the mapped annotation value, or {@code null}
+	 */
+	@Nullable
+	Object getMappedAnnotationValue(int attributeIndex) {
+<span class="fc" id="L418">		int mapped = this.annotationValueMappings[attributeIndex];</span>
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">		if (mapped == -1) {</span>
+<span class="nc" id="L420">			return null;</span>
+		}
+<span class="fc" id="L422">		AnnotationTypeMapping source = this.annotationValueSource[attributeIndex];</span>
+<span class="fc" id="L423">		return ReflectionUtils.invokeMethod(source.attributes.get(mapped), source.annotation);</span>
+	}
+
+	/**
+	 * Return if the specified value is equivalent to the default value of the
+	 * attribute at the given index.
+	 * @param attributeIndex the attribute index of the source attribute
+	 * @param value the value to check
+	 * @param valueExtractor the value extractor used to extract value from any
+	 * nested annotations
+	 * @return {@code true} if the value is equivalent to the default value
+	 */
+	boolean isEquivalentToDefaultValue(int attributeIndex, Object value,
+			BiFunction&lt;Method, Object, Object&gt; valueExtractor) {
+
+<span class="fc" id="L438">		Method attribute = this.attributes.get(attributeIndex);</span>
+<span class="fc" id="L439">		return isEquivalentToDefaultValue(attribute, value, valueExtractor);</span>
+	}
+
+	/**
+	 * Return the mirror sets for this type mapping.
+	 * @return the mirrorSets the attribute mirror sets.
+	 */
+	MirrorSets getMirrorSets() {
+<span class="fc" id="L447">		return this.mirrorSets;</span>
+	}
+
+
+	private static int[] filledIntArray(int size) {
+<span class="fc" id="L452">		int[] array = new int[size];</span>
+<span class="fc" id="L453">		Arrays.fill(array, -1);</span>
+<span class="fc" id="L454">		return array;</span>
+	}
+
+	private static boolean isEquivalentToDefaultValue(Method attribute, Object value,
+			BiFunction&lt;Method, Object, Object&gt; valueExtractor) {
+
+<span class="fc" id="L460">		return areEquivalent(attribute.getDefaultValue(), value, valueExtractor);</span>
+	}
+
+	private static boolean areEquivalent(@Nullable Object value, @Nullable Object extractedValue,
+			BiFunction&lt;Method, Object, Object&gt; valueExtractor) {
+
+<span class="fc bfc" id="L466" title="All 2 branches covered.">		if (ObjectUtils.nullSafeEquals(value, extractedValue)) {</span>
+<span class="fc" id="L467">			return true;</span>
+		}
+<span class="fc bfc" id="L469" title="All 4 branches covered.">		if (value instanceof Class &amp;&amp; extractedValue instanceof String) {</span>
+<span class="fc" id="L470">			return areEquivalent((Class&lt;?&gt;) value, (String) extractedValue);</span>
+		}
+<span class="fc bfc" id="L472" title="All 4 branches covered.">		if (value instanceof Class[] &amp;&amp; extractedValue instanceof String[]) {</span>
+<span class="fc" id="L473">			return areEquivalent((Class[]) value, (String[]) extractedValue);</span>
+		}
+<span class="fc bfc" id="L475" title="All 2 branches covered.">		if (value instanceof Annotation) {</span>
+<span class="fc" id="L476">			return areEquivalent((Annotation) value, extractedValue, valueExtractor);</span>
+		}
+<span class="fc" id="L478">		return false;</span>
+	}
+
+	private static boolean areEquivalent(Class&lt;?&gt;[] value, String[] extractedValue) {
+<span class="pc bpc" id="L482" title="1 of 2 branches missed.">		if (value.length != extractedValue.length) {</span>
+<span class="nc" id="L483">			return false;</span>
+		}
+<span class="fc bfc" id="L485" title="All 2 branches covered.">		for (int i = 0; i &lt; value.length; i++) {</span>
+<span class="pc bpc" id="L486" title="1 of 2 branches missed.">			if (!areEquivalent(value[i], extractedValue[i])) {</span>
+<span class="nc" id="L487">				return false;</span>
+			}
+		}
+<span class="fc" id="L490">		return true;</span>
+	}
+
+	private static boolean areEquivalent(Class&lt;?&gt; value, String extractedValue) {
+<span class="fc" id="L494">		return value.getName().equals(extractedValue);</span>
+	}
+
+	private static boolean areEquivalent(Annotation value, @Nullable Object extractedValue,
+			BiFunction&lt;Method, Object, Object&gt; valueExtractor) {
+
+<span class="fc" id="L500">		AttributeMethods attributes = AttributeMethods.forAnnotationType(value.annotationType());</span>
+<span class="fc bfc" id="L501" title="All 2 branches covered.">		for (int i = 0; i &lt; attributes.size(); i++) {</span>
+<span class="fc" id="L502">			Method attribute = attributes.get(i);</span>
+<span class="pc bpc" id="L503" title="1 of 2 branches missed.">			if (!areEquivalent(ReflectionUtils.invokeMethod(attribute, value),</span>
+<span class="fc" id="L504">					valueExtractor.apply(attribute, extractedValue), valueExtractor)) {</span>
+<span class="nc" id="L505">				return false;</span>
+			}
+		}
+<span class="fc" id="L508">		return true;</span>
+	}
+
+
+	/**
+	 * A collection of {@link MirrorSet} instances that provides details of all
+	 * defined mirrors.
+	 */
+	class MirrorSets {
+
+		private MirrorSet[] mirrorSets;
+
+		private final MirrorSet[] assigned;
+
+<span class="fc" id="L522">		MirrorSets() {</span>
+<span class="fc" id="L523">			this.assigned = new MirrorSet[attributes.size()];</span>
+<span class="fc" id="L524">			this.mirrorSets = new MirrorSet[0];</span>
+<span class="fc" id="L525">		}</span>
+
+		void updateFrom(Collection&lt;Method&gt; aliases) {
+<span class="fc" id="L528">			MirrorSet mirrorSet = null;</span>
+<span class="fc" id="L529">			int size = 0;</span>
+<span class="fc" id="L530">			int last = -1;</span>
+<span class="fc bfc" id="L531" title="All 2 branches covered.">			for (int i = 0; i &lt; attributes.size(); i++) {</span>
+<span class="fc" id="L532">				Method attribute = attributes.get(i);</span>
+<span class="fc bfc" id="L533" title="All 2 branches covered.">				if (aliases.contains(attribute)) {</span>
+<span class="fc" id="L534">					size++;</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">					if (size &gt; 1) {</span>
+<span class="fc bfc" id="L536" title="All 2 branches covered.">						if (mirrorSet == null) {</span>
+<span class="fc" id="L537">							mirrorSet = new MirrorSet();</span>
+<span class="fc" id="L538">							this.assigned[last] = mirrorSet;</span>
+						}
+<span class="fc" id="L540">						this.assigned[i] = mirrorSet;</span>
+					}
+<span class="fc" id="L542">					last = i;</span>
+				}
+			}
+<span class="fc bfc" id="L545" title="All 2 branches covered.">			if (mirrorSet != null) {</span>
+<span class="fc" id="L546">				mirrorSet.update();</span>
+<span class="fc" id="L547">				Set&lt;MirrorSet&gt; unique = new LinkedHashSet&lt;&gt;(Arrays.asList(this.assigned));</span>
+<span class="fc" id="L548">				unique.remove(null);</span>
+<span class="fc" id="L549">				this.mirrorSets = unique.toArray(new MirrorSet[0]);</span>
+			}
+<span class="fc" id="L551">		}</span>
+
+		int size() {
+<span class="fc" id="L554">			return this.mirrorSets.length;</span>
+		}
+
+		MirrorSet get(int index) {
+<span class="fc" id="L558">			return this.mirrorSets[index];</span>
+		}
+
+		@Nullable
+		MirrorSet getAssigned(int attributeIndex) {
+<span class="fc" id="L563">			return this.assigned[attributeIndex];</span>
+		}
+
+		int[] resolve(@Nullable Object source, @Nullable Object annotation,
+				BiFunction&lt;Method, Object, Object&gt; valueExtractor) {
+
+<span class="fc" id="L569">			int[] result = new int[attributes.size()];</span>
+<span class="fc bfc" id="L570" title="All 2 branches covered.">			for (int i = 0; i &lt; result.length; i++) {</span>
+<span class="fc" id="L571">				result[i] = i;</span>
+			}
+<span class="fc bfc" id="L573" title="All 2 branches covered.">			for (int i = 0; i &lt; size(); i++) {</span>
+<span class="fc" id="L574">				MirrorSet mirrorSet = get(i);</span>
+<span class="fc" id="L575">				int resolved = mirrorSet.resolve(source, annotation, valueExtractor);</span>
+<span class="fc bfc" id="L576" title="All 2 branches covered.">				for (int j = 0; j &lt; mirrorSet.size; j++) {</span>
+<span class="fc" id="L577">					result[mirrorSet.indexes[j]] = resolved;</span>
+				}
+			}
+<span class="fc" id="L580">			return result;</span>
+		}
+
+
+		/**
+		 * A single set of mirror attributes.
+		 */
+<span class="fc" id="L587">		class MirrorSet {</span>
+
+			private int size;
+
+<span class="fc" id="L591">			private final int[] indexes = new int[attributes.size()];</span>
+
+			void update() {
+<span class="fc" id="L594">				this.size = 0;</span>
+<span class="fc" id="L595">				Arrays.fill(this.indexes, -1);</span>
+<span class="fc bfc" id="L596" title="All 2 branches covered.">				for (int i = 0; i &lt; MirrorSets.this.assigned.length; i++) {</span>
+<span class="fc bfc" id="L597" title="All 2 branches covered.">					if (MirrorSets.this.assigned[i] == this) {</span>
+<span class="fc" id="L598">						this.indexes[this.size] = i;</span>
+<span class="fc" id="L599">						this.size++;</span>
+					}
+				}
+<span class="fc" id="L602">			}</span>
+
+			&lt;A&gt; int resolve(@Nullable Object source, @Nullable A annotation,
+					BiFunction&lt;Method, Object, Object&gt; valueExtractor) {
+
+<span class="fc" id="L607">				int result = -1;</span>
+<span class="fc" id="L608">				Object lastValue = null;</span>
+<span class="fc bfc" id="L609" title="All 2 branches covered.">				for (int i = 0; i &lt; this.size; i++) {</span>
+<span class="fc" id="L610">					Method attribute = attributes.get(this.indexes[i]);</span>
+<span class="fc" id="L611">					Object value = valueExtractor.apply(attribute, annotation);</span>
+<span class="fc bfc" id="L612" title="All 2 branches covered.">					boolean isDefaultValue = (value == null ||</span>
+<span class="fc bfc" id="L613" title="All 2 branches covered.">							isEquivalentToDefaultValue(attribute, value, valueExtractor));</span>
+<span class="fc bfc" id="L614" title="All 4 branches covered.">					if (isDefaultValue || ObjectUtils.nullSafeEquals(lastValue, value)) {</span>
+<span class="fc" id="L615">						continue;</span>
+					}
+<span class="fc bfc" id="L617" title="All 2 branches covered.">					if (lastValue != null &amp;&amp;</span>
+<span class="pc bpc" id="L618" title="1 of 2 branches missed.">							!ObjectUtils.nullSafeEquals(lastValue, value)) {</span>
+<span class="fc bfc" id="L619" title="All 2 branches covered.">						String on = (source != null) ? &quot; declared on &quot; + source : &quot;&quot;;</span>
+<span class="fc" id="L620">						throw new AnnotationConfigurationException(String.format(</span>
+								&quot;Different @AliasFor mirror values for annotation [%s]%s, attribute '%s' &quot; +
+								&quot;and its alias '%s' are declared with values of [%s] and [%s].&quot;,
+<span class="fc" id="L623">								getAnnotationType().getName(), on,</span>
+<span class="fc" id="L624">								attributes.get(result).getName(),</span>
+<span class="fc" id="L625">								attribute.getName(),</span>
+<span class="fc" id="L626">								ObjectUtils.nullSafeToString(lastValue),</span>
+<span class="fc" id="L627">								ObjectUtils.nullSafeToString(value)));</span>
+					}
+<span class="fc" id="L629">					result = this.indexes[i];</span>
+<span class="fc" id="L630">					lastValue = value;</span>
+				}
+<span class="fc" id="L632">				return result;</span>
+			}
+
+			int size() {
+<span class="fc" id="L636">				return this.size;</span>
+			}
+
+			Method get(int index) {
+<span class="fc" id="L640">				int attributeIndex = this.indexes[index];</span>
+<span class="fc" id="L641">				return attributes.get(attributeIndex);</span>
+			}
+
+			int getAttributeIndex(int index) {
+<span class="fc" id="L645">				return this.indexes[index];</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

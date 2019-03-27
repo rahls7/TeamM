@@ -1,0 +1,734 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MockServletContext.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.mock.web</a> &gt; <span class="el_source">MockServletContext.java</span></div><h1>MockServletContext.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.mock.web;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.EventListener;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import javax.servlet.Filter;
+import javax.servlet.FilterRegistration;
+import javax.servlet.RequestDispatcher;
+import javax.servlet.Servlet;
+import javax.servlet.ServletContext;
+import javax.servlet.ServletException;
+import javax.servlet.ServletRegistration;
+import javax.servlet.SessionCookieConfig;
+import javax.servlet.SessionTrackingMode;
+import javax.servlet.descriptor.JspConfigDescriptor;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.io.DefaultResourceLoader;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.http.MediaType;
+import org.springframework.http.MediaTypeFactory;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.MimeType;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.util.WebUtils;
+
+/**
+ * Mock implementation of the {@link javax.servlet.ServletContext} interface.
+ *
+ * &lt;p&gt;As of Spring 5.0, this set of mocks is designed on a Servlet 4.0 baseline.
+ *
+ * &lt;p&gt;Compatible with Servlet 3.1 but can be configured to expose a specific version
+ * through {@link #setMajorVersion}/{@link #setMinorVersion}; default is 3.1.
+ * Note that Servlet 3.1 support is limited: servlet, filter and listener
+ * registration methods are not supported; neither is JSP configuration.
+ * We generally do not recommend to unit test your ServletContainerInitializers and
+ * WebApplicationInitializers which is where those registration methods would be used.
+ *
+ * &lt;p&gt;For setting up a full {@code WebApplicationContext} in a test environment, you can
+ * use {@code AnnotationConfigWebApplicationContext}, {@code XmlWebApplicationContext},
+ * or {@code GenericWebApplicationContext}, passing in a corresponding
+ * {@code MockServletContext} instance. Consider configuring your
+ * {@code MockServletContext} with a {@code FileSystemResourceLoader} in order to
+ * interpret resource paths as relative filesystem locations.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 1.0.2
+ * @see #MockServletContext(org.springframework.core.io.ResourceLoader)
+ * @see org.springframework.web.context.support.AnnotationConfigWebApplicationContext
+ * @see org.springframework.web.context.support.XmlWebApplicationContext
+ * @see org.springframework.web.context.support.GenericWebApplicationContext
+ */
+public class MockServletContext implements ServletContext {
+
+	/** Default Servlet name used by Tomcat, Jetty, JBoss, and GlassFish: {@value}. */
+	private static final String COMMON_DEFAULT_SERVLET_NAME = &quot;default&quot;;
+
+	private static final String TEMP_DIR_SYSTEM_PROPERTY = &quot;java.io.tmpdir&quot;;
+
+<span class="fc" id="L94">	private static final Set&lt;SessionTrackingMode&gt; DEFAULT_SESSION_TRACKING_MODES = new LinkedHashSet&lt;&gt;(4);</span>
+
+	static {
+<span class="fc" id="L97">		DEFAULT_SESSION_TRACKING_MODES.add(SessionTrackingMode.COOKIE);</span>
+<span class="fc" id="L98">		DEFAULT_SESSION_TRACKING_MODES.add(SessionTrackingMode.URL);</span>
+<span class="fc" id="L99">		DEFAULT_SESSION_TRACKING_MODES.add(SessionTrackingMode.SSL);</span>
+<span class="fc" id="L100">	}</span>
+
+
+<span class="fc" id="L103">	private final Log logger = LogFactory.getLog(getClass());</span>
+
+	private final ResourceLoader resourceLoader;
+
+	private final String resourceBasePath;
+
+<span class="fc" id="L109">	private String contextPath = &quot;&quot;;</span>
+
+<span class="fc" id="L111">	private final Map&lt;String, ServletContext&gt; contexts = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L113">	private int majorVersion = 3;</span>
+
+<span class="fc" id="L115">	private int minorVersion = 1;</span>
+
+<span class="fc" id="L117">	private int effectiveMajorVersion = 3;</span>
+
+<span class="fc" id="L119">	private int effectiveMinorVersion = 1;</span>
+
+<span class="fc" id="L121">	private final Map&lt;String, RequestDispatcher&gt; namedRequestDispatchers = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L123">	private String defaultServletName = COMMON_DEFAULT_SERVLET_NAME;</span>
+
+<span class="fc" id="L125">	private final Map&lt;String, String&gt; initParameters = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L127">	private final Map&lt;String, Object&gt; attributes = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L129">	private String servletContextName = &quot;MockServletContext&quot;;</span>
+
+<span class="fc" id="L131">	private final Set&lt;String&gt; declaredRoles = new LinkedHashSet&lt;&gt;();</span>
+
+	@Nullable
+	private Set&lt;SessionTrackingMode&gt; sessionTrackingModes;
+
+<span class="fc" id="L136">	private final SessionCookieConfig sessionCookieConfig = new MockSessionCookieConfig();</span>
+
+	private int sessionTimeout;
+
+	@Nullable
+	private String requestCharacterEncoding;
+
+	@Nullable
+	private String responseCharacterEncoding;
+
+<span class="fc" id="L146">	private final Map&lt;String, MediaType&gt; mimeTypes = new LinkedHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Create a new {@code MockServletContext}, using no base path and a
+	 * {@link DefaultResourceLoader} (i.e. the classpath root as WAR root).
+	 * @see org.springframework.core.io.DefaultResourceLoader
+	 */
+	public MockServletContext() {
+<span class="fc" id="L155">		this(&quot;&quot;, null);</span>
+<span class="fc" id="L156">	}</span>
+
+	/**
+	 * Create a new {@code MockServletContext}, using a {@link DefaultResourceLoader}.
+	 * @param resourceBasePath the root directory of the WAR (should not end with a slash)
+	 * @see org.springframework.core.io.DefaultResourceLoader
+	 */
+	public MockServletContext(String resourceBasePath) {
+<span class="fc" id="L164">		this(resourceBasePath, null);</span>
+<span class="fc" id="L165">	}</span>
+
+	/**
+	 * Create a new {@code MockServletContext}, using the specified {@link ResourceLoader}
+	 * and no base path.
+	 * @param resourceLoader the ResourceLoader to use (or null for the default)
+	 */
+	public MockServletContext(@Nullable ResourceLoader resourceLoader) {
+<span class="nc" id="L173">		this(&quot;&quot;, resourceLoader);</span>
+<span class="nc" id="L174">	}</span>
+
+	/**
+	 * Create a new {@code MockServletContext} using the supplied resource base
+	 * path and resource loader.
+	 * &lt;p&gt;Registers a {@link MockRequestDispatcher} for the Servlet named
+	 * {@literal 'default'}.
+	 * @param resourceBasePath the root directory of the WAR (should not end with a slash)
+	 * @param resourceLoader the ResourceLoader to use (or null for the default)
+	 * @see #registerNamedDispatcher
+	 */
+<span class="fc" id="L185">	public MockServletContext(String resourceBasePath, @Nullable ResourceLoader resourceLoader) {</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">		this.resourceLoader = (resourceLoader != null ? resourceLoader : new DefaultResourceLoader());</span>
+<span class="fc" id="L187">		this.resourceBasePath = resourceBasePath;</span>
+
+		// Use JVM temp dir as ServletContext temp dir.
+<span class="fc" id="L190">		String tempDir = System.getProperty(TEMP_DIR_SYSTEM_PROPERTY);</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">		if (tempDir != null) {</span>
+<span class="fc" id="L192">			this.attributes.put(WebUtils.TEMP_DIR_CONTEXT_ATTRIBUTE, new File(tempDir));</span>
+		}
+
+<span class="fc" id="L195">		registerNamedDispatcher(this.defaultServletName, new MockRequestDispatcher(this.defaultServletName));</span>
+<span class="fc" id="L196">	}</span>
+
+	/**
+	 * Build a full resource location for the given path, prepending the resource
+	 * base path of this {@code MockServletContext}.
+	 * @param path the path as specified
+	 * @return the full resource path
+	 */
+	protected String getResourceLocation(String path) {
+<span class="fc bfc" id="L205" title="All 2 branches covered.">		if (!path.startsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L206">			path = &quot;/&quot; + path;</span>
+		}
+<span class="fc" id="L208">		return this.resourceBasePath + path;</span>
+	}
+
+	public void setContextPath(String contextPath) {
+<span class="fc" id="L212">		this.contextPath = contextPath;</span>
+<span class="fc" id="L213">	}</span>
+
+	@Override
+	public String getContextPath() {
+<span class="nc" id="L217">		return this.contextPath;</span>
+	}
+
+	public void registerContext(String contextPath, ServletContext context) {
+<span class="fc" id="L221">		this.contexts.put(contextPath, context);</span>
+<span class="fc" id="L222">	}</span>
+
+	@Override
+	public ServletContext getContext(String contextPath) {
+<span class="fc bfc" id="L226" title="All 2 branches covered.">		if (this.contextPath.equals(contextPath)) {</span>
+<span class="fc" id="L227">			return this;</span>
+		}
+<span class="fc" id="L229">		return this.contexts.get(contextPath);</span>
+	}
+
+	public void setMajorVersion(int majorVersion) {
+<span class="fc" id="L233">		this.majorVersion = majorVersion;</span>
+<span class="fc" id="L234">	}</span>
+
+	@Override
+	public int getMajorVersion() {
+<span class="fc" id="L238">		return this.majorVersion;</span>
+	}
+
+	public void setMinorVersion(int minorVersion) {
+<span class="fc" id="L242">		this.minorVersion = minorVersion;</span>
+<span class="fc" id="L243">	}</span>
+
+	@Override
+	public int getMinorVersion() {
+<span class="fc" id="L247">		return this.minorVersion;</span>
+	}
+
+	public void setEffectiveMajorVersion(int effectiveMajorVersion) {
+<span class="fc" id="L251">		this.effectiveMajorVersion = effectiveMajorVersion;</span>
+<span class="fc" id="L252">	}</span>
+
+	@Override
+	public int getEffectiveMajorVersion() {
+<span class="fc" id="L256">		return this.effectiveMajorVersion;</span>
+	}
+
+	public void setEffectiveMinorVersion(int effectiveMinorVersion) {
+<span class="fc" id="L260">		this.effectiveMinorVersion = effectiveMinorVersion;</span>
+<span class="fc" id="L261">	}</span>
+
+	@Override
+	public int getEffectiveMinorVersion() {
+<span class="fc" id="L265">		return this.effectiveMinorVersion;</span>
+	}
+
+	@Override
+	@Nullable
+	public String getMimeType(String filePath) {
+<span class="fc" id="L271">		String extension = StringUtils.getFilenameExtension(filePath);</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">		if (this.mimeTypes.containsKey(extension)) {</span>
+<span class="fc" id="L273">			return this.mimeTypes.get(extension).toString();</span>
+		}
+		else {
+<span class="fc" id="L276">			return MediaTypeFactory.getMediaType(filePath).</span>
+<span class="fc" id="L277">					map(MimeType::toString)</span>
+<span class="fc" id="L278">					.orElse(null);</span>
+		}
+	}
+
+	/**
+	 * Adds a mime type mapping for use by {@link #getMimeType(String)}.
+	 * @param fileExtension a file extension, such as {@code txt}, {@code gif}
+	 * @param mimeType the mime type
+	 */
+	public void addMimeType(String fileExtension, MediaType mimeType) {
+<span class="fc" id="L288">		Assert.notNull(fileExtension, &quot;'fileExtension' must not be null&quot;);</span>
+<span class="fc" id="L289">		this.mimeTypes.put(fileExtension, mimeType);</span>
+<span class="fc" id="L290">	}</span>
+
+	@Override
+	@Nullable
+	public Set&lt;String&gt; getResourcePaths(String path) {
+<span class="fc bfc" id="L295" title="All 2 branches covered.">		String actualPath = (path.endsWith(&quot;/&quot;) ? path : path + &quot;/&quot;);</span>
+<span class="fc" id="L296">		Resource resource = this.resourceLoader.getResource(getResourceLocation(actualPath));</span>
+		try {
+<span class="fc" id="L298">			File file = resource.getFile();</span>
+<span class="fc" id="L299">			String[] fileList = file.list();</span>
+<span class="fc bfc" id="L300" title="All 2 branches covered.">			if (ObjectUtils.isEmpty(fileList)) {</span>
+<span class="fc" id="L301">				return null;</span>
+			}
+<span class="fc" id="L303">			Set&lt;String&gt; resourcePaths = new LinkedHashSet&lt;&gt;(fileList.length);</span>
+<span class="fc bfc" id="L304" title="All 2 branches covered.">			for (String fileEntry : fileList) {</span>
+<span class="fc" id="L305">				String resultPath = actualPath + fileEntry;</span>
+<span class="fc bfc" id="L306" title="All 2 branches covered.">				if (resource.createRelative(fileEntry).getFile().isDirectory()) {</span>
+<span class="fc" id="L307">					resultPath += &quot;/&quot;;</span>
+				}
+<span class="fc" id="L309">				resourcePaths.add(resultPath);</span>
+			}
+<span class="fc" id="L311">			return resourcePaths;</span>
+		}
+<span class="fc" id="L313">		catch (IOException ex) {</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L315">				logger.warn(&quot;Could not get resource paths for &quot; + resource, ex);</span>
+			}
+<span class="fc" id="L317">			return null;</span>
+		}
+	}
+
+	@Override
+	@Nullable
+	public URL getResource(String path) throws MalformedURLException {
+<span class="fc" id="L324">		Resource resource = this.resourceLoader.getResource(getResourceLocation(path));</span>
+<span class="pc bpc" id="L325" title="1 of 2 branches missed.">		if (!resource.exists()) {</span>
+<span class="nc" id="L326">			return null;</span>
+		}
+		try {
+<span class="fc" id="L329">			return resource.getURL();</span>
+		}
+<span class="nc" id="L331">		catch (MalformedURLException ex) {</span>
+<span class="nc" id="L332">			throw ex;</span>
+		}
+<span class="nc" id="L334">		catch (IOException ex) {</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L336">				logger.warn(&quot;Could not get URL for &quot; + resource, ex);</span>
+			}
+<span class="nc" id="L338">			return null;</span>
+		}
+	}
+
+	@Override
+	@Nullable
+	public InputStream getResourceAsStream(String path) {
+<span class="fc" id="L345">		Resource resource = this.resourceLoader.getResource(getResourceLocation(path));</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">		if (!resource.exists()) {</span>
+<span class="nc" id="L347">			return null;</span>
+		}
+		try {
+<span class="fc" id="L350">			return resource.getInputStream();</span>
+		}
+<span class="nc" id="L352">		catch (IOException ex) {</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L354">				logger.warn(&quot;Could not open InputStream for &quot; + resource, ex);</span>
+			}
+<span class="nc" id="L356">			return null;</span>
+		}
+	}
+
+	@Override
+	public RequestDispatcher getRequestDispatcher(String path) {
+<span class="nc" id="L362">		Assert.isTrue(path.startsWith(&quot;/&quot;),</span>
+<span class="nc" id="L363">				() -&gt; &quot;RequestDispatcher path [&quot; + path + &quot;] at ServletContext level must start with '/'&quot;);</span>
+<span class="nc" id="L364">		return new MockRequestDispatcher(path);</span>
+	}
+
+	@Override
+	public RequestDispatcher getNamedDispatcher(String path) {
+<span class="fc" id="L369">		return this.namedRequestDispatchers.get(path);</span>
+	}
+
+	/**
+	 * Register a {@link RequestDispatcher} (typically a {@link MockRequestDispatcher})
+	 * that acts as a wrapper for the named Servlet.
+	 * @param name the name of the wrapped Servlet
+	 * @param requestDispatcher the dispatcher that wraps the named Servlet
+	 * @see #getNamedDispatcher
+	 * @see #unregisterNamedDispatcher
+	 */
+	public void registerNamedDispatcher(String name, RequestDispatcher requestDispatcher) {
+<span class="fc" id="L381">		Assert.notNull(name, &quot;RequestDispatcher name must not be null&quot;);</span>
+<span class="fc" id="L382">		Assert.notNull(requestDispatcher, &quot;RequestDispatcher must not be null&quot;);</span>
+<span class="fc" id="L383">		this.namedRequestDispatchers.put(name, requestDispatcher);</span>
+<span class="fc" id="L384">	}</span>
+
+	/**
+	 * Unregister the {@link RequestDispatcher} with the given name.
+	 * @param name the name of the dispatcher to unregister
+	 * @see #getNamedDispatcher
+	 * @see #registerNamedDispatcher
+	 */
+	public void unregisterNamedDispatcher(String name) {
+<span class="fc" id="L393">		Assert.notNull(name, &quot;RequestDispatcher name must not be null&quot;);</span>
+<span class="fc" id="L394">		this.namedRequestDispatchers.remove(name);</span>
+<span class="fc" id="L395">	}</span>
+
+	/**
+	 * Get the name of the &lt;em&gt;default&lt;/em&gt; {@code Servlet}.
+	 * &lt;p&gt;Defaults to {@literal 'default'}.
+	 * @see #setDefaultServletName
+	 */
+	public String getDefaultServletName() {
+<span class="fc" id="L403">		return this.defaultServletName;</span>
+	}
+
+	/**
+	 * Set the name of the &lt;em&gt;default&lt;/em&gt; {@code Servlet}.
+	 * &lt;p&gt;Also {@link #unregisterNamedDispatcher unregisters} the current default
+	 * {@link RequestDispatcher} and {@link #registerNamedDispatcher replaces}
+	 * it with a {@link MockRequestDispatcher} for the provided
+	 * {@code defaultServletName}.
+	 * @param defaultServletName the name of the &lt;em&gt;default&lt;/em&gt; {@code Servlet};
+	 * never {@code null} or empty
+	 * @see #getDefaultServletName
+	 */
+	public void setDefaultServletName(String defaultServletName) {
+<span class="fc" id="L417">		Assert.hasText(defaultServletName, &quot;defaultServletName must not be null or empty&quot;);</span>
+<span class="fc" id="L418">		unregisterNamedDispatcher(this.defaultServletName);</span>
+<span class="fc" id="L419">		this.defaultServletName = defaultServletName;</span>
+<span class="fc" id="L420">		registerNamedDispatcher(this.defaultServletName, new MockRequestDispatcher(this.defaultServletName));</span>
+<span class="fc" id="L421">	}</span>
+
+	@Deprecated
+	@Override
+	@Nullable
+	public Servlet getServlet(String name) {
+<span class="nc" id="L427">		return null;</span>
+	}
+
+	@Override
+	@Deprecated
+	public Enumeration&lt;Servlet&gt; getServlets() {
+<span class="nc" id="L433">		return Collections.enumeration(Collections.emptySet());</span>
+	}
+
+	@Override
+	@Deprecated
+	public Enumeration&lt;String&gt; getServletNames() {
+<span class="nc" id="L439">		return Collections.enumeration(Collections.emptySet());</span>
+	}
+
+	@Override
+	public void log(String message) {
+<span class="fc" id="L444">		logger.info(message);</span>
+<span class="fc" id="L445">	}</span>
+
+	@Override
+	@Deprecated
+	public void log(Exception ex, String message) {
+<span class="nc" id="L450">		logger.info(message, ex);</span>
+<span class="nc" id="L451">	}</span>
+
+	@Override
+	public void log(String message, Throwable ex) {
+<span class="nc" id="L455">		logger.info(message, ex);</span>
+<span class="nc" id="L456">	}</span>
+
+	@Override
+	@Nullable
+	public String getRealPath(String path) {
+<span class="fc" id="L461">		Resource resource = this.resourceLoader.getResource(getResourceLocation(path));</span>
+		try {
+<span class="fc" id="L463">			return resource.getFile().getAbsolutePath();</span>
+		}
+<span class="nc" id="L465">		catch (IOException ex) {</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L467">				logger.warn(&quot;Could not determine real path of resource &quot; + resource, ex);</span>
+			}
+<span class="nc" id="L469">			return null;</span>
+		}
+	}
+
+	@Override
+	public String getServerInfo() {
+<span class="nc" id="L475">		return &quot;MockServletContext&quot;;</span>
+	}
+
+	@Override
+	public String getInitParameter(String name) {
+<span class="fc" id="L480">		Assert.notNull(name, &quot;Parameter name must not be null&quot;);</span>
+<span class="fc" id="L481">		return this.initParameters.get(name);</span>
+	}
+
+	@Override
+	public Enumeration&lt;String&gt; getInitParameterNames() {
+<span class="fc" id="L486">		return Collections.enumeration(this.initParameters.keySet());</span>
+	}
+
+	@Override
+	public boolean setInitParameter(String name, String value) {
+<span class="nc" id="L491">		Assert.notNull(name, &quot;Parameter name must not be null&quot;);</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">		if (this.initParameters.containsKey(name)) {</span>
+<span class="nc" id="L493">			return false;</span>
+		}
+<span class="nc" id="L495">		this.initParameters.put(name, value);</span>
+<span class="nc" id="L496">		return true;</span>
+	}
+
+	public void addInitParameter(String name, String value) {
+<span class="nc" id="L500">		Assert.notNull(name, &quot;Parameter name must not be null&quot;);</span>
+<span class="nc" id="L501">		this.initParameters.put(name, value);</span>
+<span class="nc" id="L502">	}</span>
+
+	@Override
+	@Nullable
+	public Object getAttribute(String name) {
+<span class="fc" id="L507">		Assert.notNull(name, &quot;Attribute name must not be null&quot;);</span>
+<span class="fc" id="L508">		return this.attributes.get(name);</span>
+	}
+
+	@Override
+	public Enumeration&lt;String&gt; getAttributeNames() {
+<span class="fc" id="L513">		return Collections.enumeration(new LinkedHashSet&lt;&gt;(this.attributes.keySet()));</span>
+	}
+
+	@Override
+	public void setAttribute(String name, @Nullable Object value) {
+<span class="fc" id="L518">		Assert.notNull(name, &quot;Attribute name must not be null&quot;);</span>
+<span class="pc bpc" id="L519" title="1 of 2 branches missed.">		if (value != null) {</span>
+<span class="fc" id="L520">			this.attributes.put(name, value);</span>
+		}
+		else {
+<span class="nc" id="L523">			this.attributes.remove(name);</span>
+		}
+<span class="fc" id="L525">	}</span>
+
+	@Override
+	public void removeAttribute(String name) {
+<span class="fc" id="L529">		Assert.notNull(name, &quot;Attribute name must not be null&quot;);</span>
+<span class="fc" id="L530">		this.attributes.remove(name);</span>
+<span class="fc" id="L531">	}</span>
+
+	public void setServletContextName(String servletContextName) {
+<span class="nc" id="L534">		this.servletContextName = servletContextName;</span>
+<span class="nc" id="L535">	}</span>
+
+	@Override
+	public String getServletContextName() {
+<span class="nc" id="L539">		return this.servletContextName;</span>
+	}
+
+	@Override
+	@Nullable
+	public ClassLoader getClassLoader() {
+<span class="nc" id="L545">		return ClassUtils.getDefaultClassLoader();</span>
+	}
+
+	@Override
+	public void declareRoles(String... roleNames) {
+<span class="nc" id="L550">		Assert.notNull(roleNames, &quot;Role names array must not be null&quot;);</span>
+<span class="nc bnc" id="L551" title="All 2 branches missed.">		for (String roleName : roleNames) {</span>
+<span class="nc" id="L552">			Assert.hasLength(roleName, &quot;Role name must not be empty&quot;);</span>
+<span class="nc" id="L553">			this.declaredRoles.add(roleName);</span>
+		}
+<span class="nc" id="L555">	}</span>
+
+	public Set&lt;String&gt; getDeclaredRoles() {
+<span class="nc" id="L558">		return Collections.unmodifiableSet(this.declaredRoles);</span>
+	}
+
+	@Override
+	public void setSessionTrackingModes(Set&lt;SessionTrackingMode&gt; sessionTrackingModes)
+			throws IllegalStateException, IllegalArgumentException {
+<span class="nc" id="L564">		this.sessionTrackingModes = sessionTrackingModes;</span>
+<span class="nc" id="L565">	}</span>
+
+	@Override
+	public Set&lt;SessionTrackingMode&gt; getDefaultSessionTrackingModes() {
+<span class="nc" id="L569">		return DEFAULT_SESSION_TRACKING_MODES;</span>
+	}
+
+	@Override
+	public Set&lt;SessionTrackingMode&gt; getEffectiveSessionTrackingModes() {
+<span class="nc bnc" id="L574" title="All 2 branches missed.">		return (this.sessionTrackingModes != null ?</span>
+<span class="nc" id="L575">				Collections.unmodifiableSet(this.sessionTrackingModes) : DEFAULT_SESSION_TRACKING_MODES);</span>
+	}
+
+	@Override
+	public SessionCookieConfig getSessionCookieConfig() {
+<span class="nc" id="L580">		return this.sessionCookieConfig;</span>
+	}
+
+	@Override  // on Servlet 4.0
+	public void setSessionTimeout(int sessionTimeout) {
+<span class="nc" id="L585">		this.sessionTimeout = sessionTimeout;</span>
+<span class="nc" id="L586">	}</span>
+
+	@Override  // on Servlet 4.0
+	public int getSessionTimeout() {
+<span class="nc" id="L590">		return this.sessionTimeout;</span>
+	}
+
+	@Override  // on Servlet 4.0
+	public void setRequestCharacterEncoding(@Nullable String requestCharacterEncoding) {
+<span class="nc" id="L595">		this.requestCharacterEncoding = requestCharacterEncoding;</span>
+<span class="nc" id="L596">	}</span>
+
+	@Override  // on Servlet 4.0
+	@Nullable
+	public String getRequestCharacterEncoding() {
+<span class="nc" id="L601">		return this.requestCharacterEncoding;</span>
+	}
+
+	@Override  // on Servlet 4.0
+	public void setResponseCharacterEncoding(@Nullable String responseCharacterEncoding) {
+<span class="nc" id="L606">		this.responseCharacterEncoding = responseCharacterEncoding;</span>
+<span class="nc" id="L607">	}</span>
+
+	@Override  // on Servlet 4.0
+	@Nullable
+	public String getResponseCharacterEncoding() {
+<span class="nc" id="L612">		return this.responseCharacterEncoding;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Unsupported Servlet 3.0 registration methods
+	//---------------------------------------------------------------------
+
+	@Override
+	public JspConfigDescriptor getJspConfigDescriptor() {
+<span class="nc" id="L622">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override  // on Servlet 4.0
+	public ServletRegistration.Dynamic addJspFile(String servletName, String jspFile) {
+<span class="nc" id="L627">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public ServletRegistration.Dynamic addServlet(String servletName, String className) {
+<span class="nc" id="L632">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public ServletRegistration.Dynamic addServlet(String servletName, Servlet servlet) {
+<span class="nc" id="L637">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public ServletRegistration.Dynamic addServlet(String servletName, Class&lt;? extends Servlet&gt; servletClass) {
+<span class="nc" id="L642">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public &lt;T extends Servlet&gt; T createServlet(Class&lt;T&gt; c) throws ServletException {
+<span class="nc" id="L647">		throw new UnsupportedOperationException();</span>
+	}
+
+	/**
+	 * This method always returns {@code null}.
+	 * @see javax.servlet.ServletContext#getServletRegistration(java.lang.String)
+	 */
+	@Override
+	@Nullable
+	public ServletRegistration getServletRegistration(String servletName) {
+<span class="fc" id="L657">		return null;</span>
+	}
+
+	/**
+	 * This method always returns an {@linkplain Collections#emptyMap empty map}.
+	 * @see javax.servlet.ServletContext#getServletRegistrations()
+	 */
+	@Override
+	public Map&lt;String, ? extends ServletRegistration&gt; getServletRegistrations() {
+<span class="fc" id="L666">		return Collections.emptyMap();</span>
+	}
+
+	@Override
+	public FilterRegistration.Dynamic addFilter(String filterName, String className) {
+<span class="nc" id="L671">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public FilterRegistration.Dynamic addFilter(String filterName, Filter filter) {
+<span class="nc" id="L676">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public FilterRegistration.Dynamic addFilter(String filterName, Class&lt;? extends Filter&gt; filterClass) {
+<span class="nc" id="L681">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public &lt;T extends Filter&gt; T createFilter(Class&lt;T&gt; c) throws ServletException {
+<span class="nc" id="L686">		throw new UnsupportedOperationException();</span>
+	}
+
+	/**
+	 * This method always returns {@code null}.
+	 * @see javax.servlet.ServletContext#getFilterRegistration(java.lang.String)
+	 */
+	@Override
+	@Nullable
+	public FilterRegistration getFilterRegistration(String filterName) {
+<span class="fc" id="L696">		return null;</span>
+	}
+
+	/**
+	 * This method always returns an {@linkplain Collections#emptyMap empty map}.
+	 * @see javax.servlet.ServletContext#getFilterRegistrations()
+	 */
+	@Override
+	public Map&lt;String, ? extends FilterRegistration&gt; getFilterRegistrations() {
+<span class="fc" id="L705">		return Collections.emptyMap();</span>
+	}
+
+	@Override
+	public void addListener(Class&lt;? extends EventListener&gt; listenerClass) {
+<span class="nc" id="L710">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public void addListener(String className) {
+<span class="nc" id="L715">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public &lt;T extends EventListener&gt; void addListener(T t) {
+<span class="nc" id="L720">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public &lt;T extends EventListener&gt; T createListener(Class&lt;T&gt; c) throws ServletException {
+<span class="nc" id="L725">		throw new UnsupportedOperationException();</span>
+	}
+
+	@Override
+	public String getVirtualServerName() {
+<span class="nc" id="L730">		throw new UnsupportedOperationException();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

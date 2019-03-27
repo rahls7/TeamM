@@ -1,0 +1,2391 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MethodWriter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.asm</a> &gt; <span class="el_source">MethodWriter.java</span></div><h1>MethodWriter.java</h1><pre class="source lang-java linenums">// ASM: a very small and fast Java bytecode manipulation framework
+// Copyright (c) 2000-2011 INRIA, France Telecom
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+// 3. Neither the name of the copyright holders nor the names of its
+//    contributors may be used to endorse or promote products derived from
+//    this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+// THE POSSIBILITY OF SUCH DAMAGE.
+package org.springframework.asm;
+
+/**
+ * A {@link MethodVisitor} that generates a corresponding 'method_info' structure, as defined in the
+ * Java Virtual Machine Specification (JVMS).
+ *
+ * @see &lt;a href=&quot;https://docs.oracle.com/javase/specs/jvms/se9/html/jvms-4.html#jvms-4.6&quot;&gt;JVMS
+ *     4.6&lt;/a&gt;
+ * @author Eric Bruneton
+ * @author Eugene Kuleshov
+ */
+final class MethodWriter extends MethodVisitor {
+
+  /** Indicates that nothing must be computed. */
+  static final int COMPUTE_NOTHING = 0;
+
+  /**
+   * Indicates that the maximum stack size and the maximum number of local variables must be
+   * computed, from scratch.
+   */
+  static final int COMPUTE_MAX_STACK_AND_LOCAL = 1;
+
+  /**
+   * Indicates that the maximum stack size and the maximum number of local variables must be
+   * computed, from the existing stack map frames. This can be done more efficiently than with the
+   * control flow graph algorithm used for {@link #COMPUTE_MAX_STACK_AND_LOCAL}, by using a linear
+   * scan of the bytecode instructions.
+   */
+  static final int COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES = 2;
+
+  /**
+   * Indicates that the stack map frames of type F_INSERT must be computed. The other frames are not
+   * computed. They should all be of type F_NEW and should be sufficient to compute the content of
+   * the F_INSERT frames, together with the bytecode instructions between a F_NEW and a F_INSERT
+   * frame - and without any knowledge of the type hierarchy (by definition of F_INSERT).
+   */
+  static final int COMPUTE_INSERTED_FRAMES = 3;
+
+  /**
+   * Indicates that all the stack map frames must be computed. In this case the maximum stack size
+   * and the maximum number of local variables is also computed.
+   */
+  static final int COMPUTE_ALL_FRAMES = 4;
+
+  /** Indicates that {@link #STACK_SIZE_DELTA} is not applicable (not constant or never used). */
+  private static final int NA = 0;
+
+  /**
+   * The stack size variation corresponding to each JVM opcode. The stack size variation for opcode
+   * 'o' is given by the array element at index 'o'.
+   *
+   * @see &lt;a href=&quot;https://docs.oracle.com/javase/specs/jvms/se9/html/jvms-6.html&quot;&gt;JVMS 6&lt;/a&gt;
+   */
+<span class="nc" id="L81">  private static final int[] STACK_SIZE_DELTA = {</span>
+    0, // nop = 0 (0x0)
+    1, // aconst_null = 1 (0x1)
+    1, // iconst_m1 = 2 (0x2)
+    1, // iconst_0 = 3 (0x3)
+    1, // iconst_1 = 4 (0x4)
+    1, // iconst_2 = 5 (0x5)
+    1, // iconst_3 = 6 (0x6)
+    1, // iconst_4 = 7 (0x7)
+    1, // iconst_5 = 8 (0x8)
+    2, // lconst_0 = 9 (0x9)
+    2, // lconst_1 = 10 (0xa)
+    1, // fconst_0 = 11 (0xb)
+    1, // fconst_1 = 12 (0xc)
+    1, // fconst_2 = 13 (0xd)
+    2, // dconst_0 = 14 (0xe)
+    2, // dconst_1 = 15 (0xf)
+    1, // bipush = 16 (0x10)
+    1, // sipush = 17 (0x11)
+    1, // ldc = 18 (0x12)
+    NA, // ldc_w = 19 (0x13)
+    NA, // ldc2_w = 20 (0x14)
+    1, // iload = 21 (0x15)
+    2, // lload = 22 (0x16)
+    1, // fload = 23 (0x17)
+    2, // dload = 24 (0x18)
+    1, // aload = 25 (0x19)
+    NA, // iload_0 = 26 (0x1a)
+    NA, // iload_1 = 27 (0x1b)
+    NA, // iload_2 = 28 (0x1c)
+    NA, // iload_3 = 29 (0x1d)
+    NA, // lload_0 = 30 (0x1e)
+    NA, // lload_1 = 31 (0x1f)
+    NA, // lload_2 = 32 (0x20)
+    NA, // lload_3 = 33 (0x21)
+    NA, // fload_0 = 34 (0x22)
+    NA, // fload_1 = 35 (0x23)
+    NA, // fload_2 = 36 (0x24)
+    NA, // fload_3 = 37 (0x25)
+    NA, // dload_0 = 38 (0x26)
+    NA, // dload_1 = 39 (0x27)
+    NA, // dload_2 = 40 (0x28)
+    NA, // dload_3 = 41 (0x29)
+    NA, // aload_0 = 42 (0x2a)
+    NA, // aload_1 = 43 (0x2b)
+    NA, // aload_2 = 44 (0x2c)
+    NA, // aload_3 = 45 (0x2d)
+    -1, // iaload = 46 (0x2e)
+    0, // laload = 47 (0x2f)
+    -1, // faload = 48 (0x30)
+    0, // daload = 49 (0x31)
+    -1, // aaload = 50 (0x32)
+    -1, // baload = 51 (0x33)
+    -1, // caload = 52 (0x34)
+    -1, // saload = 53 (0x35)
+    -1, // istore = 54 (0x36)
+    -2, // lstore = 55 (0x37)
+    -1, // fstore = 56 (0x38)
+    -2, // dstore = 57 (0x39)
+    -1, // astore = 58 (0x3a)
+    NA, // istore_0 = 59 (0x3b)
+    NA, // istore_1 = 60 (0x3c)
+    NA, // istore_2 = 61 (0x3d)
+    NA, // istore_3 = 62 (0x3e)
+    NA, // lstore_0 = 63 (0x3f)
+    NA, // lstore_1 = 64 (0x40)
+    NA, // lstore_2 = 65 (0x41)
+    NA, // lstore_3 = 66 (0x42)
+    NA, // fstore_0 = 67 (0x43)
+    NA, // fstore_1 = 68 (0x44)
+    NA, // fstore_2 = 69 (0x45)
+    NA, // fstore_3 = 70 (0x46)
+    NA, // dstore_0 = 71 (0x47)
+    NA, // dstore_1 = 72 (0x48)
+    NA, // dstore_2 = 73 (0x49)
+    NA, // dstore_3 = 74 (0x4a)
+    NA, // astore_0 = 75 (0x4b)
+    NA, // astore_1 = 76 (0x4c)
+    NA, // astore_2 = 77 (0x4d)
+    NA, // astore_3 = 78 (0x4e)
+    -3, // iastore = 79 (0x4f)
+    -4, // lastore = 80 (0x50)
+    -3, // fastore = 81 (0x51)
+    -4, // dastore = 82 (0x52)
+    -3, // aastore = 83 (0x53)
+    -3, // bastore = 84 (0x54)
+    -3, // castore = 85 (0x55)
+    -3, // sastore = 86 (0x56)
+    -1, // pop = 87 (0x57)
+    -2, // pop2 = 88 (0x58)
+    1, // dup = 89 (0x59)
+    1, // dup_x1 = 90 (0x5a)
+    1, // dup_x2 = 91 (0x5b)
+    2, // dup2 = 92 (0x5c)
+    2, // dup2_x1 = 93 (0x5d)
+    2, // dup2_x2 = 94 (0x5e)
+    0, // swap = 95 (0x5f)
+    -1, // iadd = 96 (0x60)
+    -2, // ladd = 97 (0x61)
+    -1, // fadd = 98 (0x62)
+    -2, // dadd = 99 (0x63)
+    -1, // isub = 100 (0x64)
+    -2, // lsub = 101 (0x65)
+    -1, // fsub = 102 (0x66)
+    -2, // dsub = 103 (0x67)
+    -1, // imul = 104 (0x68)
+    -2, // lmul = 105 (0x69)
+    -1, // fmul = 106 (0x6a)
+    -2, // dmul = 107 (0x6b)
+    -1, // idiv = 108 (0x6c)
+    -2, // ldiv = 109 (0x6d)
+    -1, // fdiv = 110 (0x6e)
+    -2, // ddiv = 111 (0x6f)
+    -1, // irem = 112 (0x70)
+    -2, // lrem = 113 (0x71)
+    -1, // frem = 114 (0x72)
+    -2, // drem = 115 (0x73)
+    0, // ineg = 116 (0x74)
+    0, // lneg = 117 (0x75)
+    0, // fneg = 118 (0x76)
+    0, // dneg = 119 (0x77)
+    -1, // ishl = 120 (0x78)
+    -1, // lshl = 121 (0x79)
+    -1, // ishr = 122 (0x7a)
+    -1, // lshr = 123 (0x7b)
+    -1, // iushr = 124 (0x7c)
+    -1, // lushr = 125 (0x7d)
+    -1, // iand = 126 (0x7e)
+    -2, // land = 127 (0x7f)
+    -1, // ior = 128 (0x80)
+    -2, // lor = 129 (0x81)
+    -1, // ixor = 130 (0x82)
+    -2, // lxor = 131 (0x83)
+    0, // iinc = 132 (0x84)
+    1, // i2l = 133 (0x85)
+    0, // i2f = 134 (0x86)
+    1, // i2d = 135 (0x87)
+    -1, // l2i = 136 (0x88)
+    -1, // l2f = 137 (0x89)
+    0, // l2d = 138 (0x8a)
+    0, // f2i = 139 (0x8b)
+    1, // f2l = 140 (0x8c)
+    1, // f2d = 141 (0x8d)
+    -1, // d2i = 142 (0x8e)
+    0, // d2l = 143 (0x8f)
+    -1, // d2f = 144 (0x90)
+    0, // i2b = 145 (0x91)
+    0, // i2c = 146 (0x92)
+    0, // i2s = 147 (0x93)
+    -3, // lcmp = 148 (0x94)
+    -1, // fcmpl = 149 (0x95)
+    -1, // fcmpg = 150 (0x96)
+    -3, // dcmpl = 151 (0x97)
+    -3, // dcmpg = 152 (0x98)
+    -1, // ifeq = 153 (0x99)
+    -1, // ifne = 154 (0x9a)
+    -1, // iflt = 155 (0x9b)
+    -1, // ifge = 156 (0x9c)
+    -1, // ifgt = 157 (0x9d)
+    -1, // ifle = 158 (0x9e)
+    -2, // if_icmpeq = 159 (0x9f)
+    -2, // if_icmpne = 160 (0xa0)
+    -2, // if_icmplt = 161 (0xa1)
+    -2, // if_icmpge = 162 (0xa2)
+    -2, // if_icmpgt = 163 (0xa3)
+    -2, // if_icmple = 164 (0xa4)
+    -2, // if_acmpeq = 165 (0xa5)
+    -2, // if_acmpne = 166 (0xa6)
+    0, // goto = 167 (0xa7)
+    1, // jsr = 168 (0xa8)
+    0, // ret = 169 (0xa9)
+    -1, // tableswitch = 170 (0xaa)
+    -1, // lookupswitch = 171 (0xab)
+    -1, // ireturn = 172 (0xac)
+    -2, // lreturn = 173 (0xad)
+    -1, // freturn = 174 (0xae)
+    -2, // dreturn = 175 (0xaf)
+    -1, // areturn = 176 (0xb0)
+    0, // return = 177 (0xb1)
+    NA, // getstatic = 178 (0xb2)
+    NA, // putstatic = 179 (0xb3)
+    NA, // getfield = 180 (0xb4)
+    NA, // putfield = 181 (0xb5)
+    NA, // invokevirtual = 182 (0xb6)
+    NA, // invokespecial = 183 (0xb7)
+    NA, // invokestatic = 184 (0xb8)
+    NA, // invokeinterface = 185 (0xb9)
+    NA, // invokedynamic = 186 (0xba)
+    1, // new = 187 (0xbb)
+    0, // newarray = 188 (0xbc)
+    0, // anewarray = 189 (0xbd)
+    0, // arraylength = 190 (0xbe)
+    NA, // athrow = 191 (0xbf)
+    0, // checkcast = 192 (0xc0)
+    0, // instanceof = 193 (0xc1)
+    -1, // monitorenter = 194 (0xc2)
+    -1, // monitorexit = 195 (0xc3)
+    NA, // wide = 196 (0xc4)
+    NA, // multianewarray = 197 (0xc5)
+    -1, // ifnull = 198 (0xc6)
+    -1, // ifnonnull = 199 (0xc7)
+    NA, // goto_w = 200 (0xc8)
+    NA // jsr_w = 201 (0xc9)
+  };
+
+  /** Where the constants used in this MethodWriter must be stored. */
+  private final SymbolTable symbolTable;
+
+  // Note: fields are ordered as in the method_info structure, and those related to attributes are
+  // ordered as in Section 4.7 of the JVMS.
+
+  /**
+   * The access_flags field of the method_info JVMS structure. This field can contain ASM specific
+   * access flags, such as {@link Opcodes#ACC_DEPRECATED}, which are removed when generating the
+   * ClassFile structure.
+   */
+  private final int accessFlags;
+
+  /** The name_index field of the method_info JVMS structure. */
+  private final int nameIndex;
+
+  /** The name of this method. */
+  private final String name;
+
+  /** The descriptor_index field of the method_info JVMS structure. */
+  private final int descriptorIndex;
+
+  /** The descriptor of this method. */
+  private final String descriptor;
+
+  // Code attribute fields and sub attributes:
+
+  /** The max_stack field of the Code attribute. */
+  private int maxStack;
+
+  /** The max_locals field of the Code attribute. */
+  private int maxLocals;
+
+  /** The 'code' field of the Code attribute. */
+<span class="nc" id="L320">  private final ByteVector code = new ByteVector();</span>
+
+  /**
+   * The first element in the exception handler list (used to generate the exception_table of the
+   * Code attribute). The next ones can be accessed with the {@link Handler#nextHandler} field. May
+   * be {@literal null}.
+   */
+  private Handler firstHandler;
+
+  /**
+   * The last element in the exception handler list (used to generate the exception_table of the
+   * Code attribute). The next ones can be accessed with the {@link Handler#nextHandler} field. May
+   * be {@literal null}.
+   */
+  private Handler lastHandler;
+
+  /** The line_number_table_length field of the LineNumberTable code attribute. */
+  private int lineNumberTableLength;
+
+  /** The line_number_table array of the LineNumberTable code attribute, or {@literal null}. */
+  private ByteVector lineNumberTable;
+
+  /** The local_variable_table_length field of the LocalVariableTable code attribute. */
+  private int localVariableTableLength;
+
+  /**
+   * The local_variable_table array of the LocalVariableTable code attribute, or {@literal null}.
+   */
+  private ByteVector localVariableTable;
+
+  /** The local_variable_type_table_length field of the LocalVariableTypeTable code attribute. */
+  private int localVariableTypeTableLength;
+
+  /**
+   * The local_variable_type_table array of the LocalVariableTypeTable code attribute, or {@literal
+   * null}.
+   */
+  private ByteVector localVariableTypeTable;
+
+  /** The number_of_entries field of the StackMapTable code attribute. */
+  private int stackMapTableNumberOfEntries;
+
+  /** The 'entries' array of the StackMapTable code attribute. */
+  private ByteVector stackMapTableEntries;
+
+  /**
+   * The last runtime visible type annotation of the Code attribute. The previous ones can be
+   * accessed with the {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastCodeRuntimeVisibleTypeAnnotation;
+
+  /**
+   * The last runtime invisible type annotation of the Code attribute. The previous ones can be
+   * accessed with the {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastCodeRuntimeInvisibleTypeAnnotation;
+
+  /**
+   * The first non standard attribute of the Code attribute. The next ones can be accessed with the
+   * {@link Attribute#nextAttribute} field. May be {@literal null}.
+   *
+   * &lt;p&gt;&lt;b&gt;WARNING&lt;/b&gt;: this list stores the attributes in the &lt;i&gt;reverse&lt;/i&gt; order of their visit.
+   * firstAttribute is actually the last attribute visited in {@link #visitAttribute}. The {@link
+   * #putMethodInfo} method writes the attributes in the order defined by this list, i.e. in the
+   * reverse order specified by the user.
+   */
+  private Attribute firstCodeAttribute;
+
+  // Other method_info attributes:
+
+  /** The number_of_exceptions field of the Exceptions attribute. */
+  private final int numberOfExceptions;
+
+  /** The exception_index_table array of the Exceptions attribute, or {@literal null}. */
+  private final int[] exceptionIndexTable;
+
+  /** The signature_index field of the Signature attribute. */
+  private final int signatureIndex;
+
+  /**
+   * The last runtime visible annotation of this method. The previous ones can be accessed with the
+   * {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeVisibleAnnotation;
+
+  /**
+   * The last runtime invisible annotation of this method. The previous ones can be accessed with
+   * the {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeInvisibleAnnotation;
+
+  /** The number of method parameters that can have runtime visible annotations, or 0. */
+  private int visibleAnnotableParameterCount;
+
+  /**
+   * The runtime visible parameter annotations of this method. Each array element contains the last
+   * annotation of a parameter (which can be {@literal null} - the previous ones can be accessed
+   * with the {@link AnnotationWriter#previousAnnotation} field). May be {@literal null}.
+   */
+  private AnnotationWriter[] lastRuntimeVisibleParameterAnnotations;
+
+  /** The number of method parameters that can have runtime visible annotations, or 0. */
+  private int invisibleAnnotableParameterCount;
+
+  /**
+   * The runtime invisible parameter annotations of this method. Each array element contains the
+   * last annotation of a parameter (which can be {@literal null} - the previous ones can be
+   * accessed with the {@link AnnotationWriter#previousAnnotation} field). May be {@literal null}.
+   */
+  private AnnotationWriter[] lastRuntimeInvisibleParameterAnnotations;
+
+  /**
+   * The last runtime visible type annotation of this method. The previous ones can be accessed with
+   * the {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeVisibleTypeAnnotation;
+
+  /**
+   * The last runtime invisible type annotation of this method. The previous ones can be accessed
+   * with the {@link AnnotationWriter#previousAnnotation} field. May be {@literal null}.
+   */
+  private AnnotationWriter lastRuntimeInvisibleTypeAnnotation;
+
+  /** The default_value field of the AnnotationDefault attribute, or {@literal null}. */
+  private ByteVector defaultValue;
+
+  /** The parameters_count field of the MethodParameters attribute. */
+  private int parametersCount;
+
+  /** The 'parameters' array of the MethodParameters attribute, or {@literal null}. */
+  private ByteVector parameters;
+
+  /**
+   * The first non standard attribute of this method. The next ones can be accessed with the {@link
+   * Attribute#nextAttribute} field. May be {@literal null}.
+   *
+   * &lt;p&gt;&lt;b&gt;WARNING&lt;/b&gt;: this list stores the attributes in the &lt;i&gt;reverse&lt;/i&gt; order of their visit.
+   * firstAttribute is actually the last attribute visited in {@link #visitAttribute}. The {@link
+   * #putMethodInfo} method writes the attributes in the order defined by this list, i.e. in the
+   * reverse order specified by the user.
+   */
+  private Attribute firstAttribute;
+
+  // -----------------------------------------------------------------------------------------------
+  // Fields used to compute the maximum stack size and number of locals, and the stack map frames
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Indicates what must be computed. Must be one of {@link #COMPUTE_ALL_FRAMES}, {@link
+   * #COMPUTE_INSERTED_FRAMES}, {@link #COMPUTE_MAX_STACK_AND_LOCAL} or {@link #COMPUTE_NOTHING}.
+   */
+  private final int compute;
+
+  /**
+   * The first basic block of the method. The next ones (in bytecode offset order) can be accessed
+   * with the {@link Label#nextBasicBlock} field.
+   */
+  private Label firstBasicBlock;
+
+  /**
+   * The last basic block of the method (in bytecode offset order). This field is updated each time
+   * a basic block is encountered, and is used to append it at the end of the basic block list.
+   */
+  private Label lastBasicBlock;
+
+  /**
+   * The current basic block, i.e. the basic block of the last visited instruction. When {@link
+   * #compute} is equal to {@link #COMPUTE_MAX_STACK_AND_LOCAL} or {@link #COMPUTE_ALL_FRAMES}, this
+   * field is {@literal null} for unreachable code. When {@link #compute} is equal to {@link
+   * #COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES} or {@link #COMPUTE_INSERTED_FRAMES}, this field stays
+   * unchanged throughout the whole method (i.e. the whole code is seen as a single basic block;
+   * indeed, the existing frames are sufficient by hypothesis to compute any intermediate frame -
+   * and the maximum stack size as well - without using any control flow graph).
+   */
+  private Label currentBasicBlock;
+
+  /**
+   * The relative stack size after the last visited instruction. This size is relative to the
+   * beginning of {@link #currentBasicBlock}, i.e. the true stack size after the last visited
+   * instruction is equal to the {@link Label#inputStackSize} of the current basic block plus {@link
+   * #relativeStackSize}. When {@link #compute} is equal to {@link
+   * #COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES}, {@link #currentBasicBlock} is always the start of
+   * the method, so this relative size is also equal to the absolute stack size after the last
+   * visited instruction.
+   */
+  private int relativeStackSize;
+
+  /**
+   * The maximum relative stack size after the last visited instruction. This size is relative to
+   * the beginning of {@link #currentBasicBlock}, i.e. the true maximum stack size after the last
+   * visited instruction is equal to the {@link Label#inputStackSize} of the current basic block
+   * plus {@link #maxRelativeStackSize}.When {@link #compute} is equal to {@link
+   * #COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES}, {@link #currentBasicBlock} is always the start of
+   * the method, so this relative size is also equal to the absolute maximum stack size after the
+   * last visited instruction.
+   */
+  private int maxRelativeStackSize;
+
+  /** The number of local variables in the last visited stack map frame. */
+  private int currentLocals;
+
+  /** The bytecode offset of the last frame that was written in {@link #stackMapTableEntries}. */
+  private int previousFrameOffset;
+
+  /**
+   * The last frame that was written in {@link #stackMapTableEntries}. This field has the same
+   * format as {@link #currentFrame}.
+   */
+  private int[] previousFrame;
+
+  /**
+   * The current stack map frame. The first element contains the bytecode offset of the instruction
+   * to which the frame corresponds, the second element is the number of locals and the third one is
+   * the number of stack elements. The local variables start at index 3 and are followed by the
+   * operand stack elements. In summary frame[0] = offset, frame[1] = numLocal, frame[2] = numStack.
+   * Local variables and operand stack entries contain abstract types, as defined in {@link Frame},
+   * but restricted to {@link Frame#CONSTANT_KIND}, {@link Frame#REFERENCE_KIND} or {@link
+   * Frame#UNINITIALIZED_KIND} abstract types. Long and double types use only one array entry.
+   */
+  private int[] currentFrame;
+
+  /** Whether this method contains subroutines. */
+  private boolean hasSubroutines;
+
+  // -----------------------------------------------------------------------------------------------
+  // Other miscellaneous status fields
+  // -----------------------------------------------------------------------------------------------
+
+  /** Whether the bytecode of this method contains ASM specific instructions. */
+  private boolean hasAsmInstructions;
+
+  /**
+   * The start offset of the last visited instruction. Used to set the offset field of type
+   * annotations of type 'offset_target' (see &lt;a
+   * href=&quot;https://docs.oracle.com/javase/specs/jvms/se9/html/jvms-4.html#jvms-4.7.20.1&quot;&gt;JVMS
+   * 4.7.20.1&lt;/a&gt;).
+   */
+  private int lastBytecodeOffset;
+
+  /**
+   * The offset in bytes in {@link SymbolTable#getSource} from which the method_info for this method
+   * (excluding its first 6 bytes) must be copied, or 0.
+   */
+  private int sourceOffset;
+
+  /**
+   * The length in bytes in {@link SymbolTable#getSource} which must be copied to get the
+   * method_info for this method (excluding its first 6 bytes for access_flags, name_index and
+   * descriptor_index).
+   */
+  private int sourceLength;
+
+  // -----------------------------------------------------------------------------------------------
+  // Constructor and accessors
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Constructs a new {@link MethodWriter}.
+   *
+   * @param symbolTable where the constants used in this AnnotationWriter must be stored.
+   * @param access the method's access flags (see {@link Opcodes}).
+   * @param name the method's name.
+   * @param descriptor the method's descriptor (see {@link Type}).
+   * @param signature the method's signature. May be {@literal null}.
+   * @param exceptions the internal names of the method's exceptions. May be {@literal null}.
+   * @param compute indicates what must be computed (see #compute).
+   */
+  MethodWriter(
+      final SymbolTable symbolTable,
+      final int access,
+      final String name,
+      final String descriptor,
+      final String signature,
+      final String[] exceptions,
+      final int compute) {
+<span class="nc" id="L595">    super(Opcodes.ASM7);</span>
+<span class="nc" id="L596">    this.symbolTable = symbolTable;</span>
+<span class="nc bnc" id="L597" title="All 2 branches missed.">    this.accessFlags = &quot;&lt;init&gt;&quot;.equals(name) ? access | Constants.ACC_CONSTRUCTOR : access;</span>
+<span class="nc" id="L598">    this.nameIndex = symbolTable.addConstantUtf8(name);</span>
+<span class="nc" id="L599">    this.name = name;</span>
+<span class="nc" id="L600">    this.descriptorIndex = symbolTable.addConstantUtf8(descriptor);</span>
+<span class="nc" id="L601">    this.descriptor = descriptor;</span>
+<span class="nc bnc" id="L602" title="All 2 branches missed.">    this.signatureIndex = signature == null ? 0 : symbolTable.addConstantUtf8(signature);</span>
+<span class="nc bnc" id="L603" title="All 4 branches missed.">    if (exceptions != null &amp;&amp; exceptions.length &gt; 0) {</span>
+<span class="nc" id="L604">      numberOfExceptions = exceptions.length;</span>
+<span class="nc" id="L605">      this.exceptionIndexTable = new int[numberOfExceptions];</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">      for (int i = 0; i &lt; numberOfExceptions; ++i) {</span>
+<span class="nc" id="L607">        this.exceptionIndexTable[i] = symbolTable.addConstantClass(exceptions[i]).index;</span>
+      }
+    } else {
+<span class="nc" id="L610">      numberOfExceptions = 0;</span>
+<span class="nc" id="L611">      this.exceptionIndexTable = null;</span>
+    }
+<span class="nc" id="L613">    this.compute = compute;</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">    if (compute != COMPUTE_NOTHING) {</span>
+      // Update maxLocals and currentLocals.
+<span class="nc" id="L616">      int argumentsSize = Type.getArgumentsAndReturnSizes(descriptor) &gt;&gt; 2;</span>
+<span class="nc bnc" id="L617" title="All 2 branches missed.">      if ((access &amp; Opcodes.ACC_STATIC) != 0) {</span>
+<span class="nc" id="L618">        --argumentsSize;</span>
+      }
+<span class="nc" id="L620">      maxLocals = argumentsSize;</span>
+<span class="nc" id="L621">      currentLocals = argumentsSize;</span>
+      // Create and visit the label for the first basic block.
+<span class="nc" id="L623">      firstBasicBlock = new Label();</span>
+<span class="nc" id="L624">      visitLabel(firstBasicBlock);</span>
+    }
+<span class="nc" id="L626">  }</span>
+
+  boolean hasFrames() {
+<span class="nc bnc" id="L629" title="All 2 branches missed.">    return stackMapTableNumberOfEntries &gt; 0;</span>
+  }
+
+  boolean hasAsmInstructions() {
+<span class="nc" id="L633">    return hasAsmInstructions;</span>
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Implementation of the MethodVisitor abstract class
+  // -----------------------------------------------------------------------------------------------
+
+  @Override
+  public void visitParameter(final String name, final int access) {
+<span class="nc bnc" id="L642" title="All 2 branches missed.">    if (parameters == null) {</span>
+<span class="nc" id="L643">      parameters = new ByteVector();</span>
+    }
+<span class="nc" id="L645">    ++parametersCount;</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">    parameters.putShort((name == null) ? 0 : symbolTable.addConstantUtf8(name)).putShort(access);</span>
+<span class="nc" id="L647">  }</span>
+
+  @Override
+  public AnnotationVisitor visitAnnotationDefault() {
+<span class="nc" id="L651">    defaultValue = new ByteVector();</span>
+<span class="nc" id="L652">    return new AnnotationWriter(symbolTable, /* useNamedValues = */ false, defaultValue, null);</span>
+  }
+
+  @Override
+  public AnnotationVisitor visitAnnotation(final String descriptor, final boolean visible) {
+<span class="nc bnc" id="L657" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L658">      return lastRuntimeVisibleAnnotation =</span>
+<span class="nc" id="L659">          AnnotationWriter.create(symbolTable, descriptor, lastRuntimeVisibleAnnotation);</span>
+    } else {
+<span class="nc" id="L661">      return lastRuntimeInvisibleAnnotation =</span>
+<span class="nc" id="L662">          AnnotationWriter.create(symbolTable, descriptor, lastRuntimeInvisibleAnnotation);</span>
+    }
+  }
+
+  @Override
+  public AnnotationVisitor visitTypeAnnotation(
+      final int typeRef, final TypePath typePath, final String descriptor, final boolean visible) {
+<span class="nc bnc" id="L669" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L670">      return lastRuntimeVisibleTypeAnnotation =</span>
+<span class="nc" id="L671">          AnnotationWriter.create(</span>
+              symbolTable, typeRef, typePath, descriptor, lastRuntimeVisibleTypeAnnotation);
+    } else {
+<span class="nc" id="L674">      return lastRuntimeInvisibleTypeAnnotation =</span>
+<span class="nc" id="L675">          AnnotationWriter.create(</span>
+              symbolTable, typeRef, typePath, descriptor, lastRuntimeInvisibleTypeAnnotation);
+    }
+  }
+
+  @Override
+  public void visitAnnotableParameterCount(final int parameterCount, final boolean visible) {
+<span class="nc bnc" id="L682" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L683">      visibleAnnotableParameterCount = parameterCount;</span>
+    } else {
+<span class="nc" id="L685">      invisibleAnnotableParameterCount = parameterCount;</span>
+    }
+<span class="nc" id="L687">  }</span>
+
+  @Override
+  public AnnotationVisitor visitParameterAnnotation(
+      final int parameter, final String annotationDescriptor, final boolean visible) {
+<span class="nc bnc" id="L692" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc bnc" id="L693" title="All 2 branches missed.">      if (lastRuntimeVisibleParameterAnnotations == null) {</span>
+<span class="nc" id="L694">        lastRuntimeVisibleParameterAnnotations =</span>
+<span class="nc" id="L695">            new AnnotationWriter[Type.getArgumentTypes(descriptor).length];</span>
+      }
+<span class="nc" id="L697">      return lastRuntimeVisibleParameterAnnotations[parameter] =</span>
+<span class="nc" id="L698">          AnnotationWriter.create(</span>
+              symbolTable, annotationDescriptor, lastRuntimeVisibleParameterAnnotations[parameter]);
+    } else {
+<span class="nc bnc" id="L701" title="All 2 branches missed.">      if (lastRuntimeInvisibleParameterAnnotations == null) {</span>
+<span class="nc" id="L702">        lastRuntimeInvisibleParameterAnnotations =</span>
+<span class="nc" id="L703">            new AnnotationWriter[Type.getArgumentTypes(descriptor).length];</span>
+      }
+<span class="nc" id="L705">      return lastRuntimeInvisibleParameterAnnotations[parameter] =</span>
+<span class="nc" id="L706">          AnnotationWriter.create(</span>
+              symbolTable,
+              annotationDescriptor,
+              lastRuntimeInvisibleParameterAnnotations[parameter]);
+    }
+  }
+
+  @Override
+  public void visitAttribute(final Attribute attribute) {
+    // Store the attributes in the &lt;i&gt;reverse&lt;/i&gt; order of their visit by this method.
+<span class="nc bnc" id="L716" title="All 2 branches missed.">    if (attribute.isCodeAttribute()) {</span>
+<span class="nc" id="L717">      attribute.nextAttribute = firstCodeAttribute;</span>
+<span class="nc" id="L718">      firstCodeAttribute = attribute;</span>
+    } else {
+<span class="nc" id="L720">      attribute.nextAttribute = firstAttribute;</span>
+<span class="nc" id="L721">      firstAttribute = attribute;</span>
+    }
+<span class="nc" id="L723">  }</span>
+
+  @Override
+  public void visitCode() {
+    // Nothing to do.
+<span class="nc" id="L728">  }</span>
+
+  @Override
+  public void visitFrame(
+      final int type,
+      final int numLocal,
+      final Object[] local,
+      final int numStack,
+      final Object[] stack) {
+<span class="nc bnc" id="L737" title="All 2 branches missed.">    if (compute == COMPUTE_ALL_FRAMES) {</span>
+<span class="nc" id="L738">      return;</span>
+    }
+
+<span class="nc bnc" id="L741" title="All 2 branches missed.">    if (compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc bnc" id="L742" title="All 2 branches missed.">      if (currentBasicBlock.frame == null) {</span>
+        // This should happen only once, for the implicit first frame (which is explicitly visited
+        // in ClassReader if the EXPAND_ASM_INSNS option is used - and COMPUTE_INSERTED_FRAMES
+        // can't be set if EXPAND_ASM_INSNS is not used).
+<span class="nc" id="L746">        currentBasicBlock.frame = new CurrentFrame(currentBasicBlock);</span>
+<span class="nc" id="L747">        currentBasicBlock.frame.setInputFrameFromDescriptor(</span>
+            symbolTable, accessFlags, descriptor, numLocal);
+<span class="nc" id="L749">        currentBasicBlock.frame.accept(this);</span>
+      } else {
+<span class="nc bnc" id="L751" title="All 2 branches missed.">        if (type == Opcodes.F_NEW) {</span>
+<span class="nc" id="L752">          currentBasicBlock.frame.setInputFrameFromApiFormat(</span>
+              symbolTable, numLocal, local, numStack, stack);
+        }
+        // If type is not F_NEW then it is F_INSERT by hypothesis, and currentBlock.frame contains
+        // the stack map frame at the current instruction, computed from the last F_NEW frame and
+        // the bytecode instructions in between (via calls to CurrentFrame#execute).
+<span class="nc" id="L758">        currentBasicBlock.frame.accept(this);</span>
+      }
+<span class="nc bnc" id="L760" title="All 2 branches missed.">    } else if (type == Opcodes.F_NEW) {</span>
+<span class="nc bnc" id="L761" title="All 2 branches missed.">      if (previousFrame == null) {</span>
+<span class="nc" id="L762">        int argumentsSize = Type.getArgumentsAndReturnSizes(descriptor) &gt;&gt; 2;</span>
+<span class="nc" id="L763">        Frame implicitFirstFrame = new Frame(new Label());</span>
+<span class="nc" id="L764">        implicitFirstFrame.setInputFrameFromDescriptor(</span>
+            symbolTable, accessFlags, descriptor, argumentsSize);
+<span class="nc" id="L766">        implicitFirstFrame.accept(this);</span>
+      }
+<span class="nc" id="L768">      currentLocals = numLocal;</span>
+<span class="nc" id="L769">      int frameIndex = visitFrameStart(code.length, numLocal, numStack);</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">      for (int i = 0; i &lt; numLocal; ++i) {</span>
+<span class="nc" id="L771">        currentFrame[frameIndex++] = Frame.getAbstractTypeFromApiFormat(symbolTable, local[i]);</span>
+      }
+<span class="nc bnc" id="L773" title="All 2 branches missed.">      for (int i = 0; i &lt; numStack; ++i) {</span>
+<span class="nc" id="L774">        currentFrame[frameIndex++] = Frame.getAbstractTypeFromApiFormat(symbolTable, stack[i]);</span>
+      }
+<span class="nc" id="L776">      visitFrameEnd();</span>
+<span class="nc" id="L777">    } else {</span>
+      int offsetDelta;
+<span class="nc bnc" id="L779" title="All 2 branches missed.">      if (stackMapTableEntries == null) {</span>
+<span class="nc" id="L780">        stackMapTableEntries = new ByteVector();</span>
+<span class="nc" id="L781">        offsetDelta = code.length;</span>
+      } else {
+<span class="nc" id="L783">        offsetDelta = code.length - previousFrameOffset - 1;</span>
+<span class="nc bnc" id="L784" title="All 2 branches missed.">        if (offsetDelta &lt; 0) {</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">          if (type == Opcodes.F_SAME) {</span>
+<span class="nc" id="L786">            return;</span>
+          } else {
+<span class="nc" id="L788">            throw new IllegalStateException();</span>
+          }
+        }
+      }
+
+<span class="nc bnc" id="L793" title="All 6 branches missed.">      switch (type) {</span>
+        case Opcodes.F_FULL:
+<span class="nc" id="L795">          currentLocals = numLocal;</span>
+<span class="nc" id="L796">          stackMapTableEntries.putByte(Frame.FULL_FRAME).putShort(offsetDelta).putShort(numLocal);</span>
+<span class="nc bnc" id="L797" title="All 2 branches missed.">          for (int i = 0; i &lt; numLocal; ++i) {</span>
+<span class="nc" id="L798">            putFrameType(local[i]);</span>
+          }
+<span class="nc" id="L800">          stackMapTableEntries.putShort(numStack);</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">          for (int i = 0; i &lt; numStack; ++i) {</span>
+<span class="nc" id="L802">            putFrameType(stack[i]);</span>
+          }
+<span class="nc" id="L804">          break;</span>
+        case Opcodes.F_APPEND:
+<span class="nc" id="L806">          currentLocals += numLocal;</span>
+<span class="nc" id="L807">          stackMapTableEntries.putByte(Frame.SAME_FRAME_EXTENDED + numLocal).putShort(offsetDelta);</span>
+<span class="nc bnc" id="L808" title="All 2 branches missed.">          for (int i = 0; i &lt; numLocal; ++i) {</span>
+<span class="nc" id="L809">            putFrameType(local[i]);</span>
+          }
+<span class="nc" id="L811">          break;</span>
+        case Opcodes.F_CHOP:
+<span class="nc" id="L813">          currentLocals -= numLocal;</span>
+<span class="nc" id="L814">          stackMapTableEntries.putByte(Frame.SAME_FRAME_EXTENDED - numLocal).putShort(offsetDelta);</span>
+<span class="nc" id="L815">          break;</span>
+        case Opcodes.F_SAME:
+<span class="nc bnc" id="L817" title="All 2 branches missed.">          if (offsetDelta &lt; 64) {</span>
+<span class="nc" id="L818">            stackMapTableEntries.putByte(offsetDelta);</span>
+          } else {
+<span class="nc" id="L820">            stackMapTableEntries.putByte(Frame.SAME_FRAME_EXTENDED).putShort(offsetDelta);</span>
+          }
+<span class="nc" id="L822">          break;</span>
+        case Opcodes.F_SAME1:
+<span class="nc bnc" id="L824" title="All 2 branches missed.">          if (offsetDelta &lt; 64) {</span>
+<span class="nc" id="L825">            stackMapTableEntries.putByte(Frame.SAME_LOCALS_1_STACK_ITEM_FRAME + offsetDelta);</span>
+          } else {
+<span class="nc" id="L827">            stackMapTableEntries</span>
+<span class="nc" id="L828">                .putByte(Frame.SAME_LOCALS_1_STACK_ITEM_FRAME_EXTENDED)</span>
+<span class="nc" id="L829">                .putShort(offsetDelta);</span>
+          }
+<span class="nc" id="L831">          putFrameType(stack[0]);</span>
+<span class="nc" id="L832">          break;</span>
+        default:
+<span class="nc" id="L834">          throw new IllegalArgumentException();</span>
+      }
+
+<span class="nc" id="L837">      previousFrameOffset = code.length;</span>
+<span class="nc" id="L838">      ++stackMapTableNumberOfEntries;</span>
+    }
+
+<span class="nc bnc" id="L841" title="All 2 branches missed.">    if (compute == COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES) {</span>
+<span class="nc" id="L842">      relativeStackSize = numStack;</span>
+<span class="nc bnc" id="L843" title="All 2 branches missed.">      for (int i = 0; i &lt; numStack; ++i) {</span>
+<span class="nc bnc" id="L844" title="All 4 branches missed.">        if (stack[i] == Opcodes.LONG || stack[i] == Opcodes.DOUBLE) {</span>
+<span class="nc" id="L845">          relativeStackSize++;</span>
+        }
+      }
+<span class="nc bnc" id="L848" title="All 2 branches missed.">      if (relativeStackSize &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L849">        maxRelativeStackSize = relativeStackSize;</span>
+      }
+    }
+
+<span class="nc" id="L853">    maxStack = Math.max(maxStack, numStack);</span>
+<span class="nc" id="L854">    maxLocals = Math.max(maxLocals, currentLocals);</span>
+<span class="nc" id="L855">  }</span>
+
+  @Override
+  public void visitInsn(final int opcode) {
+<span class="nc" id="L859">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L861">    code.putByte(opcode);</span>
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L863" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L864" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L865">        currentBasicBlock.frame.execute(opcode, 0, null, null);</span>
+      } else {
+<span class="nc" id="L867">        int size = relativeStackSize + STACK_SIZE_DELTA[opcode];</span>
+<span class="nc bnc" id="L868" title="All 2 branches missed.">        if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L869">          maxRelativeStackSize = size;</span>
+        }
+<span class="nc" id="L871">        relativeStackSize = size;</span>
+      }
+<span class="nc bnc" id="L873" title="All 6 branches missed.">      if ((opcode &gt;= Opcodes.IRETURN &amp;&amp; opcode &lt;= Opcodes.RETURN) || opcode == Opcodes.ATHROW) {</span>
+<span class="nc" id="L874">        endCurrentBasicBlockWithNoSuccessor();</span>
+      }
+    }
+<span class="nc" id="L877">  }</span>
+
+  @Override
+  public void visitIntInsn(final int opcode, final int operand) {
+<span class="nc" id="L881">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc bnc" id="L883" title="All 2 branches missed.">    if (opcode == Opcodes.SIPUSH) {</span>
+<span class="nc" id="L884">      code.put12(opcode, operand);</span>
+    } else { // BIPUSH or NEWARRAY
+<span class="nc" id="L886">      code.put11(opcode, operand);</span>
+    }
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L889" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L890" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L891">        currentBasicBlock.frame.execute(opcode, operand, null, null);</span>
+<span class="nc bnc" id="L892" title="All 2 branches missed.">      } else if (opcode != Opcodes.NEWARRAY) {</span>
+        // The stack size delta is 1 for BIPUSH or SIPUSH, and 0 for NEWARRAY.
+<span class="nc" id="L894">        int size = relativeStackSize + 1;</span>
+<span class="nc bnc" id="L895" title="All 2 branches missed.">        if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L896">          maxRelativeStackSize = size;</span>
+        }
+<span class="nc" id="L898">        relativeStackSize = size;</span>
+      }
+    }
+<span class="nc" id="L901">  }</span>
+
+  @Override
+  public void visitVarInsn(final int opcode, final int var) {
+<span class="nc" id="L905">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc bnc" id="L907" title="All 4 branches missed.">    if (var &lt; 4 &amp;&amp; opcode != Opcodes.RET) {</span>
+      int optimizedOpcode;
+<span class="nc bnc" id="L909" title="All 2 branches missed.">      if (opcode &lt; Opcodes.ISTORE) {</span>
+<span class="nc" id="L910">        optimizedOpcode = Constants.ILOAD_0 + ((opcode - Opcodes.ILOAD) &lt;&lt; 2) + var;</span>
+      } else {
+<span class="nc" id="L912">        optimizedOpcode = Constants.ISTORE_0 + ((opcode - Opcodes.ISTORE) &lt;&lt; 2) + var;</span>
+      }
+<span class="nc" id="L914">      code.putByte(optimizedOpcode);</span>
+<span class="nc bnc" id="L915" title="All 2 branches missed.">    } else if (var &gt;= 256) {</span>
+<span class="nc" id="L916">      code.putByte(Constants.WIDE).put12(opcode, var);</span>
+    } else {
+<span class="nc" id="L918">      code.put11(opcode, var);</span>
+    }
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L921" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L922" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L923">        currentBasicBlock.frame.execute(opcode, var, null, null);</span>
+      } else {
+<span class="nc bnc" id="L925" title="All 2 branches missed.">        if (opcode == Opcodes.RET) {</span>
+          // No stack size delta.
+<span class="nc" id="L927">          currentBasicBlock.flags |= Label.FLAG_SUBROUTINE_END;</span>
+<span class="nc" id="L928">          currentBasicBlock.outputStackSize = (short) relativeStackSize;</span>
+<span class="nc" id="L929">          endCurrentBasicBlockWithNoSuccessor();</span>
+        } else { // xLOAD or xSTORE
+<span class="nc" id="L931">          int size = relativeStackSize + STACK_SIZE_DELTA[opcode];</span>
+<span class="nc bnc" id="L932" title="All 2 branches missed.">          if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L933">            maxRelativeStackSize = size;</span>
+          }
+<span class="nc" id="L935">          relativeStackSize = size;</span>
+        }
+      }
+    }
+<span class="nc bnc" id="L939" title="All 2 branches missed.">    if (compute != COMPUTE_NOTHING) {</span>
+      int currentMaxLocals;
+<span class="nc bnc" id="L941" title="All 8 branches missed.">      if (opcode == Opcodes.LLOAD</span>
+          || opcode == Opcodes.DLOAD
+          || opcode == Opcodes.LSTORE
+          || opcode == Opcodes.DSTORE) {
+<span class="nc" id="L945">        currentMaxLocals = var + 2;</span>
+      } else {
+<span class="nc" id="L947">        currentMaxLocals = var + 1;</span>
+      }
+<span class="nc bnc" id="L949" title="All 2 branches missed.">      if (currentMaxLocals &gt; maxLocals) {</span>
+<span class="nc" id="L950">        maxLocals = currentMaxLocals;</span>
+      }
+    }
+<span class="nc bnc" id="L953" title="All 6 branches missed.">    if (opcode &gt;= Opcodes.ISTORE &amp;&amp; compute == COMPUTE_ALL_FRAMES &amp;&amp; firstHandler != null) {</span>
+      // If there are exception handler blocks, each instruction within a handler range is, in
+      // theory, a basic block (since execution can jump from this instruction to the exception
+      // handler). As a consequence, the local variable types at the beginning of the handler
+      // block should be the merge of the local variable types at all the instructions within the
+      // handler range. However, instead of creating a basic block for each instruction, we can
+      // get the same result in a more efficient way. Namely, by starting a new basic block after
+      // each xSTORE instruction, which is what we do here.
+<span class="nc" id="L961">      visitLabel(new Label());</span>
+    }
+<span class="nc" id="L963">  }</span>
+
+  @Override
+  public void visitTypeInsn(final int opcode, final String type) {
+<span class="nc" id="L967">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L969">    Symbol typeSymbol = symbolTable.addConstantClass(type);</span>
+<span class="nc" id="L970">    code.put12(opcode, typeSymbol.index);</span>
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L972" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L973" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L974">        currentBasicBlock.frame.execute(opcode, lastBytecodeOffset, typeSymbol, symbolTable);</span>
+<span class="nc bnc" id="L975" title="All 2 branches missed.">      } else if (opcode == Opcodes.NEW) {</span>
+        // The stack size delta is 1 for NEW, and 0 for ANEWARRAY, CHECKCAST, or INSTANCEOF.
+<span class="nc" id="L977">        int size = relativeStackSize + 1;</span>
+<span class="nc bnc" id="L978" title="All 2 branches missed.">        if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L979">          maxRelativeStackSize = size;</span>
+        }
+<span class="nc" id="L981">        relativeStackSize = size;</span>
+      }
+    }
+<span class="nc" id="L984">  }</span>
+
+  @Override
+  public void visitFieldInsn(
+      final int opcode, final String owner, final String name, final String descriptor) {
+<span class="nc" id="L989">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L991">    Symbol fieldrefSymbol = symbolTable.addConstantFieldref(owner, name, descriptor);</span>
+<span class="nc" id="L992">    code.put12(opcode, fieldrefSymbol.index);</span>
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L994" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L995" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L996">        currentBasicBlock.frame.execute(opcode, 0, fieldrefSymbol, symbolTable);</span>
+      } else {
+        int size;
+<span class="nc" id="L999">        char firstDescChar = descriptor.charAt(0);</span>
+<span class="nc bnc" id="L1000" title="All 4 branches missed.">        switch (opcode) {</span>
+          case Opcodes.GETSTATIC:
+<span class="nc bnc" id="L1002" title="All 4 branches missed.">            size = relativeStackSize + (firstDescChar == 'D' || firstDescChar == 'J' ? 2 : 1);</span>
+<span class="nc" id="L1003">            break;</span>
+          case Opcodes.PUTSTATIC:
+<span class="nc bnc" id="L1005" title="All 4 branches missed.">            size = relativeStackSize + (firstDescChar == 'D' || firstDescChar == 'J' ? -2 : -1);</span>
+<span class="nc" id="L1006">            break;</span>
+          case Opcodes.GETFIELD:
+<span class="nc bnc" id="L1008" title="All 4 branches missed.">            size = relativeStackSize + (firstDescChar == 'D' || firstDescChar == 'J' ? 1 : 0);</span>
+<span class="nc" id="L1009">            break;</span>
+          case Opcodes.PUTFIELD:
+          default:
+<span class="nc bnc" id="L1012" title="All 4 branches missed.">            size = relativeStackSize + (firstDescChar == 'D' || firstDescChar == 'J' ? -3 : -2);</span>
+            break;
+        }
+<span class="nc bnc" id="L1015" title="All 2 branches missed.">        if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L1016">          maxRelativeStackSize = size;</span>
+        }
+<span class="nc" id="L1018">        relativeStackSize = size;</span>
+      }
+    }
+<span class="nc" id="L1021">  }</span>
+
+  @Override
+  public void visitMethodInsn(
+      final int opcode,
+      final String owner,
+      final String name,
+      final String descriptor,
+      final boolean isInterface) {
+<span class="nc" id="L1030">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L1032">    Symbol methodrefSymbol = symbolTable.addConstantMethodref(owner, name, descriptor, isInterface);</span>
+<span class="nc bnc" id="L1033" title="All 2 branches missed.">    if (opcode == Opcodes.INVOKEINTERFACE) {</span>
+<span class="nc" id="L1034">      code.put12(Opcodes.INVOKEINTERFACE, methodrefSymbol.index)</span>
+<span class="nc" id="L1035">          .put11(methodrefSymbol.getArgumentsAndReturnSizes() &gt;&gt; 2, 0);</span>
+    } else {
+<span class="nc" id="L1037">      code.put12(opcode, methodrefSymbol.index);</span>
+    }
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L1040" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L1041" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L1042">        currentBasicBlock.frame.execute(opcode, 0, methodrefSymbol, symbolTable);</span>
+      } else {
+<span class="nc" id="L1044">        int argumentsAndReturnSize = methodrefSymbol.getArgumentsAndReturnSizes();</span>
+<span class="nc" id="L1045">        int stackSizeDelta = (argumentsAndReturnSize &amp; 3) - (argumentsAndReturnSize &gt;&gt; 2);</span>
+        int size;
+<span class="nc bnc" id="L1047" title="All 2 branches missed.">        if (opcode == Opcodes.INVOKESTATIC) {</span>
+<span class="nc" id="L1048">          size = relativeStackSize + stackSizeDelta + 1;</span>
+        } else {
+<span class="nc" id="L1050">          size = relativeStackSize + stackSizeDelta;</span>
+        }
+<span class="nc bnc" id="L1052" title="All 2 branches missed.">        if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L1053">          maxRelativeStackSize = size;</span>
+        }
+<span class="nc" id="L1055">        relativeStackSize = size;</span>
+      }
+    }
+<span class="nc" id="L1058">  }</span>
+
+  @Override
+  public void visitInvokeDynamicInsn(
+      final String name,
+      final String descriptor,
+      final Handle bootstrapMethodHandle,
+      final Object... bootstrapMethodArguments) {
+<span class="nc" id="L1066">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L1068">    Symbol invokeDynamicSymbol =</span>
+<span class="nc" id="L1069">        symbolTable.addConstantInvokeDynamic(</span>
+            name, descriptor, bootstrapMethodHandle, bootstrapMethodArguments);
+<span class="nc" id="L1071">    code.put12(Opcodes.INVOKEDYNAMIC, invokeDynamicSymbol.index);</span>
+<span class="nc" id="L1072">    code.putShort(0);</span>
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L1074" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L1075" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L1076">        currentBasicBlock.frame.execute(Opcodes.INVOKEDYNAMIC, 0, invokeDynamicSymbol, symbolTable);</span>
+      } else {
+<span class="nc" id="L1078">        int argumentsAndReturnSize = invokeDynamicSymbol.getArgumentsAndReturnSizes();</span>
+<span class="nc" id="L1079">        int stackSizeDelta = (argumentsAndReturnSize &amp; 3) - (argumentsAndReturnSize &gt;&gt; 2) + 1;</span>
+<span class="nc" id="L1080">        int size = relativeStackSize + stackSizeDelta;</span>
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">        if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L1082">          maxRelativeStackSize = size;</span>
+        }
+<span class="nc" id="L1084">        relativeStackSize = size;</span>
+      }
+    }
+<span class="nc" id="L1087">  }</span>
+
+  @Override
+  public void visitJumpInsn(final int opcode, final Label label) {
+<span class="nc" id="L1091">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+    // Compute the 'base' opcode, i.e. GOTO or JSR if opcode is GOTO_W or JSR_W, otherwise opcode.
+<span class="nc bnc" id="L1094" title="All 2 branches missed.">    int baseOpcode =</span>
+        opcode &gt;= Constants.GOTO_W ? opcode - Constants.WIDE_JUMP_OPCODE_DELTA : opcode;
+<span class="nc" id="L1096">    boolean nextInsnIsJumpTarget = false;</span>
+<span class="nc bnc" id="L1097" title="All 4 branches missed.">    if ((label.flags &amp; Label.FLAG_RESOLVED) != 0</span>
+        &amp;&amp; label.bytecodeOffset - code.length &lt; Short.MIN_VALUE) {
+      // Case of a backward jump with an offset &lt; -32768. In this case we automatically replace GOTO
+      // with GOTO_W, JSR with JSR_W and IFxxx &lt;l&gt; with IFNOTxxx &lt;L&gt; GOTO_W &lt;l&gt; L:..., where
+      // IFNOTxxx is the &quot;opposite&quot; opcode of IFxxx (e.g. IFNE for IFEQ) and where &lt;L&gt; designates
+      // the instruction just after the GOTO_W.
+<span class="nc bnc" id="L1103" title="All 2 branches missed.">      if (baseOpcode == Opcodes.GOTO) {</span>
+<span class="nc" id="L1104">        code.putByte(Constants.GOTO_W);</span>
+<span class="nc bnc" id="L1105" title="All 2 branches missed.">      } else if (baseOpcode == Opcodes.JSR) {</span>
+<span class="nc" id="L1106">        code.putByte(Constants.JSR_W);</span>
+      } else {
+        // Put the &quot;opposite&quot; opcode of baseOpcode. This can be done by flipping the least
+        // significant bit for IFNULL and IFNONNULL, and similarly for IFEQ ... IF_ACMPEQ (with a
+        // pre and post offset by 1). The jump offset is 8 bytes (3 for IFNOTxxx, 5 for GOTO_W).
+<span class="nc bnc" id="L1111" title="All 2 branches missed.">        code.putByte(baseOpcode &gt;= Opcodes.IFNULL ? baseOpcode ^ 1 : ((baseOpcode + 1) ^ 1) - 1);</span>
+<span class="nc" id="L1112">        code.putShort(8);</span>
+        // Here we could put a GOTO_W in theory, but if ASM specific instructions are used in this
+        // method or another one, and if the class has frames, we will need to insert a frame after
+        // this GOTO_W during the additional ClassReader -&gt; ClassWriter round trip to remove the ASM
+        // specific instructions. To not miss this additional frame, we need to use an ASM_GOTO_W
+        // here, which has the unfortunate effect of forcing this additional round trip (which in
+        // some case would not have been really necessary, but we can't know this at this point).
+<span class="nc" id="L1119">        code.putByte(Constants.ASM_GOTO_W);</span>
+<span class="nc" id="L1120">        hasAsmInstructions = true;</span>
+        // The instruction after the GOTO_W becomes the target of the IFNOT instruction.
+<span class="nc" id="L1122">        nextInsnIsJumpTarget = true;</span>
+      }
+<span class="nc" id="L1124">      label.put(code, code.length - 1, true);</span>
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">    } else if (baseOpcode != opcode) {</span>
+      // Case of a GOTO_W or JSR_W specified by the user (normally ClassReader when used to remove
+      // ASM specific instructions). In this case we keep the original instruction.
+<span class="nc" id="L1128">      code.putByte(opcode);</span>
+<span class="nc" id="L1129">      label.put(code, code.length - 1, true);</span>
+    } else {
+      // Case of a jump with an offset &gt;= -32768, or of a jump with an unknown offset. In these
+      // cases we store the offset in 2 bytes (which will be increased via a ClassReader -&gt;
+      // ClassWriter round trip if it turns out that 2 bytes are not sufficient).
+<span class="nc" id="L1134">      code.putByte(baseOpcode);</span>
+<span class="nc" id="L1135">      label.put(code, code.length - 1, false);</span>
+    }
+
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L1139" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc" id="L1140">      Label nextBasicBlock = null;</span>
+<span class="nc bnc" id="L1141" title="All 2 branches missed.">      if (compute == COMPUTE_ALL_FRAMES) {</span>
+<span class="nc" id="L1142">        currentBasicBlock.frame.execute(baseOpcode, 0, null, null);</span>
+        // Record the fact that 'label' is the target of a jump instruction.
+<span class="nc" id="L1144">        label.getCanonicalInstance().flags |= Label.FLAG_JUMP_TARGET;</span>
+        // Add 'label' as a successor of the current basic block.
+<span class="nc" id="L1146">        addSuccessorToCurrentBasicBlock(Edge.JUMP, label);</span>
+<span class="nc bnc" id="L1147" title="All 2 branches missed.">        if (baseOpcode != Opcodes.GOTO) {</span>
+          // The next instruction starts a new basic block (except for GOTO: by default the code
+          // following a goto is unreachable - unless there is an explicit label for it - and we
+          // should not compute stack frame types for its instructions).
+<span class="nc" id="L1151">          nextBasicBlock = new Label();</span>
+        }
+<span class="nc bnc" id="L1153" title="All 2 branches missed.">      } else if (compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L1154">        currentBasicBlock.frame.execute(baseOpcode, 0, null, null);</span>
+<span class="nc bnc" id="L1155" title="All 2 branches missed.">      } else if (compute == COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES) {</span>
+        // No need to update maxRelativeStackSize (the stack size delta is always negative).
+<span class="nc" id="L1157">        relativeStackSize += STACK_SIZE_DELTA[baseOpcode];</span>
+      } else {
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">        if (baseOpcode == Opcodes.JSR) {</span>
+          // Record the fact that 'label' designates a subroutine, if not already done.
+<span class="nc bnc" id="L1161" title="All 2 branches missed.">          if ((label.flags &amp; Label.FLAG_SUBROUTINE_START) == 0) {</span>
+<span class="nc" id="L1162">            label.flags |= Label.FLAG_SUBROUTINE_START;</span>
+<span class="nc" id="L1163">            hasSubroutines = true;</span>
+          }
+<span class="nc" id="L1165">          currentBasicBlock.flags |= Label.FLAG_SUBROUTINE_CALLER;</span>
+          // Note that, by construction in this method, a block which calls a subroutine has at
+          // least two successors in the control flow graph: the first one (added below) leads to
+          // the instruction after the JSR, while the second one (added here) leads to the JSR
+          // target. Note that the first successor is virtual (it does not correspond to a possible
+          // execution path): it is only used to compute the successors of the basic blocks ending
+          // with a ret, in {@link Label#addSubroutineRetSuccessors}.
+<span class="nc" id="L1172">          addSuccessorToCurrentBasicBlock(relativeStackSize + 1, label);</span>
+          // The instruction after the JSR starts a new basic block.
+<span class="nc" id="L1174">          nextBasicBlock = new Label();</span>
+        } else {
+          // No need to update maxRelativeStackSize (the stack size delta is always negative).
+<span class="nc" id="L1177">          relativeStackSize += STACK_SIZE_DELTA[baseOpcode];</span>
+<span class="nc" id="L1178">          addSuccessorToCurrentBasicBlock(relativeStackSize, label);</span>
+        }
+      }
+      // If the next instruction starts a new basic block, call visitLabel to add the label of this
+      // instruction as a successor of the current block, and to start a new basic block.
+<span class="nc bnc" id="L1183" title="All 2 branches missed.">      if (nextBasicBlock != null) {</span>
+<span class="nc bnc" id="L1184" title="All 2 branches missed.">        if (nextInsnIsJumpTarget) {</span>
+<span class="nc" id="L1185">          nextBasicBlock.flags |= Label.FLAG_JUMP_TARGET;</span>
+        }
+<span class="nc" id="L1187">        visitLabel(nextBasicBlock);</span>
+      }
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">      if (baseOpcode == Opcodes.GOTO) {</span>
+<span class="nc" id="L1190">        endCurrentBasicBlockWithNoSuccessor();</span>
+      }
+    }
+<span class="nc" id="L1193">  }</span>
+
+  @Override
+  public void visitLabel(final Label label) {
+    // Resolve the forward references to this label, if any.
+<span class="nc" id="L1198">    hasAsmInstructions |= label.resolve(code.data, code.length);</span>
+    // visitLabel starts a new basic block (except for debug only labels), so we need to update the
+    // previous and current block references and list of successors.
+<span class="nc bnc" id="L1201" title="All 2 branches missed.">    if ((label.flags &amp; Label.FLAG_DEBUG_ONLY) != 0) {</span>
+<span class="nc" id="L1202">      return;</span>
+    }
+<span class="nc bnc" id="L1204" title="All 2 branches missed.">    if (compute == COMPUTE_ALL_FRAMES) {</span>
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">      if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L1206" title="All 2 branches missed.">        if (label.bytecodeOffset == currentBasicBlock.bytecodeOffset) {</span>
+          // We use {@link Label#getCanonicalInstance} to store the state of a basic block in only
+          // one place, but this does not work for labels which have not been visited yet.
+          // Therefore, when we detect here two labels having the same bytecode offset, we need to
+          // - consolidate the state scattered in these two instances into the canonical instance:
+<span class="nc" id="L1211">          currentBasicBlock.flags |= (label.flags &amp; Label.FLAG_JUMP_TARGET);</span>
+          // - make sure the two instances share the same Frame instance (the implementation of
+          // {@link Label#getCanonicalInstance} relies on this property; here label.frame should be
+          // null):
+<span class="nc" id="L1215">          label.frame = currentBasicBlock.frame;</span>
+          // - and make sure to NOT assign 'label' into 'currentBasicBlock' or 'lastBasicBlock', so
+          // that they still refer to the canonical instance for this bytecode offset.
+<span class="nc" id="L1218">          return;</span>
+        }
+        // End the current basic block (with one new successor).
+<span class="nc" id="L1221">        addSuccessorToCurrentBasicBlock(Edge.JUMP, label);</span>
+      }
+      // Append 'label' at the end of the basic block list.
+<span class="nc bnc" id="L1224" title="All 2 branches missed.">      if (lastBasicBlock != null) {</span>
+<span class="nc bnc" id="L1225" title="All 2 branches missed.">        if (label.bytecodeOffset == lastBasicBlock.bytecodeOffset) {</span>
+          // Same comment as above.
+<span class="nc" id="L1227">          lastBasicBlock.flags |= (label.flags &amp; Label.FLAG_JUMP_TARGET);</span>
+          // Here label.frame should be null.
+<span class="nc" id="L1229">          label.frame = lastBasicBlock.frame;</span>
+<span class="nc" id="L1230">          currentBasicBlock = lastBasicBlock;</span>
+<span class="nc" id="L1231">          return;</span>
+        }
+<span class="nc" id="L1233">        lastBasicBlock.nextBasicBlock = label;</span>
+      }
+<span class="nc" id="L1235">      lastBasicBlock = label;</span>
+      // Make it the new current basic block.
+<span class="nc" id="L1237">      currentBasicBlock = label;</span>
+      // Here label.frame should be null.
+<span class="nc" id="L1239">      label.frame = new Frame(label);</span>
+<span class="nc bnc" id="L1240" title="All 2 branches missed.">    } else if (compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc bnc" id="L1241" title="All 2 branches missed.">      if (currentBasicBlock == null) {</span>
+        // This case should happen only once, for the visitLabel call in the constructor. Indeed, if
+        // compute is equal to COMPUTE_INSERTED_FRAMES, currentBasicBlock stays unchanged.
+<span class="nc" id="L1244">        currentBasicBlock = label;</span>
+      } else {
+        // Update the frame owner so that a correct frame offset is computed in Frame.accept().
+<span class="nc" id="L1247">        currentBasicBlock.frame.owner = label;</span>
+      }
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">    } else if (compute == COMPUTE_MAX_STACK_AND_LOCAL) {</span>
+<span class="nc bnc" id="L1250" title="All 2 branches missed.">      if (currentBasicBlock != null) {</span>
+        // End the current basic block (with one new successor).
+<span class="nc" id="L1252">        currentBasicBlock.outputStackMax = (short) maxRelativeStackSize;</span>
+<span class="nc" id="L1253">        addSuccessorToCurrentBasicBlock(relativeStackSize, label);</span>
+      }
+      // Start a new current basic block, and reset the current and maximum relative stack sizes.
+<span class="nc" id="L1256">      currentBasicBlock = label;</span>
+<span class="nc" id="L1257">      relativeStackSize = 0;</span>
+<span class="nc" id="L1258">      maxRelativeStackSize = 0;</span>
+      // Append the new basic block at the end of the basic block list.
+<span class="nc bnc" id="L1260" title="All 2 branches missed.">      if (lastBasicBlock != null) {</span>
+<span class="nc" id="L1261">        lastBasicBlock.nextBasicBlock = label;</span>
+      }
+<span class="nc" id="L1263">      lastBasicBlock = label;</span>
+<span class="nc bnc" id="L1264" title="All 4 branches missed.">    } else if (compute == COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES &amp;&amp; currentBasicBlock == null) {</span>
+      // This case should happen only once, for the visitLabel call in the constructor. Indeed, if
+      // compute is equal to COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES, currentBasicBlock stays
+      // unchanged.
+<span class="nc" id="L1268">      currentBasicBlock = label;</span>
+    }
+<span class="nc" id="L1270">  }</span>
+
+  @Override
+  public void visitLdcInsn(final Object value) {
+<span class="nc" id="L1274">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L1276">    Symbol constantSymbol = symbolTable.addConstant(value);</span>
+<span class="nc" id="L1277">    int constantIndex = constantSymbol.index;</span>
+    char firstDescriptorChar;
+<span class="nc bnc" id="L1279" title="All 6 branches missed.">    boolean isLongOrDouble =</span>
+        constantSymbol.tag == Symbol.CONSTANT_LONG_TAG
+            || constantSymbol.tag == Symbol.CONSTANT_DOUBLE_TAG
+            || (constantSymbol.tag == Symbol.CONSTANT_DYNAMIC_TAG
+<span class="nc bnc" id="L1283" title="All 4 branches missed.">                &amp;&amp; ((firstDescriptorChar = constantSymbol.value.charAt(0)) == 'J'</span>
+                    || firstDescriptorChar == 'D'));
+<span class="nc bnc" id="L1285" title="All 2 branches missed.">    if (isLongOrDouble) {</span>
+<span class="nc" id="L1286">      code.put12(Constants.LDC2_W, constantIndex);</span>
+<span class="nc bnc" id="L1287" title="All 2 branches missed.">    } else if (constantIndex &gt;= 256) {</span>
+<span class="nc" id="L1288">      code.put12(Constants.LDC_W, constantIndex);</span>
+    } else {
+<span class="nc" id="L1290">      code.put11(Opcodes.LDC, constantIndex);</span>
+    }
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L1293" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L1294" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L1295">        currentBasicBlock.frame.execute(Opcodes.LDC, 0, constantSymbol, symbolTable);</span>
+      } else {
+<span class="nc bnc" id="L1297" title="All 2 branches missed.">        int size = relativeStackSize + (isLongOrDouble ? 2 : 1);</span>
+<span class="nc bnc" id="L1298" title="All 2 branches missed.">        if (size &gt; maxRelativeStackSize) {</span>
+<span class="nc" id="L1299">          maxRelativeStackSize = size;</span>
+        }
+<span class="nc" id="L1301">        relativeStackSize = size;</span>
+      }
+    }
+<span class="nc" id="L1304">  }</span>
+
+  @Override
+  public void visitIincInsn(final int var, final int increment) {
+<span class="nc" id="L1308">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc bnc" id="L1310" title="All 6 branches missed.">    if ((var &gt; 255) || (increment &gt; 127) || (increment &lt; -128)) {</span>
+<span class="nc" id="L1311">      code.putByte(Constants.WIDE).put12(Opcodes.IINC, var).putShort(increment);</span>
+    } else {
+<span class="nc" id="L1313">      code.putByte(Opcodes.IINC).put11(var, increment);</span>
+    }
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L1316" title="All 6 branches missed.">    if (currentBasicBlock != null</span>
+        &amp;&amp; (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES)) {
+<span class="nc" id="L1318">      currentBasicBlock.frame.execute(Opcodes.IINC, var, null, null);</span>
+    }
+<span class="nc bnc" id="L1320" title="All 2 branches missed.">    if (compute != COMPUTE_NOTHING) {</span>
+<span class="nc" id="L1321">      int currentMaxLocals = var + 1;</span>
+<span class="nc bnc" id="L1322" title="All 2 branches missed.">      if (currentMaxLocals &gt; maxLocals) {</span>
+<span class="nc" id="L1323">        maxLocals = currentMaxLocals;</span>
+      }
+    }
+<span class="nc" id="L1326">  }</span>
+
+  @Override
+  public void visitTableSwitchInsn(
+      final int min, final int max, final Label dflt, final Label... labels) {
+<span class="nc" id="L1331">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L1333">    code.putByte(Opcodes.TABLESWITCH).putByteArray(null, 0, (4 - code.length % 4) % 4);</span>
+<span class="nc" id="L1334">    dflt.put(code, lastBytecodeOffset, true);</span>
+<span class="nc" id="L1335">    code.putInt(min).putInt(max);</span>
+<span class="nc bnc" id="L1336" title="All 2 branches missed.">    for (Label label : labels) {</span>
+<span class="nc" id="L1337">      label.put(code, lastBytecodeOffset, true);</span>
+    }
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc" id="L1340">    visitSwitchInsn(dflt, labels);</span>
+<span class="nc" id="L1341">  }</span>
+
+  @Override
+  public void visitLookupSwitchInsn(final Label dflt, final int[] keys, final Label[] labels) {
+<span class="nc" id="L1345">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L1347">    code.putByte(Opcodes.LOOKUPSWITCH).putByteArray(null, 0, (4 - code.length % 4) % 4);</span>
+<span class="nc" id="L1348">    dflt.put(code, lastBytecodeOffset, true);</span>
+<span class="nc" id="L1349">    code.putInt(labels.length);</span>
+<span class="nc bnc" id="L1350" title="All 2 branches missed.">    for (int i = 0; i &lt; labels.length; ++i) {</span>
+<span class="nc" id="L1351">      code.putInt(keys[i]);</span>
+<span class="nc" id="L1352">      labels[i].put(code, lastBytecodeOffset, true);</span>
+    }
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc" id="L1355">    visitSwitchInsn(dflt, labels);</span>
+<span class="nc" id="L1356">  }</span>
+
+  private void visitSwitchInsn(final Label dflt, final Label[] labels) {
+<span class="nc bnc" id="L1359" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L1360" title="All 2 branches missed.">      if (compute == COMPUTE_ALL_FRAMES) {</span>
+<span class="nc" id="L1361">        currentBasicBlock.frame.execute(Opcodes.LOOKUPSWITCH, 0, null, null);</span>
+        // Add all the labels as successors of the current basic block.
+<span class="nc" id="L1363">        addSuccessorToCurrentBasicBlock(Edge.JUMP, dflt);</span>
+<span class="nc" id="L1364">        dflt.getCanonicalInstance().flags |= Label.FLAG_JUMP_TARGET;</span>
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">        for (Label label : labels) {</span>
+<span class="nc" id="L1366">          addSuccessorToCurrentBasicBlock(Edge.JUMP, label);</span>
+<span class="nc" id="L1367">          label.getCanonicalInstance().flags |= Label.FLAG_JUMP_TARGET;</span>
+        }
+<span class="nc bnc" id="L1369" title="All 2 branches missed.">      } else if (compute == COMPUTE_MAX_STACK_AND_LOCAL) {</span>
+        // No need to update maxRelativeStackSize (the stack size delta is always negative).
+<span class="nc" id="L1371">        --relativeStackSize;</span>
+        // Add all the labels as successors of the current basic block.
+<span class="nc" id="L1373">        addSuccessorToCurrentBasicBlock(relativeStackSize, dflt);</span>
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">        for (Label label : labels) {</span>
+<span class="nc" id="L1375">          addSuccessorToCurrentBasicBlock(relativeStackSize, label);</span>
+        }
+      }
+      // End the current basic block.
+<span class="nc" id="L1379">      endCurrentBasicBlockWithNoSuccessor();</span>
+    }
+<span class="nc" id="L1381">  }</span>
+
+  @Override
+  public void visitMultiANewArrayInsn(final String descriptor, final int numDimensions) {
+<span class="nc" id="L1385">    lastBytecodeOffset = code.length;</span>
+    // Add the instruction to the bytecode of the method.
+<span class="nc" id="L1387">    Symbol descSymbol = symbolTable.addConstantClass(descriptor);</span>
+<span class="nc" id="L1388">    code.put12(Opcodes.MULTIANEWARRAY, descSymbol.index).putByte(numDimensions);</span>
+    // If needed, update the maximum stack size and number of locals, and stack map frames.
+<span class="nc bnc" id="L1390" title="All 2 branches missed.">    if (currentBasicBlock != null) {</span>
+<span class="nc bnc" id="L1391" title="All 4 branches missed.">      if (compute == COMPUTE_ALL_FRAMES || compute == COMPUTE_INSERTED_FRAMES) {</span>
+<span class="nc" id="L1392">        currentBasicBlock.frame.execute(</span>
+            Opcodes.MULTIANEWARRAY, numDimensions, descSymbol, symbolTable);
+      } else {
+        // No need to update maxRelativeStackSize (the stack size delta is always negative).
+<span class="nc" id="L1396">        relativeStackSize += 1 - numDimensions;</span>
+      }
+    }
+<span class="nc" id="L1399">  }</span>
+
+  @Override
+  public AnnotationVisitor visitInsnAnnotation(
+      final int typeRef, final TypePath typePath, final String descriptor, final boolean visible) {
+<span class="nc bnc" id="L1404" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L1405">      return lastCodeRuntimeVisibleTypeAnnotation =</span>
+<span class="nc" id="L1406">          AnnotationWriter.create(</span>
+              symbolTable,
+              (typeRef &amp; 0xFF0000FF) | (lastBytecodeOffset &lt;&lt; 8),
+              typePath,
+              descriptor,
+              lastCodeRuntimeVisibleTypeAnnotation);
+    } else {
+<span class="nc" id="L1413">      return lastCodeRuntimeInvisibleTypeAnnotation =</span>
+<span class="nc" id="L1414">          AnnotationWriter.create(</span>
+              symbolTable,
+              (typeRef &amp; 0xFF0000FF) | (lastBytecodeOffset &lt;&lt; 8),
+              typePath,
+              descriptor,
+              lastCodeRuntimeInvisibleTypeAnnotation);
+    }
+  }
+
+  @Override
+  public void visitTryCatchBlock(
+      final Label start, final Label end, final Label handler, final String type) {
+<span class="nc bnc" id="L1426" title="All 2 branches missed.">    Handler newHandler =</span>
+        new Handler(
+<span class="nc" id="L1428">            start, end, handler, type != null ? symbolTable.addConstantClass(type).index : 0, type);</span>
+<span class="nc bnc" id="L1429" title="All 2 branches missed.">    if (firstHandler == null) {</span>
+<span class="nc" id="L1430">      firstHandler = newHandler;</span>
+    } else {
+<span class="nc" id="L1432">      lastHandler.nextHandler = newHandler;</span>
+    }
+<span class="nc" id="L1434">    lastHandler = newHandler;</span>
+<span class="nc" id="L1435">  }</span>
+
+  @Override
+  public AnnotationVisitor visitTryCatchAnnotation(
+      final int typeRef, final TypePath typePath, final String descriptor, final boolean visible) {
+<span class="nc bnc" id="L1440" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L1441">      return lastCodeRuntimeVisibleTypeAnnotation =</span>
+<span class="nc" id="L1442">          AnnotationWriter.create(</span>
+              symbolTable, typeRef, typePath, descriptor, lastCodeRuntimeVisibleTypeAnnotation);
+    } else {
+<span class="nc" id="L1445">      return lastCodeRuntimeInvisibleTypeAnnotation =</span>
+<span class="nc" id="L1446">          AnnotationWriter.create(</span>
+              symbolTable, typeRef, typePath, descriptor, lastCodeRuntimeInvisibleTypeAnnotation);
+    }
+  }
+
+  @Override
+  public void visitLocalVariable(
+      final String name,
+      final String descriptor,
+      final String signature,
+      final Label start,
+      final Label end,
+      final int index) {
+<span class="nc bnc" id="L1459" title="All 2 branches missed.">    if (signature != null) {</span>
+<span class="nc bnc" id="L1460" title="All 2 branches missed.">      if (localVariableTypeTable == null) {</span>
+<span class="nc" id="L1461">        localVariableTypeTable = new ByteVector();</span>
+      }
+<span class="nc" id="L1463">      ++localVariableTypeTableLength;</span>
+<span class="nc" id="L1464">      localVariableTypeTable</span>
+<span class="nc" id="L1465">          .putShort(start.bytecodeOffset)</span>
+<span class="nc" id="L1466">          .putShort(end.bytecodeOffset - start.bytecodeOffset)</span>
+<span class="nc" id="L1467">          .putShort(symbolTable.addConstantUtf8(name))</span>
+<span class="nc" id="L1468">          .putShort(symbolTable.addConstantUtf8(signature))</span>
+<span class="nc" id="L1469">          .putShort(index);</span>
+    }
+<span class="nc bnc" id="L1471" title="All 2 branches missed.">    if (localVariableTable == null) {</span>
+<span class="nc" id="L1472">      localVariableTable = new ByteVector();</span>
+    }
+<span class="nc" id="L1474">    ++localVariableTableLength;</span>
+<span class="nc" id="L1475">    localVariableTable</span>
+<span class="nc" id="L1476">        .putShort(start.bytecodeOffset)</span>
+<span class="nc" id="L1477">        .putShort(end.bytecodeOffset - start.bytecodeOffset)</span>
+<span class="nc" id="L1478">        .putShort(symbolTable.addConstantUtf8(name))</span>
+<span class="nc" id="L1479">        .putShort(symbolTable.addConstantUtf8(descriptor))</span>
+<span class="nc" id="L1480">        .putShort(index);</span>
+<span class="nc bnc" id="L1481" title="All 2 branches missed.">    if (compute != COMPUTE_NOTHING) {</span>
+<span class="nc" id="L1482">      char firstDescChar = descriptor.charAt(0);</span>
+<span class="nc bnc" id="L1483" title="All 4 branches missed.">      int currentMaxLocals = index + (firstDescChar == 'J' || firstDescChar == 'D' ? 2 : 1);</span>
+<span class="nc bnc" id="L1484" title="All 2 branches missed.">      if (currentMaxLocals &gt; maxLocals) {</span>
+<span class="nc" id="L1485">        maxLocals = currentMaxLocals;</span>
+      }
+    }
+<span class="nc" id="L1488">  }</span>
+
+  @Override
+  public AnnotationVisitor visitLocalVariableAnnotation(
+      final int typeRef,
+      final TypePath typePath,
+      final Label[] start,
+      final Label[] end,
+      final int[] index,
+      final String descriptor,
+      final boolean visible) {
+    // Create a ByteVector to hold a 'type_annotation' JVMS structure.
+    // See https://docs.oracle.com/javase/specs/jvms/se9/html/jvms-4.html#jvms-4.7.20.
+<span class="nc" id="L1501">    ByteVector typeAnnotation = new ByteVector();</span>
+    // Write target_type, target_info, and target_path.
+<span class="nc" id="L1503">    typeAnnotation.putByte(typeRef &gt;&gt;&gt; 24).putShort(start.length);</span>
+<span class="nc bnc" id="L1504" title="All 2 branches missed.">    for (int i = 0; i &lt; start.length; ++i) {</span>
+<span class="nc" id="L1505">      typeAnnotation</span>
+<span class="nc" id="L1506">          .putShort(start[i].bytecodeOffset)</span>
+<span class="nc" id="L1507">          .putShort(end[i].bytecodeOffset - start[i].bytecodeOffset)</span>
+<span class="nc" id="L1508">          .putShort(index[i]);</span>
+    }
+<span class="nc" id="L1510">    TypePath.put(typePath, typeAnnotation);</span>
+    // Write type_index and reserve space for num_element_value_pairs.
+<span class="nc" id="L1512">    typeAnnotation.putShort(symbolTable.addConstantUtf8(descriptor)).putShort(0);</span>
+<span class="nc bnc" id="L1513" title="All 2 branches missed.">    if (visible) {</span>
+<span class="nc" id="L1514">      return lastCodeRuntimeVisibleTypeAnnotation =</span>
+          new AnnotationWriter(
+              symbolTable,
+              /* useNamedValues = */ true,
+              typeAnnotation,
+              lastCodeRuntimeVisibleTypeAnnotation);
+    } else {
+<span class="nc" id="L1521">      return lastCodeRuntimeInvisibleTypeAnnotation =</span>
+          new AnnotationWriter(
+              symbolTable,
+              /* useNamedValues = */ true,
+              typeAnnotation,
+              lastCodeRuntimeInvisibleTypeAnnotation);
+    }
+  }
+
+  @Override
+  public void visitLineNumber(final int line, final Label start) {
+<span class="nc bnc" id="L1532" title="All 2 branches missed.">    if (lineNumberTable == null) {</span>
+<span class="nc" id="L1533">      lineNumberTable = new ByteVector();</span>
+    }
+<span class="nc" id="L1535">    ++lineNumberTableLength;</span>
+<span class="nc" id="L1536">    lineNumberTable.putShort(start.bytecodeOffset);</span>
+<span class="nc" id="L1537">    lineNumberTable.putShort(line);</span>
+<span class="nc" id="L1538">  }</span>
+
+  @Override
+  public void visitMaxs(final int maxStack, final int maxLocals) {
+<span class="nc bnc" id="L1542" title="All 2 branches missed.">    if (compute == COMPUTE_ALL_FRAMES) {</span>
+<span class="nc" id="L1543">      computeAllFrames();</span>
+<span class="nc bnc" id="L1544" title="All 2 branches missed.">    } else if (compute == COMPUTE_MAX_STACK_AND_LOCAL) {</span>
+<span class="nc" id="L1545">      computeMaxStackAndLocal();</span>
+<span class="nc bnc" id="L1546" title="All 2 branches missed.">    } else if (compute == COMPUTE_MAX_STACK_AND_LOCAL_FROM_FRAMES) {</span>
+<span class="nc" id="L1547">      this.maxStack = maxRelativeStackSize;</span>
+    } else {
+<span class="nc" id="L1549">      this.maxStack = maxStack;</span>
+<span class="nc" id="L1550">      this.maxLocals = maxLocals;</span>
+    }
+<span class="nc" id="L1552">  }</span>
+
+  /** Computes all the stack map frames of the method, from scratch. */
+  private void computeAllFrames() {
+    // Complete the control flow graph with exception handler blocks.
+<span class="nc" id="L1557">    Handler handler = firstHandler;</span>
+<span class="nc bnc" id="L1558" title="All 2 branches missed.">    while (handler != null) {</span>
+<span class="nc bnc" id="L1559" title="All 2 branches missed.">      String catchTypeDescriptor =</span>
+          handler.catchTypeDescriptor == null ? &quot;java/lang/Throwable&quot; : handler.catchTypeDescriptor;
+<span class="nc" id="L1561">      int catchType = Frame.getAbstractTypeFromInternalName(symbolTable, catchTypeDescriptor);</span>
+      // Mark handlerBlock as an exception handler.
+<span class="nc" id="L1563">      Label handlerBlock = handler.handlerPc.getCanonicalInstance();</span>
+<span class="nc" id="L1564">      handlerBlock.flags |= Label.FLAG_JUMP_TARGET;</span>
+      // Add handlerBlock as a successor of all the basic blocks in the exception handler range.
+<span class="nc" id="L1566">      Label handlerRangeBlock = handler.startPc.getCanonicalInstance();</span>
+<span class="nc" id="L1567">      Label handlerRangeEnd = handler.endPc.getCanonicalInstance();</span>
+<span class="nc bnc" id="L1568" title="All 2 branches missed.">      while (handlerRangeBlock != handlerRangeEnd) {</span>
+<span class="nc" id="L1569">        handlerRangeBlock.outgoingEdges =</span>
+            new Edge(catchType, handlerBlock, handlerRangeBlock.outgoingEdges);
+<span class="nc" id="L1571">        handlerRangeBlock = handlerRangeBlock.nextBasicBlock;</span>
+      }
+<span class="nc" id="L1573">      handler = handler.nextHandler;</span>
+<span class="nc" id="L1574">    }</span>
+
+    // Create and visit the first (implicit) frame.
+<span class="nc" id="L1577">    Frame firstFrame = firstBasicBlock.frame;</span>
+<span class="nc" id="L1578">    firstFrame.setInputFrameFromDescriptor(symbolTable, accessFlags, descriptor, this.maxLocals);</span>
+<span class="nc" id="L1579">    firstFrame.accept(this);</span>
+
+    // Fix point algorithm: add the first basic block to a list of blocks to process (i.e. blocks
+    // whose stack map frame has changed) and, while there are blocks to process, remove one from
+    // the list and update the stack map frames of its successor blocks in the control flow graph
+    // (which might change them, in which case these blocks must be processed too, and are thus
+    // added to the list of blocks to process). Also compute the maximum stack size of the method,
+    // as a by-product.
+<span class="nc" id="L1587">    Label listOfBlocksToProcess = firstBasicBlock;</span>
+<span class="nc" id="L1588">    listOfBlocksToProcess.nextListElement = Label.EMPTY_LIST;</span>
+<span class="nc" id="L1589">    int maxStackSize = 0;</span>
+<span class="nc bnc" id="L1590" title="All 2 branches missed.">    while (listOfBlocksToProcess != Label.EMPTY_LIST) {</span>
+      // Remove a basic block from the list of blocks to process.
+<span class="nc" id="L1592">      Label basicBlock = listOfBlocksToProcess;</span>
+<span class="nc" id="L1593">      listOfBlocksToProcess = listOfBlocksToProcess.nextListElement;</span>
+<span class="nc" id="L1594">      basicBlock.nextListElement = null;</span>
+      // By definition, basicBlock is reachable.
+<span class="nc" id="L1596">      basicBlock.flags |= Label.FLAG_REACHABLE;</span>
+      // Update the (absolute) maximum stack size.
+<span class="nc" id="L1598">      int maxBlockStackSize = basicBlock.frame.getInputStackSize() + basicBlock.outputStackMax;</span>
+<span class="nc bnc" id="L1599" title="All 2 branches missed.">      if (maxBlockStackSize &gt; maxStackSize) {</span>
+<span class="nc" id="L1600">        maxStackSize = maxBlockStackSize;</span>
+      }
+      // Update the successor blocks of basicBlock in the control flow graph.
+<span class="nc" id="L1603">      Edge outgoingEdge = basicBlock.outgoingEdges;</span>
+<span class="nc bnc" id="L1604" title="All 2 branches missed.">      while (outgoingEdge != null) {</span>
+<span class="nc" id="L1605">        Label successorBlock = outgoingEdge.successor.getCanonicalInstance();</span>
+<span class="nc" id="L1606">        boolean successorBlockChanged =</span>
+<span class="nc" id="L1607">            basicBlock.frame.merge(symbolTable, successorBlock.frame, outgoingEdge.info);</span>
+<span class="nc bnc" id="L1608" title="All 4 branches missed.">        if (successorBlockChanged &amp;&amp; successorBlock.nextListElement == null) {</span>
+          // If successorBlock has changed it must be processed. Thus, if it is not already in the
+          // list of blocks to process, add it to this list.
+<span class="nc" id="L1611">          successorBlock.nextListElement = listOfBlocksToProcess;</span>
+<span class="nc" id="L1612">          listOfBlocksToProcess = successorBlock;</span>
+        }
+<span class="nc" id="L1614">        outgoingEdge = outgoingEdge.nextEdge;</span>
+<span class="nc" id="L1615">      }</span>
+<span class="nc" id="L1616">    }</span>
+
+    // Loop over all the basic blocks and visit the stack map frames that must be stored in the
+    // StackMapTable attribute. Also replace unreachable code with NOP* ATHROW, and remove it from
+    // exception handler ranges.
+<span class="nc" id="L1621">    Label basicBlock = firstBasicBlock;</span>
+<span class="nc bnc" id="L1622" title="All 2 branches missed.">    while (basicBlock != null) {</span>
+<span class="nc bnc" id="L1623" title="All 2 branches missed.">      if ((basicBlock.flags &amp; (Label.FLAG_JUMP_TARGET | Label.FLAG_REACHABLE))</span>
+          == (Label.FLAG_JUMP_TARGET | Label.FLAG_REACHABLE)) {
+<span class="nc" id="L1625">        basicBlock.frame.accept(this);</span>
+      }
+<span class="nc bnc" id="L1627" title="All 2 branches missed.">      if ((basicBlock.flags &amp; Label.FLAG_REACHABLE) == 0) {</span>
+        // Find the start and end bytecode offsets of this unreachable block.
+<span class="nc" id="L1629">        Label nextBasicBlock = basicBlock.nextBasicBlock;</span>
+<span class="nc" id="L1630">        int startOffset = basicBlock.bytecodeOffset;</span>
+<span class="nc bnc" id="L1631" title="All 2 branches missed.">        int endOffset = (nextBasicBlock == null ? code.length : nextBasicBlock.bytecodeOffset) - 1;</span>
+<span class="nc bnc" id="L1632" title="All 2 branches missed.">        if (endOffset &gt;= startOffset) {</span>
+          // Replace its instructions with NOP ... NOP ATHROW.
+<span class="nc bnc" id="L1634" title="All 2 branches missed.">          for (int i = startOffset; i &lt; endOffset; ++i) {</span>
+<span class="nc" id="L1635">            code.data[i] = Opcodes.NOP;</span>
+          }
+<span class="nc" id="L1637">          code.data[endOffset] = (byte) Opcodes.ATHROW;</span>
+          // Emit a frame for this unreachable block, with no local and a Throwable on the stack
+          // (so that the ATHROW could consume this Throwable if it were reachable).
+<span class="nc" id="L1640">          int frameIndex = visitFrameStart(startOffset, /* numLocal = */ 0, /* numStack = */ 1);</span>
+<span class="nc" id="L1641">          currentFrame[frameIndex] =</span>
+<span class="nc" id="L1642">              Frame.getAbstractTypeFromInternalName(symbolTable, &quot;java/lang/Throwable&quot;);</span>
+<span class="nc" id="L1643">          visitFrameEnd();</span>
+          // Remove this unreachable basic block from the exception handler ranges.
+<span class="nc" id="L1645">          firstHandler = Handler.removeRange(firstHandler, basicBlock, nextBasicBlock);</span>
+          // The maximum stack size is now at least one, because of the Throwable declared above.
+<span class="nc" id="L1647">          maxStackSize = Math.max(maxStackSize, 1);</span>
+        }
+      }
+<span class="nc" id="L1650">      basicBlock = basicBlock.nextBasicBlock;</span>
+    }
+
+<span class="nc" id="L1653">    this.maxStack = maxStackSize;</span>
+<span class="nc" id="L1654">  }</span>
+
+  /** Computes the maximum stack size of the method. */
+  private void computeMaxStackAndLocal() {
+    // Complete the control flow graph with exception handler blocks.
+<span class="nc" id="L1659">    Handler handler = firstHandler;</span>
+<span class="nc bnc" id="L1660" title="All 2 branches missed.">    while (handler != null) {</span>
+<span class="nc" id="L1661">      Label handlerBlock = handler.handlerPc;</span>
+<span class="nc" id="L1662">      Label handlerRangeBlock = handler.startPc;</span>
+<span class="nc" id="L1663">      Label handlerRangeEnd = handler.endPc;</span>
+      // Add handlerBlock as a successor of all the basic blocks in the exception handler range.
+<span class="nc bnc" id="L1665" title="All 2 branches missed.">      while (handlerRangeBlock != handlerRangeEnd) {</span>
+<span class="nc bnc" id="L1666" title="All 2 branches missed.">        if ((handlerRangeBlock.flags &amp; Label.FLAG_SUBROUTINE_CALLER) == 0) {</span>
+<span class="nc" id="L1667">          handlerRangeBlock.outgoingEdges =</span>
+              new Edge(Edge.EXCEPTION, handlerBlock, handlerRangeBlock.outgoingEdges);
+        } else {
+          // If handlerRangeBlock is a JSR block, add handlerBlock after the first two outgoing
+          // edges to preserve the hypothesis about JSR block successors order (see
+          // {@link #visitJumpInsn}).
+<span class="nc" id="L1673">          handlerRangeBlock.outgoingEdges.nextEdge.nextEdge =</span>
+              new Edge(
+                  Edge.EXCEPTION, handlerBlock, handlerRangeBlock.outgoingEdges.nextEdge.nextEdge);
+        }
+<span class="nc" id="L1677">        handlerRangeBlock = handlerRangeBlock.nextBasicBlock;</span>
+      }
+<span class="nc" id="L1679">      handler = handler.nextHandler;</span>
+<span class="nc" id="L1680">    }</span>
+
+    // Complete the control flow graph with the successor blocks of subroutines, if needed.
+<span class="nc bnc" id="L1683" title="All 2 branches missed.">    if (hasSubroutines) {</span>
+      // First step: find the subroutines. This step determines, for each basic block, to which
+      // subroutine(s) it belongs. Start with the main &quot;subroutine&quot;:
+<span class="nc" id="L1686">      short numSubroutines = 1;</span>
+<span class="nc" id="L1687">      firstBasicBlock.markSubroutine(numSubroutines);</span>
+      // Then, mark the subroutines called by the main subroutine, then the subroutines called by
+      // those called by the main subroutine, etc.
+<span class="nc bnc" id="L1690" title="All 2 branches missed.">      for (short currentSubroutine = 1; currentSubroutine &lt;= numSubroutines; ++currentSubroutine) {</span>
+<span class="nc" id="L1691">        Label basicBlock = firstBasicBlock;</span>
+<span class="nc bnc" id="L1692" title="All 2 branches missed.">        while (basicBlock != null) {</span>
+<span class="nc bnc" id="L1693" title="All 4 branches missed.">          if ((basicBlock.flags &amp; Label.FLAG_SUBROUTINE_CALLER) != 0</span>
+              &amp;&amp; basicBlock.subroutineId == currentSubroutine) {
+<span class="nc" id="L1695">            Label jsrTarget = basicBlock.outgoingEdges.nextEdge.successor;</span>
+<span class="nc bnc" id="L1696" title="All 2 branches missed.">            if (jsrTarget.subroutineId == 0) {</span>
+              // If this subroutine has not been marked yet, find its basic blocks.
+<span class="nc" id="L1698">              jsrTarget.markSubroutine(++numSubroutines);</span>
+            }
+          }
+<span class="nc" id="L1701">          basicBlock = basicBlock.nextBasicBlock;</span>
+        }
+      }
+      // Second step: find the successors in the control flow graph of each subroutine basic block
+      // 'r' ending with a RET instruction. These successors are the virtual successors of the basic
+      // blocks ending with JSR instructions (see {@link #visitJumpInsn)} that can reach 'r'.
+<span class="nc" id="L1707">      Label basicBlock = firstBasicBlock;</span>
+<span class="nc bnc" id="L1708" title="All 2 branches missed.">      while (basicBlock != null) {</span>
+<span class="nc bnc" id="L1709" title="All 2 branches missed.">        if ((basicBlock.flags &amp; Label.FLAG_SUBROUTINE_CALLER) != 0) {</span>
+          // By construction, jsr targets are stored in the second outgoing edge of basic blocks
+          // that ends with a jsr instruction (see {@link #FLAG_SUBROUTINE_CALLER}).
+<span class="nc" id="L1712">          Label subroutine = basicBlock.outgoingEdges.nextEdge.successor;</span>
+<span class="nc" id="L1713">          subroutine.addSubroutineRetSuccessors(basicBlock);</span>
+        }
+<span class="nc" id="L1715">        basicBlock = basicBlock.nextBasicBlock;</span>
+      }
+    }
+
+    // Data flow algorithm: put the first basic block in a list of blocks to process (i.e. blocks
+    // whose input stack size has changed) and, while there are blocks to process, remove one
+    // from the list, update the input stack size of its successor blocks in the control flow
+    // graph, and add these blocks to the list of blocks to process (if not already done).
+<span class="nc" id="L1723">    Label listOfBlocksToProcess = firstBasicBlock;</span>
+<span class="nc" id="L1724">    listOfBlocksToProcess.nextListElement = Label.EMPTY_LIST;</span>
+<span class="nc" id="L1725">    int maxStackSize = maxStack;</span>
+<span class="nc bnc" id="L1726" title="All 2 branches missed.">    while (listOfBlocksToProcess != Label.EMPTY_LIST) {</span>
+      // Remove a basic block from the list of blocks to process. Note that we don't reset
+      // basicBlock.nextListElement to null on purpose, to make sure we don't reprocess already
+      // processed basic blocks.
+<span class="nc" id="L1730">      Label basicBlock = listOfBlocksToProcess;</span>
+<span class="nc" id="L1731">      listOfBlocksToProcess = listOfBlocksToProcess.nextListElement;</span>
+      // Compute the (absolute) input stack size and maximum stack size of this block.
+<span class="nc" id="L1733">      int inputStackTop = basicBlock.inputStackSize;</span>
+<span class="nc" id="L1734">      int maxBlockStackSize = inputStackTop + basicBlock.outputStackMax;</span>
+      // Update the absolute maximum stack size of the method.
+<span class="nc bnc" id="L1736" title="All 2 branches missed.">      if (maxBlockStackSize &gt; maxStackSize) {</span>
+<span class="nc" id="L1737">        maxStackSize = maxBlockStackSize;</span>
+      }
+      // Update the input stack size of the successor blocks of basicBlock in the control flow
+      // graph, and add these blocks to the list of blocks to process, if not already done.
+<span class="nc" id="L1741">      Edge outgoingEdge = basicBlock.outgoingEdges;</span>
+<span class="nc bnc" id="L1742" title="All 2 branches missed.">      if ((basicBlock.flags &amp; Label.FLAG_SUBROUTINE_CALLER) != 0) {</span>
+        // Ignore the first outgoing edge of the basic blocks ending with a jsr: these are virtual
+        // edges which lead to the instruction just after the jsr, and do not correspond to a
+        // possible execution path (see {@link #visitJumpInsn} and
+        // {@link Label#FLAG_SUBROUTINE_CALLER}).
+<span class="nc" id="L1747">        outgoingEdge = outgoingEdge.nextEdge;</span>
+      }
+<span class="nc bnc" id="L1749" title="All 2 branches missed.">      while (outgoingEdge != null) {</span>
+<span class="nc" id="L1750">        Label successorBlock = outgoingEdge.successor;</span>
+<span class="nc bnc" id="L1751" title="All 2 branches missed.">        if (successorBlock.nextListElement == null) {</span>
+<span class="nc bnc" id="L1752" title="All 2 branches missed.">          successorBlock.inputStackSize =</span>
+              (short) (outgoingEdge.info == Edge.EXCEPTION ? 1 : inputStackTop + outgoingEdge.info);
+<span class="nc" id="L1754">          successorBlock.nextListElement = listOfBlocksToProcess;</span>
+<span class="nc" id="L1755">          listOfBlocksToProcess = successorBlock;</span>
+        }
+<span class="nc" id="L1757">        outgoingEdge = outgoingEdge.nextEdge;</span>
+<span class="nc" id="L1758">      }</span>
+<span class="nc" id="L1759">    }</span>
+<span class="nc" id="L1760">    this.maxStack = maxStackSize;</span>
+<span class="nc" id="L1761">  }</span>
+
+  @Override
+  public void visitEnd() {
+    // Nothing to do.
+<span class="nc" id="L1766">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Utility methods: control flow analysis algorithm
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Adds a successor to {@link #currentBasicBlock} in the control flow graph.
+   *
+   * @param info information about the control flow edge to be added.
+   * @param successor the successor block to be added to the current basic block.
+   */
+  private void addSuccessorToCurrentBasicBlock(final int info, final Label successor) {
+<span class="nc" id="L1779">    currentBasicBlock.outgoingEdges = new Edge(info, successor, currentBasicBlock.outgoingEdges);</span>
+<span class="nc" id="L1780">  }</span>
+
+  /**
+   * Ends the current basic block. This method must be used in the case where the current basic
+   * block does not have any successor.
+   *
+   * &lt;p&gt;WARNING: this method must be called after the currently visited instruction has been put in
+   * {@link #code} (if frames are computed, this method inserts a new Label to start a new basic
+   * block after the current instruction).
+   */
+  private void endCurrentBasicBlockWithNoSuccessor() {
+<span class="nc bnc" id="L1791" title="All 2 branches missed.">    if (compute == COMPUTE_ALL_FRAMES) {</span>
+<span class="nc" id="L1792">      Label nextBasicBlock = new Label();</span>
+<span class="nc" id="L1793">      nextBasicBlock.frame = new Frame(nextBasicBlock);</span>
+<span class="nc" id="L1794">      nextBasicBlock.resolve(code.data, code.length);</span>
+<span class="nc" id="L1795">      lastBasicBlock.nextBasicBlock = nextBasicBlock;</span>
+<span class="nc" id="L1796">      lastBasicBlock = nextBasicBlock;</span>
+<span class="nc" id="L1797">      currentBasicBlock = null;</span>
+<span class="nc bnc" id="L1798" title="All 2 branches missed.">    } else if (compute == COMPUTE_MAX_STACK_AND_LOCAL) {</span>
+<span class="nc" id="L1799">      currentBasicBlock.outputStackMax = (short) maxRelativeStackSize;</span>
+<span class="nc" id="L1800">      currentBasicBlock = null;</span>
+    }
+<span class="nc" id="L1802">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Utility methods: stack map frames
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Starts the visit of a new stack map frame, stored in {@link #currentFrame}.
+   *
+   * @param offset the bytecode offset of the instruction to which the frame corresponds.
+   * @param numLocal the number of local variables in the frame.
+   * @param numStack the number of stack elements in the frame.
+   * @return the index of the next element to be written in this frame.
+   */
+  int visitFrameStart(final int offset, final int numLocal, final int numStack) {
+<span class="nc" id="L1817">    int frameLength = 3 + numLocal + numStack;</span>
+<span class="nc bnc" id="L1818" title="All 4 branches missed.">    if (currentFrame == null || currentFrame.length &lt; frameLength) {</span>
+<span class="nc" id="L1819">      currentFrame = new int[frameLength];</span>
+    }
+<span class="nc" id="L1821">    currentFrame[0] = offset;</span>
+<span class="nc" id="L1822">    currentFrame[1] = numLocal;</span>
+<span class="nc" id="L1823">    currentFrame[2] = numStack;</span>
+<span class="nc" id="L1824">    return 3;</span>
+  }
+
+  /**
+   * Sets an abstract type in {@link #currentFrame}.
+   *
+   * @param frameIndex the index of the element to be set in {@link #currentFrame}.
+   * @param abstractType an abstract type.
+   */
+  void visitAbstractType(final int frameIndex, final int abstractType) {
+<span class="nc" id="L1834">    currentFrame[frameIndex] = abstractType;</span>
+<span class="nc" id="L1835">  }</span>
+
+  /**
+   * Ends the visit of {@link #currentFrame} by writing it in the StackMapTable entries and by
+   * updating the StackMapTable number_of_entries (except if the current frame is the first one,
+   * which is implicit in StackMapTable). Then resets {@link #currentFrame} to {@literal null}.
+   */
+  void visitFrameEnd() {
+<span class="nc bnc" id="L1843" title="All 2 branches missed.">    if (previousFrame != null) {</span>
+<span class="nc bnc" id="L1844" title="All 2 branches missed.">      if (stackMapTableEntries == null) {</span>
+<span class="nc" id="L1845">        stackMapTableEntries = new ByteVector();</span>
+      }
+<span class="nc" id="L1847">      putFrame();</span>
+<span class="nc" id="L1848">      ++stackMapTableNumberOfEntries;</span>
+    }
+<span class="nc" id="L1850">    previousFrame = currentFrame;</span>
+<span class="nc" id="L1851">    currentFrame = null;</span>
+<span class="nc" id="L1852">  }</span>
+
+  /** Compresses and writes {@link #currentFrame} in a new StackMapTable entry. */
+  private void putFrame() {
+<span class="nc" id="L1856">    final int numLocal = currentFrame[1];</span>
+<span class="nc" id="L1857">    final int numStack = currentFrame[2];</span>
+<span class="nc bnc" id="L1858" title="All 2 branches missed.">    if (symbolTable.getMajorVersion() &lt; Opcodes.V1_6) {</span>
+      // Generate a StackMap attribute entry, which are always uncompressed.
+<span class="nc" id="L1860">      stackMapTableEntries.putShort(currentFrame[0]).putShort(numLocal);</span>
+<span class="nc" id="L1861">      putAbstractTypes(3, 3 + numLocal);</span>
+<span class="nc" id="L1862">      stackMapTableEntries.putShort(numStack);</span>
+<span class="nc" id="L1863">      putAbstractTypes(3 + numLocal, 3 + numLocal + numStack);</span>
+<span class="nc" id="L1864">      return;</span>
+    }
+<span class="nc bnc" id="L1866" title="All 2 branches missed.">    final int offsetDelta =</span>
+        stackMapTableNumberOfEntries == 0
+            ? currentFrame[0]
+            : currentFrame[0] - previousFrame[0] - 1;
+<span class="nc" id="L1870">    final int previousNumlocal = previousFrame[1];</span>
+<span class="nc" id="L1871">    final int numLocalDelta = numLocal - previousNumlocal;</span>
+<span class="nc" id="L1872">    int type = Frame.FULL_FRAME;</span>
+<span class="nc bnc" id="L1873" title="All 2 branches missed.">    if (numStack == 0) {</span>
+<span class="nc bnc" id="L1874" title="All 4 branches missed.">      switch (numLocalDelta) {</span>
+        case -3:
+        case -2:
+        case -1:
+<span class="nc" id="L1878">          type = Frame.CHOP_FRAME;</span>
+<span class="nc" id="L1879">          break;</span>
+        case 0:
+<span class="nc bnc" id="L1881" title="All 2 branches missed.">          type = offsetDelta &lt; 64 ? Frame.SAME_FRAME : Frame.SAME_FRAME_EXTENDED;</span>
+<span class="nc" id="L1882">          break;</span>
+        case 1:
+        case 2:
+        case 3:
+<span class="nc" id="L1886">          type = Frame.APPEND_FRAME;</span>
+<span class="nc" id="L1887">          break;</span>
+        default:
+          // Keep the FULL_FRAME type.
+<span class="nc" id="L1890">          break;</span>
+      }
+<span class="nc bnc" id="L1892" title="All 4 branches missed.">    } else if (numLocalDelta == 0 &amp;&amp; numStack == 1) {</span>
+<span class="nc bnc" id="L1893" title="All 2 branches missed.">      type =</span>
+          offsetDelta &lt; 63
+              ? Frame.SAME_LOCALS_1_STACK_ITEM_FRAME
+              : Frame.SAME_LOCALS_1_STACK_ITEM_FRAME_EXTENDED;
+    }
+<span class="nc bnc" id="L1898" title="All 2 branches missed.">    if (type != Frame.FULL_FRAME) {</span>
+      // Verify if locals are the same as in the previous frame.
+<span class="nc" id="L1900">      int frameIndex = 3;</span>
+<span class="nc bnc" id="L1901" title="All 4 branches missed.">      for (int i = 0; i &lt; previousNumlocal &amp;&amp; i &lt; numLocal; i++) {</span>
+<span class="nc bnc" id="L1902" title="All 2 branches missed.">        if (currentFrame[frameIndex] != previousFrame[frameIndex]) {</span>
+<span class="nc" id="L1903">          type = Frame.FULL_FRAME;</span>
+<span class="nc" id="L1904">          break;</span>
+        }
+<span class="nc" id="L1906">        frameIndex++;</span>
+      }
+    }
+<span class="nc bnc" id="L1909" title="All 7 branches missed.">    switch (type) {</span>
+      case Frame.SAME_FRAME:
+<span class="nc" id="L1911">        stackMapTableEntries.putByte(offsetDelta);</span>
+<span class="nc" id="L1912">        break;</span>
+      case Frame.SAME_LOCALS_1_STACK_ITEM_FRAME:
+<span class="nc" id="L1914">        stackMapTableEntries.putByte(Frame.SAME_LOCALS_1_STACK_ITEM_FRAME + offsetDelta);</span>
+<span class="nc" id="L1915">        putAbstractTypes(3 + numLocal, 4 + numLocal);</span>
+<span class="nc" id="L1916">        break;</span>
+      case Frame.SAME_LOCALS_1_STACK_ITEM_FRAME_EXTENDED:
+<span class="nc" id="L1918">        stackMapTableEntries</span>
+<span class="nc" id="L1919">            .putByte(Frame.SAME_LOCALS_1_STACK_ITEM_FRAME_EXTENDED)</span>
+<span class="nc" id="L1920">            .putShort(offsetDelta);</span>
+<span class="nc" id="L1921">        putAbstractTypes(3 + numLocal, 4 + numLocal);</span>
+<span class="nc" id="L1922">        break;</span>
+      case Frame.SAME_FRAME_EXTENDED:
+<span class="nc" id="L1924">        stackMapTableEntries.putByte(Frame.SAME_FRAME_EXTENDED).putShort(offsetDelta);</span>
+<span class="nc" id="L1925">        break;</span>
+      case Frame.CHOP_FRAME:
+<span class="nc" id="L1927">        stackMapTableEntries</span>
+<span class="nc" id="L1928">            .putByte(Frame.SAME_FRAME_EXTENDED + numLocalDelta)</span>
+<span class="nc" id="L1929">            .putShort(offsetDelta);</span>
+<span class="nc" id="L1930">        break;</span>
+      case Frame.APPEND_FRAME:
+<span class="nc" id="L1932">        stackMapTableEntries</span>
+<span class="nc" id="L1933">            .putByte(Frame.SAME_FRAME_EXTENDED + numLocalDelta)</span>
+<span class="nc" id="L1934">            .putShort(offsetDelta);</span>
+<span class="nc" id="L1935">        putAbstractTypes(3 + previousNumlocal, 3 + numLocal);</span>
+<span class="nc" id="L1936">        break;</span>
+      case Frame.FULL_FRAME:
+      default:
+<span class="nc" id="L1939">        stackMapTableEntries.putByte(Frame.FULL_FRAME).putShort(offsetDelta).putShort(numLocal);</span>
+<span class="nc" id="L1940">        putAbstractTypes(3, 3 + numLocal);</span>
+<span class="nc" id="L1941">        stackMapTableEntries.putShort(numStack);</span>
+<span class="nc" id="L1942">        putAbstractTypes(3 + numLocal, 3 + numLocal + numStack);</span>
+        break;
+    }
+<span class="nc" id="L1945">  }</span>
+
+  /**
+   * Puts some abstract types of {@link #currentFrame} in {@link #stackMapTableEntries} , using the
+   * JVMS verification_type_info format used in StackMapTable attributes.
+   *
+   * @param start index of the first type in {@link #currentFrame} to write.
+   * @param end index of last type in {@link #currentFrame} to write (exclusive).
+   */
+  private void putAbstractTypes(final int start, final int end) {
+<span class="nc bnc" id="L1955" title="All 2 branches missed.">    for (int i = start; i &lt; end; ++i) {</span>
+<span class="nc" id="L1956">      Frame.putAbstractType(symbolTable, currentFrame[i], stackMapTableEntries);</span>
+    }
+<span class="nc" id="L1958">  }</span>
+
+  /**
+   * Puts the given public API frame element type in {@link #stackMapTableEntries} , using the JVMS
+   * verification_type_info format used in StackMapTable attributes.
+   *
+   * @param type a frame element type described using the same format as in {@link
+   *     MethodVisitor#visitFrame}, i.e. either {@link Opcodes#TOP}, {@link Opcodes#INTEGER}, {@link
+   *     Opcodes#FLOAT}, {@link Opcodes#LONG}, {@link Opcodes#DOUBLE}, {@link Opcodes#NULL}, or
+   *     {@link Opcodes#UNINITIALIZED_THIS}, or the internal name of a class, or a Label designating
+   *     a NEW instruction (for uninitialized types).
+   */
+  private void putFrameType(final Object type) {
+<span class="nc bnc" id="L1971" title="All 2 branches missed.">    if (type instanceof Integer) {</span>
+<span class="nc" id="L1972">      stackMapTableEntries.putByte(((Integer) type).intValue());</span>
+<span class="nc bnc" id="L1973" title="All 2 branches missed.">    } else if (type instanceof String) {</span>
+<span class="nc" id="L1974">      stackMapTableEntries</span>
+<span class="nc" id="L1975">          .putByte(Frame.ITEM_OBJECT)</span>
+<span class="nc" id="L1976">          .putShort(symbolTable.addConstantClass((String) type).index);</span>
+    } else {
+<span class="nc" id="L1978">      stackMapTableEntries</span>
+<span class="nc" id="L1979">          .putByte(Frame.ITEM_UNINITIALIZED)</span>
+<span class="nc" id="L1980">          .putShort(((Label) type).bytecodeOffset);</span>
+    }
+<span class="nc" id="L1982">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Utility methods
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Returns whether the attributes of this method can be copied from the attributes of the given
+   * method (assuming there is no method visitor between the given ClassReader and this
+   * MethodWriter). This method should only be called just after this MethodWriter has been created,
+   * and before any content is visited. It returns true if the attributes corresponding to the
+   * constructor arguments (at most a Signature, an Exception, a Deprecated and a Synthetic
+   * attribute) are the same as the corresponding attributes in the given method.
+   *
+   * @param source the source ClassReader from which the attributes of this method might be copied.
+   * @param hasSyntheticAttribute whether the method_info JVMS structure from which the attributes
+   *     of this method might be copied contains a Synthetic attribute.
+   * @param hasDeprecatedAttribute whether the method_info JVMS structure from which the attributes
+   *     of this method might be copied contains a Deprecated attribute.
+   * @param descriptorIndex the descriptor_index field of the method_info JVMS structure from which
+   *     the attributes of this method might be copied.
+   * @param signatureIndex the constant pool index contained in the Signature attribute of the
+   *     method_info JVMS structure from which the attributes of this method might be copied, or 0.
+   * @param exceptionsOffset the offset in 'source.b' of the Exceptions attribute of the method_info
+   *     JVMS structure from which the attributes of this method might be copied, or 0.
+   * @return whether the attributes of this method can be copied from the attributes of the
+   *     method_info JVMS structure in 'source.b', between 'methodInfoOffset' and 'methodInfoOffset'
+   *     + 'methodInfoLength'.
+   */
+  boolean canCopyMethodAttributes(
+      final ClassReader source,
+      final boolean hasSyntheticAttribute,
+      final boolean hasDeprecatedAttribute,
+      final int descriptorIndex,
+      final int signatureIndex,
+      final int exceptionsOffset) {
+    // If the method descriptor has changed, with more locals than the max_locals field of the
+    // original Code attribute, if any, then the original method attributes can't be copied. A
+    // conservative check on the descriptor changes alone ensures this (being more precise is not
+    // worth the additional complexity, because these cases should be rare -- if a transform changes
+    // a method descriptor, most of the time it needs to change the method's code too).
+<span class="nc bnc" id="L2023" title="All 10 branches missed.">    if (source != symbolTable.getSource()</span>
+        || descriptorIndex != this.descriptorIndex
+        || signatureIndex != this.signatureIndex
+        || hasDeprecatedAttribute != ((accessFlags &amp; Opcodes.ACC_DEPRECATED) != 0)) {
+<span class="nc" id="L2027">      return false;</span>
+    }
+<span class="nc" id="L2029">    boolean needSyntheticAttribute =</span>
+<span class="nc bnc" id="L2030" title="All 4 branches missed.">        symbolTable.getMajorVersion() &lt; Opcodes.V1_5 &amp;&amp; (accessFlags &amp; Opcodes.ACC_SYNTHETIC) != 0;</span>
+<span class="nc bnc" id="L2031" title="All 2 branches missed.">    if (hasSyntheticAttribute != needSyntheticAttribute) {</span>
+<span class="nc" id="L2032">      return false;</span>
+    }
+<span class="nc bnc" id="L2034" title="All 2 branches missed.">    if (exceptionsOffset == 0) {</span>
+<span class="nc bnc" id="L2035" title="All 2 branches missed.">      if (numberOfExceptions != 0) {</span>
+<span class="nc" id="L2036">        return false;</span>
+      }
+<span class="nc bnc" id="L2038" title="All 2 branches missed.">    } else if (source.readUnsignedShort(exceptionsOffset) == numberOfExceptions) {</span>
+<span class="nc" id="L2039">      int currentExceptionOffset = exceptionsOffset + 2;</span>
+<span class="nc bnc" id="L2040" title="All 2 branches missed.">      for (int i = 0; i &lt; numberOfExceptions; ++i) {</span>
+<span class="nc bnc" id="L2041" title="All 2 branches missed.">        if (source.readUnsignedShort(currentExceptionOffset) != exceptionIndexTable[i]) {</span>
+<span class="nc" id="L2042">          return false;</span>
+        }
+<span class="nc" id="L2044">        currentExceptionOffset += 2;</span>
+      }
+    }
+<span class="nc" id="L2047">    return true;</span>
+  }
+
+  /**
+   * Sets the source from which the attributes of this method will be copied.
+   *
+   * @param methodInfoOffset the offset in 'symbolTable.getSource()' of the method_info JVMS
+   *     structure from which the attributes of this method will be copied.
+   * @param methodInfoLength the length in 'symbolTable.getSource()' of the method_info JVMS
+   *     structure from which the attributes of this method will be copied.
+   */
+  void setMethodAttributesSource(final int methodInfoOffset, final int methodInfoLength) {
+    // Don't copy the attributes yet, instead store their location in the source class reader so
+    // they can be copied later, in {@link #putMethodInfo}. Note that we skip the 6 header bytes
+    // of the method_info JVMS structure.
+<span class="nc" id="L2062">    this.sourceOffset = methodInfoOffset + 6;</span>
+<span class="nc" id="L2063">    this.sourceLength = methodInfoLength - 6;</span>
+<span class="nc" id="L2064">  }</span>
+
+  /**
+   * Returns the size of the method_info JVMS structure generated by this MethodWriter. Also add the
+   * names of the attributes of this method in the constant pool.
+   *
+   * @return the size in bytes of the method_info JVMS structure.
+   */
+  int computeMethodInfoSize() {
+    // If this method_info must be copied from an existing one, the size computation is trivial.
+<span class="nc bnc" id="L2074" title="All 2 branches missed.">    if (sourceOffset != 0) {</span>
+      // sourceLength excludes the first 6 bytes for access_flags, name_index and descriptor_index.
+<span class="nc" id="L2076">      return 6 + sourceLength;</span>
+    }
+    // 2 bytes each for access_flags, name_index, descriptor_index and attributes_count.
+<span class="nc" id="L2079">    int size = 8;</span>
+    // For ease of reference, we use here the same attribute order as in Section 4.7 of the JVMS.
+<span class="nc bnc" id="L2081" title="All 2 branches missed.">    if (code.length &gt; 0) {</span>
+<span class="nc bnc" id="L2082" title="All 2 branches missed.">      if (code.length &gt; 65535) {</span>
+<span class="nc" id="L2083">        throw new MethodTooLargeException(</span>
+<span class="nc" id="L2084">            symbolTable.getClassName(), name, descriptor, code.length);</span>
+      }
+<span class="nc" id="L2086">      symbolTable.addConstantUtf8(Constants.CODE);</span>
+      // The Code attribute has 6 header bytes, plus 2, 2, 4 and 2 bytes respectively for max_stack,
+      // max_locals, code_length and attributes_count, plus the bytecode and the exception table.
+<span class="nc" id="L2089">      size += 16 + code.length + Handler.getExceptionTableSize(firstHandler);</span>
+<span class="nc bnc" id="L2090" title="All 2 branches missed.">      if (stackMapTableEntries != null) {</span>
+<span class="nc bnc" id="L2091" title="All 2 branches missed.">        boolean useStackMapTable = symbolTable.getMajorVersion() &gt;= Opcodes.V1_6;</span>
+<span class="nc bnc" id="L2092" title="All 2 branches missed.">        symbolTable.addConstantUtf8(useStackMapTable ? Constants.STACK_MAP_TABLE : &quot;StackMap&quot;);</span>
+        // 6 header bytes and 2 bytes for number_of_entries.
+<span class="nc" id="L2094">        size += 8 + stackMapTableEntries.length;</span>
+      }
+<span class="nc bnc" id="L2096" title="All 2 branches missed.">      if (lineNumberTable != null) {</span>
+<span class="nc" id="L2097">        symbolTable.addConstantUtf8(Constants.LINE_NUMBER_TABLE);</span>
+        // 6 header bytes and 2 bytes for line_number_table_length.
+<span class="nc" id="L2099">        size += 8 + lineNumberTable.length;</span>
+      }
+<span class="nc bnc" id="L2101" title="All 2 branches missed.">      if (localVariableTable != null) {</span>
+<span class="nc" id="L2102">        symbolTable.addConstantUtf8(Constants.LOCAL_VARIABLE_TABLE);</span>
+        // 6 header bytes and 2 bytes for local_variable_table_length.
+<span class="nc" id="L2104">        size += 8 + localVariableTable.length;</span>
+      }
+<span class="nc bnc" id="L2106" title="All 2 branches missed.">      if (localVariableTypeTable != null) {</span>
+<span class="nc" id="L2107">        symbolTable.addConstantUtf8(Constants.LOCAL_VARIABLE_TYPE_TABLE);</span>
+        // 6 header bytes and 2 bytes for local_variable_type_table_length.
+<span class="nc" id="L2109">        size += 8 + localVariableTypeTable.length;</span>
+      }
+<span class="nc bnc" id="L2111" title="All 2 branches missed.">      if (lastCodeRuntimeVisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2112">        size +=</span>
+<span class="nc" id="L2113">            lastCodeRuntimeVisibleTypeAnnotation.computeAnnotationsSize(</span>
+                Constants.RUNTIME_VISIBLE_TYPE_ANNOTATIONS);
+      }
+<span class="nc bnc" id="L2116" title="All 2 branches missed.">      if (lastCodeRuntimeInvisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2117">        size +=</span>
+<span class="nc" id="L2118">            lastCodeRuntimeInvisibleTypeAnnotation.computeAnnotationsSize(</span>
+                Constants.RUNTIME_INVISIBLE_TYPE_ANNOTATIONS);
+      }
+<span class="nc bnc" id="L2121" title="All 2 branches missed.">      if (firstCodeAttribute != null) {</span>
+<span class="nc" id="L2122">        size +=</span>
+<span class="nc" id="L2123">            firstCodeAttribute.computeAttributesSize(</span>
+                symbolTable, code.data, code.length, maxStack, maxLocals);
+      }
+    }
+<span class="nc bnc" id="L2127" title="All 2 branches missed.">    if (numberOfExceptions &gt; 0) {</span>
+<span class="nc" id="L2128">      symbolTable.addConstantUtf8(Constants.EXCEPTIONS);</span>
+<span class="nc" id="L2129">      size += 8 + 2 * numberOfExceptions;</span>
+    }
+<span class="nc" id="L2131">    size += Attribute.computeAttributesSize(symbolTable, accessFlags, signatureIndex);</span>
+<span class="nc" id="L2132">    size +=</span>
+<span class="nc" id="L2133">        AnnotationWriter.computeAnnotationsSize(</span>
+            lastRuntimeVisibleAnnotation,
+            lastRuntimeInvisibleAnnotation,
+            lastRuntimeVisibleTypeAnnotation,
+            lastRuntimeInvisibleTypeAnnotation);
+<span class="nc bnc" id="L2138" title="All 2 branches missed.">    if (lastRuntimeVisibleParameterAnnotations != null) {</span>
+<span class="nc bnc" id="L2139" title="All 2 branches missed.">      size +=</span>
+<span class="nc" id="L2140">          AnnotationWriter.computeParameterAnnotationsSize(</span>
+              Constants.RUNTIME_VISIBLE_PARAMETER_ANNOTATIONS,
+              lastRuntimeVisibleParameterAnnotations,
+              visibleAnnotableParameterCount == 0
+                  ? lastRuntimeVisibleParameterAnnotations.length
+                  : visibleAnnotableParameterCount);
+    }
+<span class="nc bnc" id="L2147" title="All 2 branches missed.">    if (lastRuntimeInvisibleParameterAnnotations != null) {</span>
+<span class="nc bnc" id="L2148" title="All 2 branches missed.">      size +=</span>
+<span class="nc" id="L2149">          AnnotationWriter.computeParameterAnnotationsSize(</span>
+              Constants.RUNTIME_INVISIBLE_PARAMETER_ANNOTATIONS,
+              lastRuntimeInvisibleParameterAnnotations,
+              invisibleAnnotableParameterCount == 0
+                  ? lastRuntimeInvisibleParameterAnnotations.length
+                  : invisibleAnnotableParameterCount);
+    }
+<span class="nc bnc" id="L2156" title="All 2 branches missed.">    if (defaultValue != null) {</span>
+<span class="nc" id="L2157">      symbolTable.addConstantUtf8(Constants.ANNOTATION_DEFAULT);</span>
+<span class="nc" id="L2158">      size += 6 + defaultValue.length;</span>
+    }
+<span class="nc bnc" id="L2160" title="All 2 branches missed.">    if (parameters != null) {</span>
+<span class="nc" id="L2161">      symbolTable.addConstantUtf8(Constants.METHOD_PARAMETERS);</span>
+      // 6 header bytes and 1 byte for parameters_count.
+<span class="nc" id="L2163">      size += 7 + parameters.length;</span>
+    }
+<span class="nc bnc" id="L2165" title="All 2 branches missed.">    if (firstAttribute != null) {</span>
+<span class="nc" id="L2166">      size += firstAttribute.computeAttributesSize(symbolTable);</span>
+    }
+<span class="nc" id="L2168">    return size;</span>
+  }
+
+  /**
+   * Puts the content of the method_info JVMS structure generated by this MethodWriter into the
+   * given ByteVector.
+   *
+   * @param output where the method_info structure must be put.
+   */
+  void putMethodInfo(final ByteVector output) {
+<span class="nc bnc" id="L2178" title="All 2 branches missed.">    boolean useSyntheticAttribute = symbolTable.getMajorVersion() &lt; Opcodes.V1_5;</span>
+<span class="nc bnc" id="L2179" title="All 2 branches missed.">    int mask = useSyntheticAttribute ? Opcodes.ACC_SYNTHETIC : 0;</span>
+<span class="nc" id="L2180">    output.putShort(accessFlags &amp; ~mask).putShort(nameIndex).putShort(descriptorIndex);</span>
+    // If this method_info must be copied from an existing one, copy it now and return early.
+<span class="nc bnc" id="L2182" title="All 2 branches missed.">    if (sourceOffset != 0) {</span>
+<span class="nc" id="L2183">      output.putByteArray(symbolTable.getSource().classFileBuffer, sourceOffset, sourceLength);</span>
+<span class="nc" id="L2184">      return;</span>
+    }
+    // For ease of reference, we use here the same attribute order as in Section 4.7 of the JVMS.
+<span class="nc" id="L2187">    int attributeCount = 0;</span>
+<span class="nc bnc" id="L2188" title="All 2 branches missed.">    if (code.length &gt; 0) {</span>
+<span class="nc" id="L2189">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2191" title="All 2 branches missed.">    if (numberOfExceptions &gt; 0) {</span>
+<span class="nc" id="L2192">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2194" title="All 4 branches missed.">    if ((accessFlags &amp; Opcodes.ACC_SYNTHETIC) != 0 &amp;&amp; useSyntheticAttribute) {</span>
+<span class="nc" id="L2195">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2197" title="All 2 branches missed.">    if (signatureIndex != 0) {</span>
+<span class="nc" id="L2198">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2200" title="All 2 branches missed.">    if ((accessFlags &amp; Opcodes.ACC_DEPRECATED) != 0) {</span>
+<span class="nc" id="L2201">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2203" title="All 2 branches missed.">    if (lastRuntimeVisibleAnnotation != null) {</span>
+<span class="nc" id="L2204">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2206" title="All 2 branches missed.">    if (lastRuntimeInvisibleAnnotation != null) {</span>
+<span class="nc" id="L2207">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2209" title="All 2 branches missed.">    if (lastRuntimeVisibleParameterAnnotations != null) {</span>
+<span class="nc" id="L2210">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2212" title="All 2 branches missed.">    if (lastRuntimeInvisibleParameterAnnotations != null) {</span>
+<span class="nc" id="L2213">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2215" title="All 2 branches missed.">    if (lastRuntimeVisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2216">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2218" title="All 2 branches missed.">    if (lastRuntimeInvisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2219">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2221" title="All 2 branches missed.">    if (defaultValue != null) {</span>
+<span class="nc" id="L2222">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2224" title="All 2 branches missed.">    if (parameters != null) {</span>
+<span class="nc" id="L2225">      ++attributeCount;</span>
+    }
+<span class="nc bnc" id="L2227" title="All 2 branches missed.">    if (firstAttribute != null) {</span>
+<span class="nc" id="L2228">      attributeCount += firstAttribute.getAttributeCount();</span>
+    }
+    // For ease of reference, we use here the same attribute order as in Section 4.7 of the JVMS.
+<span class="nc" id="L2231">    output.putShort(attributeCount);</span>
+<span class="nc bnc" id="L2232" title="All 2 branches missed.">    if (code.length &gt; 0) {</span>
+      // 2, 2, 4 and 2 bytes respectively for max_stack, max_locals, code_length and
+      // attributes_count, plus the bytecode and the exception table.
+<span class="nc" id="L2235">      int size = 10 + code.length + Handler.getExceptionTableSize(firstHandler);</span>
+<span class="nc" id="L2236">      int codeAttributeCount = 0;</span>
+<span class="nc bnc" id="L2237" title="All 2 branches missed.">      if (stackMapTableEntries != null) {</span>
+        // 6 header bytes and 2 bytes for number_of_entries.
+<span class="nc" id="L2239">        size += 8 + stackMapTableEntries.length;</span>
+<span class="nc" id="L2240">        ++codeAttributeCount;</span>
+      }
+<span class="nc bnc" id="L2242" title="All 2 branches missed.">      if (lineNumberTable != null) {</span>
+        // 6 header bytes and 2 bytes for line_number_table_length.
+<span class="nc" id="L2244">        size += 8 + lineNumberTable.length;</span>
+<span class="nc" id="L2245">        ++codeAttributeCount;</span>
+      }
+<span class="nc bnc" id="L2247" title="All 2 branches missed.">      if (localVariableTable != null) {</span>
+        // 6 header bytes and 2 bytes for local_variable_table_length.
+<span class="nc" id="L2249">        size += 8 + localVariableTable.length;</span>
+<span class="nc" id="L2250">        ++codeAttributeCount;</span>
+      }
+<span class="nc bnc" id="L2252" title="All 2 branches missed.">      if (localVariableTypeTable != null) {</span>
+        // 6 header bytes and 2 bytes for local_variable_type_table_length.
+<span class="nc" id="L2254">        size += 8 + localVariableTypeTable.length;</span>
+<span class="nc" id="L2255">        ++codeAttributeCount;</span>
+      }
+<span class="nc bnc" id="L2257" title="All 2 branches missed.">      if (lastCodeRuntimeVisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2258">        size +=</span>
+<span class="nc" id="L2259">            lastCodeRuntimeVisibleTypeAnnotation.computeAnnotationsSize(</span>
+                Constants.RUNTIME_VISIBLE_TYPE_ANNOTATIONS);
+<span class="nc" id="L2261">        ++codeAttributeCount;</span>
+      }
+<span class="nc bnc" id="L2263" title="All 2 branches missed.">      if (lastCodeRuntimeInvisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2264">        size +=</span>
+<span class="nc" id="L2265">            lastCodeRuntimeInvisibleTypeAnnotation.computeAnnotationsSize(</span>
+                Constants.RUNTIME_INVISIBLE_TYPE_ANNOTATIONS);
+<span class="nc" id="L2267">        ++codeAttributeCount;</span>
+      }
+<span class="nc bnc" id="L2269" title="All 2 branches missed.">      if (firstCodeAttribute != null) {</span>
+<span class="nc" id="L2270">        size +=</span>
+<span class="nc" id="L2271">            firstCodeAttribute.computeAttributesSize(</span>
+                symbolTable, code.data, code.length, maxStack, maxLocals);
+<span class="nc" id="L2273">        codeAttributeCount += firstCodeAttribute.getAttributeCount();</span>
+      }
+<span class="nc" id="L2275">      output</span>
+<span class="nc" id="L2276">          .putShort(symbolTable.addConstantUtf8(Constants.CODE))</span>
+<span class="nc" id="L2277">          .putInt(size)</span>
+<span class="nc" id="L2278">          .putShort(maxStack)</span>
+<span class="nc" id="L2279">          .putShort(maxLocals)</span>
+<span class="nc" id="L2280">          .putInt(code.length)</span>
+<span class="nc" id="L2281">          .putByteArray(code.data, 0, code.length);</span>
+<span class="nc" id="L2282">      Handler.putExceptionTable(firstHandler, output);</span>
+<span class="nc" id="L2283">      output.putShort(codeAttributeCount);</span>
+<span class="nc bnc" id="L2284" title="All 2 branches missed.">      if (stackMapTableEntries != null) {</span>
+<span class="nc bnc" id="L2285" title="All 2 branches missed.">        boolean useStackMapTable = symbolTable.getMajorVersion() &gt;= Opcodes.V1_6;</span>
+<span class="nc bnc" id="L2286" title="All 2 branches missed.">        output</span>
+<span class="nc" id="L2287">            .putShort(</span>
+<span class="nc" id="L2288">                symbolTable.addConstantUtf8(</span>
+                    useStackMapTable ? Constants.STACK_MAP_TABLE : &quot;StackMap&quot;))
+<span class="nc" id="L2290">            .putInt(2 + stackMapTableEntries.length)</span>
+<span class="nc" id="L2291">            .putShort(stackMapTableNumberOfEntries)</span>
+<span class="nc" id="L2292">            .putByteArray(stackMapTableEntries.data, 0, stackMapTableEntries.length);</span>
+      }
+<span class="nc bnc" id="L2294" title="All 2 branches missed.">      if (lineNumberTable != null) {</span>
+<span class="nc" id="L2295">        output</span>
+<span class="nc" id="L2296">            .putShort(symbolTable.addConstantUtf8(Constants.LINE_NUMBER_TABLE))</span>
+<span class="nc" id="L2297">            .putInt(2 + lineNumberTable.length)</span>
+<span class="nc" id="L2298">            .putShort(lineNumberTableLength)</span>
+<span class="nc" id="L2299">            .putByteArray(lineNumberTable.data, 0, lineNumberTable.length);</span>
+      }
+<span class="nc bnc" id="L2301" title="All 2 branches missed.">      if (localVariableTable != null) {</span>
+<span class="nc" id="L2302">        output</span>
+<span class="nc" id="L2303">            .putShort(symbolTable.addConstantUtf8(Constants.LOCAL_VARIABLE_TABLE))</span>
+<span class="nc" id="L2304">            .putInt(2 + localVariableTable.length)</span>
+<span class="nc" id="L2305">            .putShort(localVariableTableLength)</span>
+<span class="nc" id="L2306">            .putByteArray(localVariableTable.data, 0, localVariableTable.length);</span>
+      }
+<span class="nc bnc" id="L2308" title="All 2 branches missed.">      if (localVariableTypeTable != null) {</span>
+<span class="nc" id="L2309">        output</span>
+<span class="nc" id="L2310">            .putShort(symbolTable.addConstantUtf8(Constants.LOCAL_VARIABLE_TYPE_TABLE))</span>
+<span class="nc" id="L2311">            .putInt(2 + localVariableTypeTable.length)</span>
+<span class="nc" id="L2312">            .putShort(localVariableTypeTableLength)</span>
+<span class="nc" id="L2313">            .putByteArray(localVariableTypeTable.data, 0, localVariableTypeTable.length);</span>
+      }
+<span class="nc bnc" id="L2315" title="All 2 branches missed.">      if (lastCodeRuntimeVisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2316">        lastCodeRuntimeVisibleTypeAnnotation.putAnnotations(</span>
+<span class="nc" id="L2317">            symbolTable.addConstantUtf8(Constants.RUNTIME_VISIBLE_TYPE_ANNOTATIONS), output);</span>
+      }
+<span class="nc bnc" id="L2319" title="All 2 branches missed.">      if (lastCodeRuntimeInvisibleTypeAnnotation != null) {</span>
+<span class="nc" id="L2320">        lastCodeRuntimeInvisibleTypeAnnotation.putAnnotations(</span>
+<span class="nc" id="L2321">            symbolTable.addConstantUtf8(Constants.RUNTIME_INVISIBLE_TYPE_ANNOTATIONS), output);</span>
+      }
+<span class="nc bnc" id="L2323" title="All 2 branches missed.">      if (firstCodeAttribute != null) {</span>
+<span class="nc" id="L2324">        firstCodeAttribute.putAttributes(</span>
+            symbolTable, code.data, code.length, maxStack, maxLocals, output);
+      }
+    }
+<span class="nc bnc" id="L2328" title="All 2 branches missed.">    if (numberOfExceptions &gt; 0) {</span>
+<span class="nc" id="L2329">      output</span>
+<span class="nc" id="L2330">          .putShort(symbolTable.addConstantUtf8(Constants.EXCEPTIONS))</span>
+<span class="nc" id="L2331">          .putInt(2 + 2 * numberOfExceptions)</span>
+<span class="nc" id="L2332">          .putShort(numberOfExceptions);</span>
+<span class="nc bnc" id="L2333" title="All 2 branches missed.">      for (int exceptionIndex : exceptionIndexTable) {</span>
+<span class="nc" id="L2334">        output.putShort(exceptionIndex);</span>
+      }
+    }
+<span class="nc" id="L2337">    Attribute.putAttributes(symbolTable, accessFlags, signatureIndex, output);</span>
+<span class="nc" id="L2338">    AnnotationWriter.putAnnotations(</span>
+        symbolTable,
+        lastRuntimeVisibleAnnotation,
+        lastRuntimeInvisibleAnnotation,
+        lastRuntimeVisibleTypeAnnotation,
+        lastRuntimeInvisibleTypeAnnotation,
+        output);
+<span class="nc bnc" id="L2345" title="All 2 branches missed.">    if (lastRuntimeVisibleParameterAnnotations != null) {</span>
+<span class="nc" id="L2346">      AnnotationWriter.putParameterAnnotations(</span>
+<span class="nc bnc" id="L2347" title="All 2 branches missed.">          symbolTable.addConstantUtf8(Constants.RUNTIME_VISIBLE_PARAMETER_ANNOTATIONS),</span>
+          lastRuntimeVisibleParameterAnnotations,
+          visibleAnnotableParameterCount == 0
+              ? lastRuntimeVisibleParameterAnnotations.length
+              : visibleAnnotableParameterCount,
+          output);
+    }
+<span class="nc bnc" id="L2354" title="All 2 branches missed.">    if (lastRuntimeInvisibleParameterAnnotations != null) {</span>
+<span class="nc" id="L2355">      AnnotationWriter.putParameterAnnotations(</span>
+<span class="nc bnc" id="L2356" title="All 2 branches missed.">          symbolTable.addConstantUtf8(Constants.RUNTIME_INVISIBLE_PARAMETER_ANNOTATIONS),</span>
+          lastRuntimeInvisibleParameterAnnotations,
+          invisibleAnnotableParameterCount == 0
+              ? lastRuntimeInvisibleParameterAnnotations.length
+              : invisibleAnnotableParameterCount,
+          output);
+    }
+<span class="nc bnc" id="L2363" title="All 2 branches missed.">    if (defaultValue != null) {</span>
+<span class="nc" id="L2364">      output</span>
+<span class="nc" id="L2365">          .putShort(symbolTable.addConstantUtf8(Constants.ANNOTATION_DEFAULT))</span>
+<span class="nc" id="L2366">          .putInt(defaultValue.length)</span>
+<span class="nc" id="L2367">          .putByteArray(defaultValue.data, 0, defaultValue.length);</span>
+    }
+<span class="nc bnc" id="L2369" title="All 2 branches missed.">    if (parameters != null) {</span>
+<span class="nc" id="L2370">      output</span>
+<span class="nc" id="L2371">          .putShort(symbolTable.addConstantUtf8(Constants.METHOD_PARAMETERS))</span>
+<span class="nc" id="L2372">          .putInt(1 + parameters.length)</span>
+<span class="nc" id="L2373">          .putByte(parametersCount)</span>
+<span class="nc" id="L2374">          .putByteArray(parameters.data, 0, parameters.length);</span>
+    }
+<span class="nc bnc" id="L2376" title="All 2 branches missed.">    if (firstAttribute != null) {</span>
+<span class="nc" id="L2377">      firstAttribute.putAttributes(symbolTable, output);</span>
+    }
+<span class="nc" id="L2379">  }</span>
+
+  /**
+   * Collects the attributes of this method into the given set of attribute prototypes.
+   *
+   * @param attributePrototypes a set of attribute prototypes.
+   */
+  final void collectAttributePrototypes(final Attribute.Set attributePrototypes) {
+<span class="nc" id="L2387">    attributePrototypes.addAttributes(firstAttribute);</span>
+<span class="nc" id="L2388">    attributePrototypes.addAttributes(firstCodeAttribute);</span>
+<span class="nc" id="L2389">  }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

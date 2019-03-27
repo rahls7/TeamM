@@ -1,0 +1,647 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractJmsListeningContainer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.listener</a> &gt; <span class="el_source">AbstractJmsListeningContainer.java</span></div><h1>AbstractJmsListeningContainer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.listener;
+
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import javax.jms.Connection;
+import javax.jms.JMSException;
+
+import org.springframework.beans.factory.BeanNameAware;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.jms.JmsException;
+import org.springframework.jms.connection.ConnectionFactoryUtils;
+import org.springframework.jms.support.JmsUtils;
+import org.springframework.jms.support.destination.JmsDestinationAccessor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Common base class for all containers which need to implement listening
+ * based on a JMS Connection (either shared or freshly obtained for each attempt).
+ * Inherits basic Connection and Session configuration handling from the
+ * {@link org.springframework.jms.support.JmsAccessor} base class.
+ *
+ * &lt;p&gt;This class provides basic lifecycle management, in particular management
+ * of a shared JMS Connection. Subclasses are supposed to plug into this
+ * lifecycle, implementing the {@link #sharedConnectionEnabled()} as well
+ * as the {@link #doInitialize()} and {@link #doShutdown()} template methods.
+ *
+ * &lt;p&gt;This base class does not assume any specific listener programming model
+ * or listener invoker mechanism. It just provides the general runtime
+ * lifecycle management needed for any kind of JMS-based listening mechanism
+ * that operates on a JMS Connection/Session.
+ *
+ * &lt;p&gt;For a concrete listener programming model, check out the
+ * {@link AbstractMessageListenerContainer} subclass. For a concrete listener
+ * invoker mechanism, check out the {@link DefaultMessageListenerContainer} class.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0.3
+ * @see #sharedConnectionEnabled()
+ * @see #doInitialize()
+ * @see #doShutdown()
+ */
+<span class="fc" id="L61">public abstract class AbstractJmsListeningContainer extends JmsDestinationAccessor</span>
+		implements BeanNameAware, DisposableBean, SmartLifecycle {
+
+	@Nullable
+	private String clientId;
+
+<span class="fc" id="L67">	private boolean autoStartup = true;</span>
+
+<span class="fc" id="L69">	private int phase = DEFAULT_PHASE;</span>
+
+	@Nullable
+	private String beanName;
+
+	@Nullable
+	private Connection sharedConnection;
+
+<span class="fc" id="L77">	private boolean sharedConnectionStarted = false;</span>
+
+<span class="fc" id="L79">	protected final Object sharedConnectionMonitor = new Object();</span>
+
+<span class="fc" id="L81">	private boolean active = false;</span>
+
+<span class="fc" id="L83">	private volatile boolean running = false;</span>
+
+<span class="fc" id="L85">	private final List&lt;Object&gt; pausedTasks = new LinkedList&lt;&gt;();</span>
+
+<span class="fc" id="L87">	protected final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Specify the JMS client ID for a shared Connection created and used
+	 * by this container.
+	 * &lt;p&gt;Note that client IDs need to be unique among all active Connections
+	 * of the underlying JMS provider. Furthermore, a client ID can only be
+	 * assigned if the original ConnectionFactory hasn't already assigned one.
+	 * @see javax.jms.Connection#setClientID
+	 * @see #setConnectionFactory
+	 */
+	public void setClientId(@Nullable String clientId) {
+<span class="fc" id="L100">		this.clientId = clientId;</span>
+<span class="fc" id="L101">	}</span>
+
+	/**
+	 * Return the JMS client ID for the shared Connection created and used
+	 * by this container, if any.
+	 */
+	@Nullable
+	public String getClientId() {
+<span class="fc" id="L109">		return this.clientId;</span>
+	}
+
+	/**
+	 * Set whether to automatically start the container after initialization.
+	 * &lt;p&gt;Default is &quot;true&quot;; set this to &quot;false&quot; to allow for manual startup
+	 * through the {@link #start()} method.
+	 */
+	public void setAutoStartup(boolean autoStartup) {
+<span class="fc" id="L118">		this.autoStartup = autoStartup;</span>
+<span class="fc" id="L119">	}</span>
+
+	@Override
+	public boolean isAutoStartup() {
+<span class="fc" id="L123">		return this.autoStartup;</span>
+	}
+
+	/**
+	 * Specify the phase in which this container should be started and
+	 * stopped. The startup order proceeds from lowest to highest, and
+	 * the shutdown order is the reverse of that. By default this value
+	 * is Integer.MAX_VALUE meaning that this container starts as late
+	 * as possible and stops as soon as possible.
+	 */
+	public void setPhase(int phase) {
+<span class="fc" id="L134">		this.phase = phase;</span>
+<span class="fc" id="L135">	}</span>
+
+	/**
+	 * Return the phase in which this container will be started and stopped.
+	 */
+	@Override
+	public int getPhase() {
+<span class="fc" id="L142">		return this.phase;</span>
+	}
+
+	@Override
+	public void setBeanName(@Nullable String beanName) {
+<span class="fc" id="L147">		this.beanName = beanName;</span>
+<span class="fc" id="L148">	}</span>
+
+	/**
+	 * Return the bean name that this listener container has been assigned
+	 * in its containing bean factory, if any.
+	 */
+	@Nullable
+	protected final String getBeanName() {
+<span class="fc" id="L156">		return this.beanName;</span>
+	}
+
+
+	/**
+	 * Delegates to {@link #validateConfiguration()} and {@link #initialize()}.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="fc" id="L165">		super.afterPropertiesSet();</span>
+<span class="fc" id="L166">		validateConfiguration();</span>
+<span class="fc" id="L167">		initialize();</span>
+<span class="fc" id="L168">	}</span>
+
+	/**
+	 * Validate the configuration of this container.
+	 * &lt;p&gt;The default implementation is empty. To be overridden in subclasses.
+	 */
+	protected void validateConfiguration() {
+<span class="nc" id="L175">	}</span>
+
+	/**
+	 * Calls {@link #shutdown()} when the BeanFactory destroys the container instance.
+	 * @see #shutdown()
+	 */
+	@Override
+	public void destroy() {
+<span class="fc" id="L183">		shutdown();</span>
+<span class="fc" id="L184">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Lifecycle methods for starting and stopping the container
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Initialize this container.
+	 * &lt;p&gt;Creates a JMS Connection, starts the {@link javax.jms.Connection}
+	 * (if {@link #setAutoStartup(boolean) &quot;autoStartup&quot;} hasn't been turned off),
+	 * and calls {@link #doInitialize()}.
+	 * @throws org.springframework.jms.JmsException if startup failed
+	 */
+	public void initialize() throws JmsException {
+		try {
+<span class="fc" id="L200">			synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L201">				this.active = true;</span>
+<span class="fc" id="L202">				this.lifecycleMonitor.notifyAll();</span>
+<span class="fc" id="L203">			}</span>
+<span class="fc" id="L204">			doInitialize();</span>
+		}
+<span class="nc" id="L206">		catch (JMSException ex) {</span>
+<span class="nc" id="L207">			synchronized (this.sharedConnectionMonitor) {</span>
+<span class="nc" id="L208">				ConnectionFactoryUtils.releaseConnection(this.sharedConnection, getConnectionFactory(), this.autoStartup);</span>
+<span class="nc" id="L209">				this.sharedConnection = null;</span>
+<span class="nc" id="L210">			}</span>
+<span class="nc" id="L211">			throw convertJmsAccessException(ex);</span>
+<span class="fc" id="L212">		}</span>
+<span class="fc" id="L213">	}</span>
+
+	/**
+	 * Stop the shared Connection, call {@link #doShutdown()},
+	 * and close this container.
+	 * @throws JmsException if shutdown failed
+	 */
+	public void shutdown() throws JmsException {
+<span class="fc" id="L221">		logger.debug(&quot;Shutting down JMS listener container&quot;);</span>
+		boolean wasRunning;
+<span class="fc" id="L223">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L224">			wasRunning = this.running;</span>
+<span class="fc" id="L225">			this.running = false;</span>
+<span class="fc" id="L226">			this.active = false;</span>
+<span class="fc" id="L227">			this.pausedTasks.clear();</span>
+<span class="fc" id="L228">			this.lifecycleMonitor.notifyAll();</span>
+<span class="fc" id="L229">		}</span>
+
+		// Stop shared Connection early, if necessary.
+<span class="pc bpc" id="L232" title="1 of 4 branches missed.">		if (wasRunning &amp;&amp; sharedConnectionEnabled()) {</span>
+			try {
+<span class="fc" id="L234">				stopSharedConnection();</span>
+			}
+<span class="nc" id="L236">			catch (Throwable ex) {</span>
+<span class="nc" id="L237">				logger.debug(&quot;Could not stop JMS Connection on shutdown&quot;, ex);</span>
+<span class="fc" id="L238">			}</span>
+		}
+
+		// Shut down the invokers.
+		try {
+<span class="fc" id="L243">			doShutdown();</span>
+		}
+<span class="nc" id="L245">		catch (JMSException ex) {</span>
+<span class="nc" id="L246">			throw convertJmsAccessException(ex);</span>
+		}
+		finally {
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">			if (sharedConnectionEnabled()) {</span>
+<span class="fc" id="L250">				synchronized (this.sharedConnectionMonitor) {</span>
+<span class="fc" id="L251">					ConnectionFactoryUtils.releaseConnection(this.sharedConnection, getConnectionFactory(), false);</span>
+<span class="fc" id="L252">					this.sharedConnection = null;</span>
+<span class="fc" id="L253">				}</span>
+			}
+		}
+<span class="fc" id="L256">	}</span>
+
+	/**
+	 * Return whether this container is currently active,
+	 * that is, whether it has been set up but not shut down yet.
+	 */
+	public final boolean isActive() {
+<span class="fc" id="L263">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L264">			return this.active;</span>
+		}
+	}
+
+	/**
+	 * Start this container.
+	 * @throws JmsException if starting failed
+	 * @see #doStart
+	 */
+	@Override
+	public void start() throws JmsException {
+		try {
+<span class="fc" id="L276">			doStart();</span>
+		}
+<span class="nc" id="L278">		catch (JMSException ex) {</span>
+<span class="nc" id="L279">			throw convertJmsAccessException(ex);</span>
+<span class="fc" id="L280">		}</span>
+<span class="fc" id="L281">	}</span>
+
+	/**
+	 * Start the shared Connection, if any, and notify all invoker tasks.
+	 * @throws JMSException if thrown by JMS API methods
+	 * @see #startSharedConnection
+	 */
+	protected void doStart() throws JMSException {
+		// Lazily establish a shared Connection, if necessary.
+<span class="fc bfc" id="L290" title="All 2 branches covered.">		if (sharedConnectionEnabled()) {</span>
+<span class="fc" id="L291">			establishSharedConnection();</span>
+		}
+
+		// Reschedule paused tasks, if any.
+<span class="fc" id="L295">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L296">			this.running = true;</span>
+<span class="fc" id="L297">			this.lifecycleMonitor.notifyAll();</span>
+<span class="fc" id="L298">			resumePausedTasks();</span>
+<span class="fc" id="L299">		}</span>
+
+		// Start the shared Connection, if any.
+<span class="fc bfc" id="L302" title="All 2 branches covered.">		if (sharedConnectionEnabled()) {</span>
+<span class="fc" id="L303">			startSharedConnection();</span>
+		}
+<span class="fc" id="L305">	}</span>
+
+	/**
+	 * Stop this container.
+	 * @throws JmsException if stopping failed
+	 * @see #doStop
+	 */
+	@Override
+	public void stop() throws JmsException {
+		try {
+<span class="fc" id="L315">			doStop();</span>
+		}
+<span class="nc" id="L317">		catch (JMSException ex) {</span>
+<span class="nc" id="L318">			throw convertJmsAccessException(ex);</span>
+<span class="fc" id="L319">		}</span>
+<span class="fc" id="L320">	}</span>
+
+	/**
+	 * Notify all invoker tasks and stop the shared Connection, if any.
+	 * @throws JMSException if thrown by JMS API methods
+	 * @see #stopSharedConnection
+	 */
+	protected void doStop() throws JMSException {
+<span class="fc" id="L328">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L329">			this.running = false;</span>
+<span class="fc" id="L330">			this.lifecycleMonitor.notifyAll();</span>
+<span class="fc" id="L331">		}</span>
+
+<span class="fc bfc" id="L333" title="All 2 branches covered.">		if (sharedConnectionEnabled()) {</span>
+<span class="fc" id="L334">			stopSharedConnection();</span>
+		}
+<span class="fc" id="L336">	}</span>
+
+	/**
+	 * Determine whether this container is currently running,
+	 * that is, whether it has been started and not stopped yet.
+	 * @see #start()
+	 * @see #stop()
+	 * @see #runningAllowed()
+	 */
+	@Override
+	public final boolean isRunning() {
+<span class="pc bpc" id="L347" title="1 of 4 branches missed.">		return (this.running &amp;&amp; runningAllowed());</span>
+	}
+
+	/**
+	 * Check whether this container's listeners are generally allowed to run.
+	 * &lt;p&gt;This implementation always returns {@code true}; the default 'running'
+	 * state is purely determined by {@link #start()} / {@link #stop()}.
+	 * &lt;p&gt;Subclasses may override this method to check against temporary
+	 * conditions that prevent listeners from actually running. In other words,
+	 * they may apply further restrictions to the 'running' state, returning
+	 * {@code false} if such a restriction prevents listeners from running.
+	 */
+	protected boolean runningAllowed() {
+<span class="fc" id="L360">		return true;</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Management of a shared JMS Connection
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Establish a shared Connection for this container.
+	 * &lt;p&gt;The default implementation delegates to {@link #createSharedConnection()},
+	 * which does one immediate attempt and throws an exception if it fails.
+	 * Can be overridden to have a recovery process in place, retrying
+	 * until a Connection can be successfully established.
+	 * @throws JMSException if thrown by JMS API methods
+	 */
+	protected void establishSharedConnection() throws JMSException {
+<span class="fc" id="L377">		synchronized (this.sharedConnectionMonitor) {</span>
+<span class="fc bfc" id="L378" title="All 2 branches covered.">			if (this.sharedConnection == null) {</span>
+<span class="fc" id="L379">				this.sharedConnection = createSharedConnection();</span>
+<span class="fc" id="L380">				logger.debug(&quot;Established shared JMS Connection&quot;);</span>
+			}
+<span class="fc" id="L382">		}</span>
+<span class="fc" id="L383">	}</span>
+
+	/**
+	 * Refresh the shared Connection that this container holds.
+	 * &lt;p&gt;Called on startup and also after an infrastructure exception
+	 * that occurred during invoker setup and/or execution.
+	 * @throws JMSException if thrown by JMS API methods
+	 */
+	protected final void refreshSharedConnection() throws JMSException {
+<span class="nc" id="L392">		synchronized (this.sharedConnectionMonitor) {</span>
+<span class="nc" id="L393">			ConnectionFactoryUtils.releaseConnection(</span>
+<span class="nc" id="L394">					this.sharedConnection, getConnectionFactory(), this.sharedConnectionStarted);</span>
+<span class="nc" id="L395">			this.sharedConnection = null;</span>
+<span class="nc" id="L396">			this.sharedConnection = createSharedConnection();</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">			if (this.sharedConnectionStarted) {</span>
+<span class="nc" id="L398">				this.sharedConnection.start();</span>
+			}
+<span class="nc" id="L400">		}</span>
+<span class="nc" id="L401">	}</span>
+
+	/**
+	 * Create a shared Connection for this container.
+	 * &lt;p&gt;The default implementation creates a standard Connection
+	 * and prepares it through {@link #prepareSharedConnection}.
+	 * @return the prepared Connection
+	 * @throws JMSException if the creation failed
+	 */
+	protected Connection createSharedConnection() throws JMSException {
+<span class="fc" id="L411">		Connection con = createConnection();</span>
+		try {
+<span class="fc" id="L413">			prepareSharedConnection(con);</span>
+<span class="fc" id="L414">			return con;</span>
+		}
+<span class="nc" id="L416">		catch (JMSException ex) {</span>
+<span class="nc" id="L417">			JmsUtils.closeConnection(con);</span>
+<span class="nc" id="L418">			throw ex;</span>
+		}
+	}
+
+	/**
+	 * Prepare the given Connection, which is about to be registered
+	 * as shared Connection for this container.
+	 * &lt;p&gt;The default implementation sets the specified client id, if any.
+	 * Subclasses can override this to apply further settings.
+	 * @param connection the Connection to prepare
+	 * @throws JMSException if the preparation efforts failed
+	 * @see #getClientId()
+	 */
+	protected void prepareSharedConnection(Connection connection) throws JMSException {
+<span class="fc" id="L432">		String clientId = getClientId();</span>
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">		if (clientId != null) {</span>
+<span class="nc" id="L434">			connection.setClientID(clientId);</span>
+		}
+<span class="fc" id="L436">	}</span>
+
+	/**
+	 * Start the shared Connection.
+	 * @throws JMSException if thrown by JMS API methods
+	 * @see javax.jms.Connection#start()
+	 */
+	protected void startSharedConnection() throws JMSException {
+<span class="fc" id="L444">		synchronized (this.sharedConnectionMonitor) {</span>
+<span class="fc" id="L445">			this.sharedConnectionStarted = true;</span>
+<span class="fc bfc" id="L446" title="All 2 branches covered.">			if (this.sharedConnection != null) {</span>
+				try {
+<span class="fc" id="L448">					this.sharedConnection.start();</span>
+				}
+<span class="nc" id="L450">				catch (javax.jms.IllegalStateException ex) {</span>
+<span class="nc" id="L451">					logger.debug(&quot;Ignoring Connection start exception - assuming already started: &quot; + ex);</span>
+<span class="fc" id="L452">				}</span>
+			}
+<span class="fc" id="L454">		}</span>
+<span class="fc" id="L455">	}</span>
+
+	/**
+	 * Stop the shared Connection.
+	 * @throws JMSException if thrown by JMS API methods
+	 * @see javax.jms.Connection#start()
+	 */
+	protected void stopSharedConnection() throws JMSException {
+<span class="fc" id="L463">		synchronized (this.sharedConnectionMonitor) {</span>
+<span class="fc" id="L464">			this.sharedConnectionStarted = false;</span>
+<span class="fc bfc" id="L465" title="All 2 branches covered.">			if (this.sharedConnection != null) {</span>
+				try {
+<span class="fc" id="L467">					this.sharedConnection.stop();</span>
+				}
+<span class="nc" id="L469">				catch (javax.jms.IllegalStateException ex) {</span>
+<span class="nc" id="L470">					logger.debug(&quot;Ignoring Connection stop exception - assuming already stopped: &quot; + ex);</span>
+<span class="fc" id="L471">				}</span>
+			}
+<span class="fc" id="L473">		}</span>
+<span class="fc" id="L474">	}</span>
+
+	/**
+	 * Return the shared JMS Connection maintained by this container.
+	 * Available after initialization.
+	 * @return the shared Connection (never {@code null})
+	 * @throws IllegalStateException if this container does not maintain a
+	 * shared Connection, or if the Connection hasn't been initialized yet
+	 * @see #sharedConnectionEnabled()
+	 */
+	protected final Connection getSharedConnection() {
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">		if (!sharedConnectionEnabled()) {</span>
+<span class="nc" id="L486">			throw new IllegalStateException(</span>
+					&quot;This listener container does not maintain a shared Connection&quot;);
+		}
+<span class="fc" id="L489">		synchronized (this.sharedConnectionMonitor) {</span>
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">			if (this.sharedConnection == null) {</span>
+<span class="nc" id="L491">				throw new SharedConnectionNotInitializedException(</span>
+						&quot;This listener container's shared Connection has not been initialized yet&quot;);
+			}
+<span class="fc" id="L494">			return this.sharedConnection;</span>
+		}
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Management of paused tasks
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Take the given task object and reschedule it, either immediately if
+	 * this container is currently running, or later once this container
+	 * has been restarted.
+	 * &lt;p&gt;If this container has already been shut down, the task will not
+	 * get rescheduled at all.
+	 * @param task the task object to reschedule
+	 * @return whether the task has been rescheduled
+	 * (either immediately or for a restart of this container)
+	 * @see #doRescheduleTask
+	 */
+	protected final boolean rescheduleTaskIfNecessary(Object task) {
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">		if (this.running) {</span>
+			try {
+<span class="nc" id="L517">				doRescheduleTask(task);</span>
+			}
+<span class="nc" id="L519">			catch (RuntimeException ex) {</span>
+<span class="nc" id="L520">				logRejectedTask(task, ex);</span>
+<span class="nc" id="L521">				this.pausedTasks.add(task);</span>
+<span class="nc" id="L522">			}</span>
+<span class="nc" id="L523">			return true;</span>
+		}
+<span class="pc bpc" id="L525" title="1 of 2 branches missed.">		else if (this.active) {</span>
+<span class="fc" id="L526">			this.pausedTasks.add(task);</span>
+<span class="fc" id="L527">			return true;</span>
+		}
+		else {
+<span class="nc" id="L530">			return false;</span>
+		}
+	}
+
+	/**
+	 * Try to resume all paused tasks.
+	 * Tasks for which rescheduling failed simply remain in paused mode.
+	 */
+	protected void resumePausedTasks() {
+<span class="fc" id="L539">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc bfc" id="L540" title="All 2 branches covered.">			if (!this.pausedTasks.isEmpty()) {</span>
+<span class="fc bfc" id="L541" title="All 2 branches covered.">				for (Iterator&lt;?&gt; it = this.pausedTasks.iterator(); it.hasNext();) {</span>
+<span class="fc" id="L542">					Object task = it.next();</span>
+					try {
+<span class="fc" id="L544">						doRescheduleTask(task);</span>
+<span class="fc" id="L545">						it.remove();</span>
+<span class="pc bpc" id="L546" title="1 of 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L547">							logger.debug(&quot;Resumed paused task: &quot; + task);</span>
+						}
+					}
+<span class="nc" id="L550">					catch (RuntimeException ex) {</span>
+<span class="nc" id="L551">						logRejectedTask(task, ex);</span>
+						// Keep the task in paused mode...
+<span class="fc" id="L553">					}</span>
+<span class="fc" id="L554">				}</span>
+			}
+<span class="fc" id="L556">		}</span>
+<span class="fc" id="L557">	}</span>
+
+	/**
+	 * Determine the number of currently paused tasks, if any.
+	 */
+	public int getPausedTaskCount() {
+<span class="nc" id="L563">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L564">			return this.pausedTasks.size();</span>
+		}
+	}
+
+	/**
+	 * Reschedule the given task object immediately.
+	 * &lt;p&gt;To be implemented by subclasses if they ever call
+	 * {@code rescheduleTaskIfNecessary}.
+	 * This implementation throws an UnsupportedOperationException.
+	 * @param task the task object to reschedule
+	 * @see #rescheduleTaskIfNecessary
+	 */
+	protected void doRescheduleTask(Object task) {
+<span class="nc" id="L577">		throw new UnsupportedOperationException(</span>
+<span class="nc" id="L578">				ClassUtils.getShortName(getClass()) + &quot; does not support rescheduling of tasks&quot;);</span>
+	}
+
+	/**
+	 * Log a task that has been rejected by {@link #doRescheduleTask}.
+	 * &lt;p&gt;The default implementation simply logs a corresponding message
+	 * at debug level.
+	 * @param task the rejected task object
+	 * @param ex the exception thrown from {@link #doRescheduleTask}
+	 */
+	protected void logRejectedTask(Object task, RuntimeException ex) {
+<span class="nc bnc" id="L589" title="All 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L590">			logger.debug(&quot;Listener container task [&quot; + task + &quot;] has been rejected and paused: &quot; + ex);</span>
+		}
+<span class="nc" id="L592">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Template methods to be implemented by subclasses
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Return whether a shared JMS Connection should be maintained
+	 * by this container base class.
+	 * @see #getSharedConnection()
+	 */
+	protected abstract boolean sharedConnectionEnabled();
+
+	/**
+	 * Register any invokers within this container.
+	 * &lt;p&gt;Subclasses need to implement this method for their specific
+	 * invoker management process.
+	 * &lt;p&gt;A shared JMS Connection, if any, will already have been
+	 * started at this point.
+	 * @throws JMSException if registration failed
+	 * @see #getSharedConnection()
+	 */
+	protected abstract void doInitialize() throws JMSException;
+
+	/**
+	 * Close the registered invokers.
+	 * &lt;p&gt;Subclasses need to implement this method for their specific
+	 * invoker management process.
+	 * &lt;p&gt;A shared JMS Connection, if any, will automatically be closed
+	 * &lt;i&gt;afterwards&lt;/i&gt;.
+	 * @throws JMSException if shutdown failed
+	 * @see #shutdown()
+	 */
+	protected abstract void doShutdown() throws JMSException;
+
+
+	/**
+	 * Exception that indicates that the initial setup of this container's
+	 * shared JMS Connection failed. This is indicating to invokers that they need
+	 * to establish the shared Connection themselves on first access.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	public static class SharedConnectionNotInitializedException extends RuntimeException {
+
+		/**
+		 * Create a new SharedConnectionNotInitializedException.
+		 * @param msg the detail message
+		 */
+		protected SharedConnectionNotInitializedException(String msg) {
+<span class="nc" id="L642">			super(msg);</span>
+<span class="nc" id="L643">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

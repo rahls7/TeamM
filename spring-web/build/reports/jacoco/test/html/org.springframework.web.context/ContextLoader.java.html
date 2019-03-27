@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ContextLoader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.context</a> &gt; <span class="el_source">ContextLoader.java</span></div><h1>ContextLoader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.context;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.servlet.ServletContext;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextException;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.GenericTypeResolver;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.support.PropertiesLoaderUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Performs the actual initialization work for the root application context.
+ * Called by {@link ContextLoaderListener}.
+ *
+ * &lt;p&gt;Looks for a {@link #CONTEXT_CLASS_PARAM &quot;contextClass&quot;} parameter at the
+ * {@code web.xml} context-param level to specify the context class type, falling
+ * back to {@link org.springframework.web.context.support.XmlWebApplicationContext}
+ * if not found. With the default ContextLoader implementation, any context class
+ * specified needs to implement the {@link ConfigurableWebApplicationContext} interface.
+ *
+ * &lt;p&gt;Processes a {@link #CONFIG_LOCATION_PARAM &quot;contextConfigLocation&quot;} context-param
+ * and passes its value to the context instance, parsing it into potentially multiple
+ * file paths which can be separated by any number of commas and spaces, e.g.
+ * &quot;WEB-INF/applicationContext1.xml, WEB-INF/applicationContext2.xml&quot;.
+ * Ant-style path patterns are supported as well, e.g.
+ * &quot;WEB-INF/*Context.xml,WEB-INF/spring*.xml&quot; or &quot;WEB-INF/&amp;#42;&amp;#42;/*Context.xml&quot;.
+ * If not explicitly specified, the context implementation is supposed to use a
+ * default location (with XmlWebApplicationContext: &quot;/WEB-INF/applicationContext.xml&quot;).
+ *
+ * &lt;p&gt;Note: In case of multiple config locations, later bean definitions will
+ * override ones defined in previously loaded files, at least when using one of
+ * Spring's default ApplicationContext implementations. This can be leveraged
+ * to deliberately override certain bean definitions via an extra XML file.
+ *
+ * &lt;p&gt;Above and beyond loading the root application context, this class can optionally
+ * load or obtain and hook up a shared parent context to the root application context.
+ * See the {@link #loadParentContext(ServletContext)} method for more information.
+ *
+ * &lt;p&gt;As of Spring 3.1, {@code ContextLoader} supports injecting the root web
+ * application context via the {@link #ContextLoader(WebApplicationContext)}
+ * constructor, allowing for programmatic configuration in Servlet 3.0+ environments.
+ * See {@link org.springframework.web.WebApplicationInitializer} for usage examples.
+ *
+ * @author Juergen Hoeller
+ * @author Colin Sampaleanu
+ * @author Sam Brannen
+ * @since 17.02.2003
+ * @see ContextLoaderListener
+ * @see ConfigurableWebApplicationContext
+ * @see org.springframework.web.context.support.XmlWebApplicationContext
+ */
+public class ContextLoader {
+
+	/**
+	 * Config param for the root WebApplicationContext id,
+	 * to be used as serialization id for the underlying BeanFactory: {@value}.
+	 */
+	public static final String CONTEXT_ID_PARAM = &quot;contextId&quot;;
+
+	/**
+	 * Name of servlet context parameter (i.e., {@value}) that can specify the
+	 * config location for the root context, falling back to the implementation's
+	 * default otherwise.
+	 * @see org.springframework.web.context.support.XmlWebApplicationContext#DEFAULT_CONFIG_LOCATION
+	 */
+	public static final String CONFIG_LOCATION_PARAM = &quot;contextConfigLocation&quot;;
+
+	/**
+	 * Config param for the root WebApplicationContext implementation class to use: {@value}.
+	 * @see #determineContextClass(ServletContext)
+	 */
+	public static final String CONTEXT_CLASS_PARAM = &quot;contextClass&quot;;
+
+	/**
+	 * Config param for {@link ApplicationContextInitializer} classes to use
+	 * for initializing the root web application context: {@value}.
+	 * @see #customizeContext(ServletContext, ConfigurableWebApplicationContext)
+	 */
+	public static final String CONTEXT_INITIALIZER_CLASSES_PARAM = &quot;contextInitializerClasses&quot;;
+
+	/**
+	 * Config param for global {@link ApplicationContextInitializer} classes to use
+	 * for initializing all web application contexts in the current application: {@value}.
+	 * @see #customizeContext(ServletContext, ConfigurableWebApplicationContext)
+	 */
+	public static final String GLOBAL_INITIALIZER_CLASSES_PARAM = &quot;globalInitializerClasses&quot;;
+
+	/**
+	 * Any number of these characters are considered delimiters between
+	 * multiple values in a single init-param String value.
+	 */
+	private static final String INIT_PARAM_DELIMITERS = &quot;,; \t\n&quot;;
+
+	/**
+	 * Name of the class path resource (relative to the ContextLoader class)
+	 * that defines ContextLoader's default strategy names.
+	 */
+	private static final String DEFAULT_STRATEGIES_PATH = &quot;ContextLoader.properties&quot;;
+
+
+	private static final Properties defaultStrategies;
+
+	static {
+		// Load default strategy implementations from properties file.
+		// This is currently strictly internal and not meant to be customized
+		// by application developers.
+		try {
+<span class="fc" id="L142">			ClassPathResource resource = new ClassPathResource(DEFAULT_STRATEGIES_PATH, ContextLoader.class);</span>
+<span class="fc" id="L143">			defaultStrategies = PropertiesLoaderUtils.loadProperties(resource);</span>
+		}
+<span class="nc" id="L145">		catch (IOException ex) {</span>
+<span class="nc" id="L146">			throw new IllegalStateException(&quot;Could not load 'ContextLoader.properties': &quot; + ex.getMessage());</span>
+<span class="fc" id="L147">		}</span>
+	}
+
+
+	/**
+	 * Map from (thread context) ClassLoader to corresponding 'current' WebApplicationContext.
+	 */
+<span class="fc" id="L154">	private static final Map&lt;ClassLoader, WebApplicationContext&gt; currentContextPerThread =</span>
+			new ConcurrentHashMap&lt;&gt;(1);
+
+	/**
+	 * The 'current' WebApplicationContext, if the ContextLoader class is
+	 * deployed in the web app ClassLoader itself.
+	 */
+	@Nullable
+	private static volatile WebApplicationContext currentContext;
+
+
+	/**
+	 * The root WebApplicationContext instance that this loader manages.
+	 */
+	@Nullable
+	private WebApplicationContext context;
+
+	/** Actual ApplicationContextInitializer instances to apply to the context. */
+<span class="pc" id="L172">	private final List&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt; contextInitializers =</span>
+			new ArrayList&lt;&gt;();
+
+
+	/**
+	 * Create a new {@code ContextLoader} that will create a web application context
+	 * based on the &quot;contextClass&quot; and &quot;contextConfigLocation&quot; servlet context-params.
+	 * See class-level documentation for details on default values for each.
+	 * &lt;p&gt;This constructor is typically used when declaring the {@code
+	 * ContextLoaderListener} subclass as a {@code &lt;listener&gt;} within {@code web.xml}, as
+	 * a no-arg constructor is required.
+	 * &lt;p&gt;The created application context will be registered into the ServletContext under
+	 * the attribute name {@link WebApplicationContext#ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE}
+	 * and subclasses are free to call the {@link #closeWebApplicationContext} method on
+	 * container shutdown to close the application context.
+	 * @see #ContextLoader(WebApplicationContext)
+	 * @see #initWebApplicationContext(ServletContext)
+	 * @see #closeWebApplicationContext(ServletContext)
+	 */
+<span class="nc" id="L191">	public ContextLoader() {</span>
+<span class="nc" id="L192">	}</span>
+
+	/**
+	 * Create a new {@code ContextLoader} with the given application context. This
+	 * constructor is useful in Servlet 3.0+ environments where instance-based
+	 * registration of listeners is possible through the {@link ServletContext#addListener}
+	 * API.
+	 * &lt;p&gt;The context may or may not yet be {@linkplain
+	 * ConfigurableApplicationContext#refresh() refreshed}. If it (a) is an implementation
+	 * of {@link ConfigurableWebApplicationContext} and (b) has &lt;strong&gt;not&lt;/strong&gt;
+	 * already been refreshed (the recommended approach), then the following will occur:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;If the given context has not already been assigned an {@linkplain
+	 * ConfigurableApplicationContext#setId id}, one will be assigned to it&lt;/li&gt;
+	 * &lt;li&gt;{@code ServletContext} and {@code ServletConfig} objects will be delegated to
+	 * the application context&lt;/li&gt;
+	 * &lt;li&gt;{@link #customizeContext} will be called&lt;/li&gt;
+	 * &lt;li&gt;Any {@link ApplicationContextInitializer ApplicationContextInitializers} specified through the
+	 * &quot;contextInitializerClasses&quot; init-param will be applied.&lt;/li&gt;
+	 * &lt;li&gt;{@link ConfigurableApplicationContext#refresh refresh()} will be called&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * If the context has already been refreshed or does not implement
+	 * {@code ConfigurableWebApplicationContext}, none of the above will occur under the
+	 * assumption that the user has performed these actions (or not) per his or her
+	 * specific needs.
+	 * &lt;p&gt;See {@link org.springframework.web.WebApplicationInitializer} for usage examples.
+	 * &lt;p&gt;In any case, the given application context will be registered into the
+	 * ServletContext under the attribute name {@link
+	 * WebApplicationContext#ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE} and subclasses are
+	 * free to call the {@link #closeWebApplicationContext} method on container shutdown
+	 * to close the application context.
+	 * @param context the application context to manage
+	 * @see #initWebApplicationContext(ServletContext)
+	 * @see #closeWebApplicationContext(ServletContext)
+	 */
+<span class="fc" id="L227">	public ContextLoader(WebApplicationContext context) {</span>
+<span class="fc" id="L228">		this.context = context;</span>
+<span class="fc" id="L229">	}</span>
+
+
+	/**
+	 * Specify which {@link ApplicationContextInitializer} instances should be used
+	 * to initialize the application context used by this {@code ContextLoader}.
+	 * @since 4.2
+	 * @see #configureAndRefreshWebApplicationContext
+	 * @see #customizeContext
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public void setContextInitializers(@Nullable ApplicationContextInitializer&lt;?&gt;... initializers) {
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">		if (initializers != null) {</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">			for (ApplicationContextInitializer&lt;?&gt; initializer : initializers) {</span>
+<span class="nc" id="L243">				this.contextInitializers.add((ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;) initializer);</span>
+			}
+		}
+<span class="fc" id="L246">	}</span>
+
+
+	/**
+	 * Initialize Spring's web application context for the given servlet context,
+	 * using the application context provided at construction time, or creating a new one
+	 * according to the &quot;{@link #CONTEXT_CLASS_PARAM contextClass}&quot; and
+	 * &quot;{@link #CONFIG_LOCATION_PARAM contextConfigLocation}&quot; context-params.
+	 * @param servletContext current servlet context
+	 * @return the new WebApplicationContext
+	 * @see #ContextLoader(WebApplicationContext)
+	 * @see #CONTEXT_CLASS_PARAM
+	 * @see #CONFIG_LOCATION_PARAM
+	 */
+	public WebApplicationContext initWebApplicationContext(ServletContext servletContext) {
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">		if (servletContext.getAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE) != null) {</span>
+<span class="nc" id="L262">			throw new IllegalStateException(</span>
+					&quot;Cannot initialize context because there is already a root application context present - &quot; +
+					&quot;check whether you have multiple ContextLoader* definitions in your web.xml!&quot;);
+		}
+
+<span class="fc" id="L267">		servletContext.log(&quot;Initializing Spring root WebApplicationContext&quot;);</span>
+<span class="fc" id="L268">		Log logger = LogFactory.getLog(ContextLoader.class);</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">		if (logger.isInfoEnabled()) {</span>
+<span class="fc" id="L270">			logger.info(&quot;Root WebApplicationContext: initialization started&quot;);</span>
+		}
+<span class="fc" id="L272">		long startTime = System.currentTimeMillis();</span>
+
+		try {
+			// Store context in local instance variable, to guarantee that
+			// it is available on ServletContext shutdown.
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">			if (this.context == null) {</span>
+<span class="nc" id="L278">				this.context = createWebApplicationContext(servletContext);</span>
+			}
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">			if (this.context instanceof ConfigurableWebApplicationContext) {</span>
+<span class="fc" id="L281">				ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) this.context;</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">				if (!cwac.isActive()) {</span>
+					// The context has not yet been refreshed -&gt; provide services such as
+					// setting the parent context, setting the application context id, etc
+<span class="pc bpc" id="L285" title="1 of 2 branches missed.">					if (cwac.getParent() == null) {</span>
+						// The context instance was injected without an explicit parent -&gt;
+						// determine parent for root web application context, if any.
+<span class="fc" id="L288">						ApplicationContext parent = loadParentContext(servletContext);</span>
+<span class="fc" id="L289">						cwac.setParent(parent);</span>
+					}
+<span class="fc" id="L291">					configureAndRefreshWebApplicationContext(cwac, servletContext);</span>
+				}
+			}
+<span class="fc" id="L294">			servletContext.setAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE, this.context);</span>
+
+<span class="fc" id="L296">			ClassLoader ccl = Thread.currentThread().getContextClassLoader();</span>
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">			if (ccl == ContextLoader.class.getClassLoader()) {</span>
+<span class="fc" id="L298">				currentContext = this.context;</span>
+			}
+<span class="nc bnc" id="L300" title="All 2 branches missed.">			else if (ccl != null) {</span>
+<span class="nc" id="L301">				currentContextPerThread.put(ccl, this.context);</span>
+			}
+
+<span class="pc bpc" id="L304" title="1 of 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="fc" id="L305">				long elapsedTime = System.currentTimeMillis() - startTime;</span>
+<span class="fc" id="L306">				logger.info(&quot;Root WebApplicationContext initialized in &quot; + elapsedTime + &quot; ms&quot;);</span>
+			}
+
+<span class="fc" id="L309">			return this.context;</span>
+		}
+<span class="fc" id="L311">		catch (RuntimeException | Error ex) {</span>
+<span class="fc" id="L312">			logger.error(&quot;Context initialization failed&quot;, ex);</span>
+<span class="fc" id="L313">			servletContext.setAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE, ex);</span>
+<span class="fc" id="L314">			throw ex;</span>
+		}
+	}
+
+	/**
+	 * Instantiate the root WebApplicationContext for this loader, either the
+	 * default context class or a custom context class if specified.
+	 * &lt;p&gt;This implementation expects custom contexts to implement the
+	 * {@link ConfigurableWebApplicationContext} interface.
+	 * Can be overridden in subclasses.
+	 * &lt;p&gt;In addition, {@link #customizeContext} gets called prior to refreshing the
+	 * context, allowing subclasses to perform custom modifications to the context.
+	 * @param sc current servlet context
+	 * @return the root WebApplicationContext
+	 * @see ConfigurableWebApplicationContext
+	 */
+	protected WebApplicationContext createWebApplicationContext(ServletContext sc) {
+<span class="nc" id="L331">		Class&lt;?&gt; contextClass = determineContextClass(sc);</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">		if (!ConfigurableWebApplicationContext.class.isAssignableFrom(contextClass)) {</span>
+<span class="nc" id="L333">			throw new ApplicationContextException(&quot;Custom context class [&quot; + contextClass.getName() +</span>
+<span class="nc" id="L334">					&quot;] is not of type [&quot; + ConfigurableWebApplicationContext.class.getName() + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L336">		return (ConfigurableWebApplicationContext) BeanUtils.instantiateClass(contextClass);</span>
+	}
+
+	/**
+	 * Return the WebApplicationContext implementation class to use, either the
+	 * default XmlWebApplicationContext or a custom context class if specified.
+	 * @param servletContext current servlet context
+	 * @return the WebApplicationContext implementation class to use
+	 * @see #CONTEXT_CLASS_PARAM
+	 * @see org.springframework.web.context.support.XmlWebApplicationContext
+	 */
+	protected Class&lt;?&gt; determineContextClass(ServletContext servletContext) {
+<span class="nc" id="L348">		String contextClassName = servletContext.getInitParameter(CONTEXT_CLASS_PARAM);</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">		if (contextClassName != null) {</span>
+			try {
+<span class="nc" id="L351">				return ClassUtils.forName(contextClassName, ClassUtils.getDefaultClassLoader());</span>
+			}
+<span class="nc" id="L353">			catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L354">				throw new ApplicationContextException(</span>
+						&quot;Failed to load custom context class [&quot; + contextClassName + &quot;]&quot;, ex);
+			}
+		}
+		else {
+<span class="nc" id="L359">			contextClassName = defaultStrategies.getProperty(WebApplicationContext.class.getName());</span>
+			try {
+<span class="nc" id="L361">				return ClassUtils.forName(contextClassName, ContextLoader.class.getClassLoader());</span>
+			}
+<span class="nc" id="L363">			catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L364">				throw new ApplicationContextException(</span>
+						&quot;Failed to load default context class [&quot; + contextClassName + &quot;]&quot;, ex);
+			}
+		}
+	}
+
+	protected void configureAndRefreshWebApplicationContext(ConfigurableWebApplicationContext wac, ServletContext sc) {
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">		if (ObjectUtils.identityToString(wac).equals(wac.getId())) {</span>
+			// The application context id is still set to its original default value
+			// -&gt; assign a more useful id based on available information
+<span class="fc" id="L374">			String idParam = sc.getInitParameter(CONTEXT_ID_PARAM);</span>
+<span class="pc bpc" id="L375" title="1 of 2 branches missed.">			if (idParam != null) {</span>
+<span class="nc" id="L376">				wac.setId(idParam);</span>
+			}
+			else {
+				// Generate default id...
+<span class="fc" id="L380">				wac.setId(ConfigurableWebApplicationContext.APPLICATION_CONTEXT_ID_PREFIX +</span>
+<span class="fc" id="L381">						ObjectUtils.getDisplayString(sc.getContextPath()));</span>
+			}
+		}
+
+<span class="fc" id="L385">		wac.setServletContext(sc);</span>
+<span class="fc" id="L386">		String configLocationParam = sc.getInitParameter(CONFIG_LOCATION_PARAM);</span>
+<span class="fc bfc" id="L387" title="All 2 branches covered.">		if (configLocationParam != null) {</span>
+<span class="fc" id="L388">			wac.setConfigLocation(configLocationParam);</span>
+		}
+
+		// The wac environment's #initPropertySources will be called in any case when the context
+		// is refreshed; do it eagerly here to ensure servlet property sources are in place for
+		// use in any post-processing or initialization that occurs below prior to #refresh
+<span class="fc" id="L394">		ConfigurableEnvironment env = wac.getEnvironment();</span>
+<span class="pc bpc" id="L395" title="1 of 2 branches missed.">		if (env instanceof ConfigurableWebEnvironment) {</span>
+<span class="fc" id="L396">			((ConfigurableWebEnvironment) env).initPropertySources(sc, null);</span>
+		}
+
+<span class="fc" id="L399">		customizeContext(sc, wac);</span>
+<span class="fc" id="L400">		wac.refresh();</span>
+<span class="fc" id="L401">	}</span>
+
+	/**
+	 * Customize the {@link ConfigurableWebApplicationContext} created by this
+	 * ContextLoader after config locations have been supplied to the context
+	 * but before the context is &lt;em&gt;refreshed&lt;/em&gt;.
+	 * &lt;p&gt;The default implementation {@linkplain #determineContextInitializerClasses(ServletContext)
+	 * determines} what (if any) context initializer classes have been specified through
+	 * {@linkplain #CONTEXT_INITIALIZER_CLASSES_PARAM context init parameters} and
+	 * {@linkplain ApplicationContextInitializer#initialize invokes each} with the
+	 * given web application context.
+	 * &lt;p&gt;Any {@code ApplicationContextInitializers} implementing
+	 * {@link org.springframework.core.Ordered Ordered} or marked with @{@link
+	 * org.springframework.core.annotation.Order Order} will be sorted appropriately.
+	 * @param sc the current servlet context
+	 * @param wac the newly created application context
+	 * @see #CONTEXT_INITIALIZER_CLASSES_PARAM
+	 * @see ApplicationContextInitializer#initialize(ConfigurableApplicationContext)
+	 */
+	protected void customizeContext(ServletContext sc, ConfigurableWebApplicationContext wac) {
+<span class="fc" id="L421">		List&lt;Class&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt;&gt; initializerClasses =</span>
+<span class="fc" id="L422">				determineContextInitializerClasses(sc);</span>
+
+<span class="pc bpc" id="L424" title="1 of 2 branches missed.">		for (Class&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt; initializerClass : initializerClasses) {</span>
+<span class="nc" id="L425">			Class&lt;?&gt; initializerContextClass =</span>
+<span class="nc" id="L426">					GenericTypeResolver.resolveTypeArgument(initializerClass, ApplicationContextInitializer.class);</span>
+<span class="nc bnc" id="L427" title="All 4 branches missed.">			if (initializerContextClass != null &amp;&amp; !initializerContextClass.isInstance(wac)) {</span>
+<span class="nc" id="L428">				throw new ApplicationContextException(String.format(</span>
+						&quot;Could not apply context initializer [%s] since its generic parameter [%s] &quot; +
+						&quot;is not assignable from the type of application context used by this &quot; +
+<span class="nc" id="L431">						&quot;context loader: [%s]&quot;, initializerClass.getName(), initializerContextClass.getName(),</span>
+<span class="nc" id="L432">						wac.getClass().getName()));</span>
+			}
+<span class="nc" id="L434">			this.contextInitializers.add(BeanUtils.instantiateClass(initializerClass));</span>
+<span class="nc" id="L435">		}</span>
+
+<span class="fc" id="L437">		AnnotationAwareOrderComparator.sort(this.contextInitializers);</span>
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">		for (ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt; initializer : this.contextInitializers) {</span>
+<span class="nc" id="L439">			initializer.initialize(wac);</span>
+<span class="nc" id="L440">		}</span>
+<span class="fc" id="L441">	}</span>
+
+	/**
+	 * Return the {@link ApplicationContextInitializer} implementation classes to use
+	 * if any have been specified by {@link #CONTEXT_INITIALIZER_CLASSES_PARAM}.
+	 * @param servletContext current servlet context
+	 * @see #CONTEXT_INITIALIZER_CLASSES_PARAM
+	 */
+	protected List&lt;Class&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt;&gt;
+			determineContextInitializerClasses(ServletContext servletContext) {
+
+<span class="fc" id="L452">		List&lt;Class&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt;&gt; classes =</span>
+				new ArrayList&lt;&gt;();
+
+<span class="fc" id="L455">		String globalClassNames = servletContext.getInitParameter(GLOBAL_INITIALIZER_CLASSES_PARAM);</span>
+<span class="pc bpc" id="L456" title="1 of 2 branches missed.">		if (globalClassNames != null) {</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">			for (String className : StringUtils.tokenizeToStringArray(globalClassNames, INIT_PARAM_DELIMITERS)) {</span>
+<span class="nc" id="L458">				classes.add(loadInitializerClass(className));</span>
+			}
+		}
+
+<span class="fc" id="L462">		String localClassNames = servletContext.getInitParameter(CONTEXT_INITIALIZER_CLASSES_PARAM);</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">		if (localClassNames != null) {</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">			for (String className : StringUtils.tokenizeToStringArray(localClassNames, INIT_PARAM_DELIMITERS)) {</span>
+<span class="nc" id="L465">				classes.add(loadInitializerClass(className));</span>
+			}
+		}
+
+<span class="fc" id="L469">		return classes;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private Class&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt; loadInitializerClass(String className) {
+		try {
+<span class="nc" id="L475">			Class&lt;?&gt; clazz = ClassUtils.forName(className, ClassUtils.getDefaultClassLoader());</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">			if (!ApplicationContextInitializer.class.isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L477">				throw new ApplicationContextException(</span>
+						&quot;Initializer class does not implement ApplicationContextInitializer interface: &quot; + clazz);
+			}
+<span class="nc" id="L480">			return (Class&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt;) clazz;</span>
+		}
+<span class="nc" id="L482">		catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L483">			throw new ApplicationContextException(&quot;Failed to load context initializer class [&quot; + className + &quot;]&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Template method with default implementation (which may be overridden by a
+	 * subclass), to load or obtain an ApplicationContext instance which will be
+	 * used as the parent context of the root WebApplicationContext. If the
+	 * return value from the method is null, no parent context is set.
+	 * &lt;p&gt;The main reason to load a parent context here is to allow multiple root
+	 * web application contexts to all be children of a shared EAR context, or
+	 * alternately to also share the same parent context that is visible to
+	 * EJBs. For pure web applications, there is usually no need to worry about
+	 * having a parent context to the root web application context.
+	 * &lt;p&gt;The default implementation simply returns {@code null}, as of 5.0.
+	 * @param servletContext current servlet context
+	 * @return the parent application context, or {@code null} if none
+	 */
+	@Nullable
+	protected ApplicationContext loadParentContext(ServletContext servletContext) {
+<span class="fc" id="L503">		return null;</span>
+	}
+
+	/**
+	 * Close Spring's web application context for the given servlet context.
+	 * &lt;p&gt;If overriding {@link #loadParentContext(ServletContext)}, you may have
+	 * to override this method as well.
+	 * @param servletContext the ServletContext that the WebApplicationContext runs in
+	 */
+	public void closeWebApplicationContext(ServletContext servletContext) {
+<span class="nc" id="L513">		servletContext.log(&quot;Closing Spring root WebApplicationContext&quot;);</span>
+		try {
+<span class="nc bnc" id="L515" title="All 2 branches missed.">			if (this.context instanceof ConfigurableWebApplicationContext) {</span>
+<span class="nc" id="L516">				((ConfigurableWebApplicationContext) this.context).close();</span>
+			}
+		}
+		finally {
+<span class="nc" id="L520">			ClassLoader ccl = Thread.currentThread().getContextClassLoader();</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">			if (ccl == ContextLoader.class.getClassLoader()) {</span>
+<span class="nc" id="L522">				currentContext = null;</span>
+			}
+<span class="nc bnc" id="L524" title="All 2 branches missed.">			else if (ccl != null) {</span>
+<span class="nc" id="L525">				currentContextPerThread.remove(ccl);</span>
+			}
+<span class="nc" id="L527">			servletContext.removeAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE);</span>
+		}
+<span class="nc" id="L529">	}</span>
+
+
+	/**
+	 * Obtain the Spring root web application context for the current thread
+	 * (i.e. for the current thread's context ClassLoader, which needs to be
+	 * the web application's ClassLoader).
+	 * @return the current root web application context, or {@code null}
+	 * if none found
+	 * @see org.springframework.web.context.support.SpringBeanAutowiringSupport
+	 */
+	@Nullable
+	public static WebApplicationContext getCurrentWebApplicationContext() {
+<span class="nc" id="L542">		ClassLoader ccl = Thread.currentThread().getContextClassLoader();</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">		if (ccl != null) {</span>
+<span class="nc" id="L544">			WebApplicationContext ccpt = currentContextPerThread.get(ccl);</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">			if (ccpt != null) {</span>
+<span class="nc" id="L546">				return ccpt;</span>
+			}
+		}
+<span class="nc" id="L549">		return currentContext;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

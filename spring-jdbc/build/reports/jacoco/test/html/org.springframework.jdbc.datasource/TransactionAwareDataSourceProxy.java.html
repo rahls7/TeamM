@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionAwareDataSourceProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.datasource</a> &gt; <span class="el_source">TransactionAwareDataSourceProxy.java</span></div><h1>TransactionAwareDataSourceProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.datasource;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
+import javax.sql.DataSource;
+
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+/**
+ * Proxy for a target JDBC {@link javax.sql.DataSource}, adding awareness of
+ * Spring-managed transactions. Similar to a transactional JNDI DataSource
+ * as provided by a Java EE server.
+ *
+ * &lt;p&gt;Data access code that should remain unaware of Spring's data access support
+ * can work with this proxy to seamlessly participate in Spring-managed transactions.
+ * Note that the transaction manager, for example {@link DataSourceTransactionManager},
+ * still needs to work with the underlying DataSource, &lt;i&gt;not&lt;/i&gt; with this proxy.
+ *
+ * &lt;p&gt;&lt;b&gt;Make sure that TransactionAwareDataSourceProxy is the outermost DataSource
+ * of a chain of DataSource proxies/adapters.&lt;/b&gt; TransactionAwareDataSourceProxy
+ * can delegate either directly to the target connection pool or to some
+ * intermediary proxy/adapter like {@link LazyConnectionDataSourceProxy} or
+ * {@link UserCredentialsDataSourceAdapter}.
+ *
+ * &lt;p&gt;Delegates to {@link DataSourceUtils} for automatically participating in
+ * thread-bound transactions, for example managed by {@link DataSourceTransactionManager}.
+ * {@code getConnection} calls and {@code close} calls on returned Connections
+ * will behave properly within a transaction, i.e. always operate on the transactional
+ * Connection. If not within a transaction, normal DataSource behavior applies.
+ *
+ * &lt;p&gt;This proxy allows data access code to work with the plain JDBC API and still
+ * participate in Spring-managed transactions, similar to JDBC code in a Java EE/JTA
+ * environment. However, if possible, use Spring's DataSourceUtils, JdbcTemplate or
+ * JDBC operation objects to get transaction participation even without a proxy for
+ * the target DataSource, avoiding the need to define such a proxy in the first place.
+ *
+ * &lt;p&gt;As a further effect, using a transaction-aware DataSource will apply remaining
+ * transaction timeouts to all created JDBC (Prepared/Callable)Statement. This means
+ * that all operations performed through standard JDBC will automatically participate
+ * in Spring-managed transaction timeouts.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; This DataSource proxy needs to return wrapped Connections (which
+ * implement the {@link ConnectionProxy} interface) in order to handle close calls
+ * properly. Use {@link Connection#unwrap} to retrieve the native JDBC Connection.
+ *
+ * @author Juergen Hoeller
+ * @since 1.1
+ * @see javax.sql.DataSource#getConnection()
+ * @see java.sql.Connection#close()
+ * @see DataSourceUtils#doGetConnection
+ * @see DataSourceUtils#applyTransactionTimeout
+ * @see DataSourceUtils#doReleaseConnection
+ */
+public class TransactionAwareDataSourceProxy extends DelegatingDataSource {
+
+<span class="pc" id="L78">	private boolean reobtainTransactionalConnections = false;</span>
+
+
+	/**
+	 * Create a new TransactionAwareDataSourceProxy.
+	 * @see #setTargetDataSource
+	 */
+<span class="nc" id="L85">	public TransactionAwareDataSourceProxy() {</span>
+<span class="nc" id="L86">	}</span>
+
+	/**
+	 * Create a new TransactionAwareDataSourceProxy.
+	 * @param targetDataSource the target DataSource
+	 */
+	public TransactionAwareDataSourceProxy(DataSource targetDataSource) {
+<span class="fc" id="L93">		super(targetDataSource);</span>
+<span class="fc" id="L94">	}</span>
+
+	/**
+	 * Specify whether to reobtain the target Connection for each operation
+	 * performed within a transaction.
+	 * &lt;p&gt;The default is &quot;false&quot;. Specify &quot;true&quot; to reobtain transactional
+	 * Connections for every call on the Connection proxy; this is advisable
+	 * on JBoss if you hold on to a Connection handle across transaction boundaries.
+	 * &lt;p&gt;The effect of this setting is similar to the
+	 * &quot;hibernate.connection.release_mode&quot; value &quot;after_statement&quot;.
+	 */
+	public void setReobtainTransactionalConnections(boolean reobtainTransactionalConnections) {
+<span class="fc" id="L106">		this.reobtainTransactionalConnections = reobtainTransactionalConnections;</span>
+<span class="fc" id="L107">	}</span>
+
+
+	/**
+	 * Delegates to DataSourceUtils for automatically participating in Spring-managed
+	 * transactions. Throws the original SQLException, if any.
+	 * &lt;p&gt;The returned Connection handle implements the ConnectionProxy interface,
+	 * allowing to retrieve the underlying target Connection.
+	 * @return a transactional Connection if any, a new one else
+	 * @see DataSourceUtils#doGetConnection
+	 * @see ConnectionProxy#getTargetConnection
+	 */
+	@Override
+	public Connection getConnection() throws SQLException {
+<span class="fc" id="L121">		return getTransactionAwareConnectionProxy(obtainTargetDataSource());</span>
+	}
+
+	/**
+	 * Wraps the given Connection with a proxy that delegates every method call to it
+	 * but delegates {@code close()} calls to DataSourceUtils.
+	 * @param targetDataSource the DataSource that the Connection came from
+	 * @return the wrapped Connection
+	 * @see java.sql.Connection#close()
+	 * @see DataSourceUtils#doReleaseConnection
+	 */
+	protected Connection getTransactionAwareConnectionProxy(DataSource targetDataSource) {
+<span class="fc" id="L133">		return (Connection) Proxy.newProxyInstance(</span>
+<span class="fc" id="L134">				ConnectionProxy.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {ConnectionProxy.class},
+				new TransactionAwareInvocationHandler(targetDataSource));
+	}
+
+	/**
+	 * Determine whether to obtain a fixed target Connection for the proxy
+	 * or to reobtain the target Connection for each operation.
+	 * &lt;p&gt;The default implementation returns {@code true} for all
+	 * standard cases. This can be overridden through the
+	 * {@link #setReobtainTransactionalConnections &quot;reobtainTransactionalConnections&quot;}
+	 * flag, which enforces a non-fixed target Connection within an active transaction.
+	 * Note that non-transactional access will always use a fixed Connection.
+	 * @param targetDataSource the target DataSource
+	 */
+	protected boolean shouldObtainFixedConnection(DataSource targetDataSource) {
+<span class="pc bpc" id="L150" title="1 of 4 branches missed.">		return (!TransactionSynchronizationManager.isSynchronizationActive() ||</span>
+				!this.reobtainTransactionalConnections);
+	}
+
+
+	/**
+	 * Invocation handler that delegates close calls on JDBC Connections
+	 * to DataSourceUtils for being aware of thread-bound transactions.
+	 */
+	private class TransactionAwareInvocationHandler implements InvocationHandler {
+
+		private final DataSource targetDataSource;
+
+		@Nullable
+		private Connection target;
+
+<span class="fc" id="L166">		private boolean closed = false;</span>
+
+<span class="fc" id="L168">		public TransactionAwareInvocationHandler(DataSource targetDataSource) {</span>
+<span class="fc" id="L169">			this.targetDataSource = targetDataSource;</span>
+<span class="fc" id="L170">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on ConnectionProxy interface coming in...
+
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// Only considered as equal when proxies are identical.
+<span class="nc bnc" id="L179" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L183">				return System.identityHashCode(proxy);</span>
+			}
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;toString&quot;)) {</span>
+				// Allow for differentiating between the proxy and the raw Connection.
+<span class="nc" id="L187">				StringBuilder sb = new StringBuilder(&quot;Transaction-aware proxy for target Connection &quot;);</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">				if (this.target != null) {</span>
+<span class="nc" id="L189">					sb.append(&quot;[&quot;).append(this.target.toString()).append(&quot;]&quot;);</span>
+				}
+				else {
+<span class="nc" id="L192">					sb.append(&quot; from DataSource [&quot;).append(this.targetDataSource).append(&quot;]&quot;);</span>
+				}
+<span class="nc" id="L194">				return sb.toString();</span>
+			}
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;unwrap&quot;)) {</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">				if (((Class&lt;?&gt;) args[0]).isInstance(proxy)) {</span>
+<span class="nc" id="L198">					return proxy;</span>
+				}
+			}
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;isWrapperFor&quot;)) {</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">				if (((Class&lt;?&gt;) args[0]).isInstance(proxy)) {</span>
+<span class="nc" id="L203">					return true;</span>
+				}
+			}
+<span class="fc bfc" id="L206" title="All 2 branches covered.">			else if (method.getName().equals(&quot;close&quot;)) {</span>
+				// Handle close method: only close if not within a transaction.
+<span class="fc" id="L208">				DataSourceUtils.doReleaseConnection(this.target, this.targetDataSource);</span>
+<span class="fc" id="L209">				this.closed = true;</span>
+<span class="fc" id="L210">				return null;</span>
+			}
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;isClosed&quot;)) {</span>
+<span class="nc" id="L213">				return this.closed;</span>
+			}
+
+<span class="pc bpc" id="L216" title="1 of 2 branches missed.">			if (this.target == null) {</span>
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">				if (this.closed) {</span>
+<span class="nc" id="L218">					throw new SQLException(&quot;Connection handle already closed&quot;);</span>
+				}
+<span class="fc bfc" id="L220" title="All 2 branches covered.">				if (shouldObtainFixedConnection(this.targetDataSource)) {</span>
+<span class="fc" id="L221">					this.target = DataSourceUtils.doGetConnection(this.targetDataSource);</span>
+				}
+			}
+<span class="fc" id="L224">			Connection actualTarget = this.target;</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">			if (actualTarget == null) {</span>
+<span class="fc" id="L226">				actualTarget = DataSourceUtils.doGetConnection(this.targetDataSource);</span>
+			}
+
+<span class="fc bfc" id="L229" title="All 2 branches covered.">			if (method.getName().equals(&quot;getTargetConnection&quot;)) {</span>
+				// Handle getTargetConnection method: return underlying Connection.
+<span class="fc" id="L231">				return actualTarget;</span>
+			}
+
+			// Invoke method on target Connection.
+			try {
+<span class="fc" id="L236">				Object retVal = method.invoke(actualTarget, args);</span>
+
+				// If return value is a Statement, apply transaction timeout.
+				// Applies to createStatement, prepareStatement, prepareCall.
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">				if (retVal instanceof Statement) {</span>
+<span class="nc" id="L241">					DataSourceUtils.applyTransactionTimeout((Statement) retVal, this.targetDataSource);</span>
+				}
+
+<span class="fc" id="L244">				return retVal;</span>
+			}
+<span class="nc" id="L246">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L247">				throw ex.getTargetException();</span>
+			}
+			finally {
+<span class="fc bfc" id="L250" title="All 2 branches covered.">				if (actualTarget != this.target) {</span>
+<span class="fc" id="L251">					DataSourceUtils.doReleaseConnection(actualTarget, this.targetDataSource);</span>
+				}
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

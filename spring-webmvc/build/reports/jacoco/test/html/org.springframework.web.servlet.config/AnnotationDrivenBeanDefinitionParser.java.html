@@ -1,0 +1,709 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AnnotationDrivenBeanDefinitionParser.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.config</a> &gt; <span class="el_source">AnnotationDrivenBeanDefinitionParser.java</span></div><h1>AnnotationDrivenBeanDefinitionParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.config;
+
+import java.util.List;
+import java.util.Properties;
+
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import com.fasterxml.jackson.dataformat.smile.SmileFactory;
+import org.w3c.dom.Element;
+
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinitionHolder;
+import org.springframework.beans.factory.config.RuntimeBeanReference;
+import org.springframework.beans.factory.parsing.BeanComponentDefinition;
+import org.springframework.beans.factory.parsing.CompositeComponentDefinition;
+import org.springframework.beans.factory.support.GenericBeanDefinition;
+import org.springframework.beans.factory.support.ManagedList;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.beans.factory.xml.BeanDefinitionParser;
+import org.springframework.beans.factory.xml.ParserContext;
+import org.springframework.beans.factory.xml.XmlReaderContext;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.format.support.DefaultFormattingConversionService;
+import org.springframework.format.support.FormattingConversionServiceFactoryBean;
+import org.springframework.http.MediaType;
+import org.springframework.http.converter.ByteArrayHttpMessageConverter;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.ResourceHttpMessageConverter;
+import org.springframework.http.converter.ResourceRegionHttpMessageConverter;
+import org.springframework.http.converter.StringHttpMessageConverter;
+import org.springframework.http.converter.cbor.MappingJackson2CborHttpMessageConverter;
+import org.springframework.http.converter.feed.AtomFeedHttpMessageConverter;
+import org.springframework.http.converter.feed.RssChannelHttpMessageConverter;
+import org.springframework.http.converter.json.GsonHttpMessageConverter;
+import org.springframework.http.converter.json.Jackson2ObjectMapperFactoryBean;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.http.converter.smile.MappingJackson2SmileHttpMessageConverter;
+import org.springframework.http.converter.support.AllEncompassingFormHttpMessageConverter;
+import org.springframework.http.converter.xml.Jaxb2RootElementHttpMessageConverter;
+import org.springframework.http.converter.xml.MappingJackson2XmlHttpMessageConverter;
+import org.springframework.http.converter.xml.SourceHttpMessageConverter;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.xml.DomUtils;
+import org.springframework.web.HttpRequestHandler;
+import org.springframework.web.accept.ContentNegotiationManager;
+import org.springframework.web.accept.ContentNegotiationManagerFactoryBean;
+import org.springframework.web.bind.support.ConfigurableWebBindingInitializer;
+import org.springframework.web.bind.support.WebArgumentResolver;
+import org.springframework.web.method.support.CompositeUriComponentsContributor;
+import org.springframework.web.servlet.HandlerAdapter;
+import org.springframework.web.servlet.HandlerExceptionResolver;
+import org.springframework.web.servlet.HandlerMapping;
+import org.springframework.web.servlet.handler.BeanNameUrlHandlerMapping;
+import org.springframework.web.servlet.handler.ConversionServiceExposingInterceptor;
+import org.springframework.web.servlet.handler.MappedInterceptor;
+import org.springframework.web.servlet.mvc.Controller;
+import org.springframework.web.servlet.mvc.HttpRequestHandlerAdapter;
+import org.springframework.web.servlet.mvc.SimpleControllerHandlerAdapter;
+import org.springframework.web.servlet.mvc.annotation.ResponseStatusExceptionResolver;
+import org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver;
+import org.springframework.web.servlet.mvc.method.annotation.JsonViewRequestBodyAdvice;
+import org.springframework.web.servlet.mvc.method.annotation.JsonViewResponseBodyAdvice;
+import org.springframework.web.servlet.mvc.method.annotation.MvcUriComponentsBuilder;
+import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter;
+import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
+import org.springframework.web.servlet.mvc.method.annotation.ServletWebArgumentResolverAdapter;
+import org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver;
+
+/**
+ * A {@link BeanDefinitionParser} that provides the configuration for the
+ * {@code &lt;annotation-driven/&gt;} MVC namespace element.
+ *
+ * &lt;p&gt;This class registers the following {@link HandlerMapping HandlerMappings}:&lt;/p&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link RequestMappingHandlerMapping}
+ * ordered at 0 for mapping requests to annotated controller methods.
+ * &lt;li&gt;{@link BeanNameUrlHandlerMapping}
+ * ordered at 2 to map URL paths to controller bean names.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Additional HandlerMappings may be registered
+ * as a result of using the {@code &lt;view-controller&gt;} or the
+ * {@code &lt;resources&gt;} MVC namespace elements.
+ *
+ * &lt;p&gt;This class registers the following {@link HandlerAdapter HandlerAdapters}:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link RequestMappingHandlerAdapter}
+ * for processing requests with annotated controller methods.
+ * &lt;li&gt;{@link HttpRequestHandlerAdapter}
+ * for processing requests with {@link HttpRequestHandler HttpRequestHandlers}.
+ * &lt;li&gt;{@link SimpleControllerHandlerAdapter}
+ * for processing requests with interface-based {@link Controller Controllers}.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;This class registers the following {@link HandlerExceptionResolver HandlerExceptionResolvers}:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link ExceptionHandlerExceptionResolver} for handling exceptions through
+ * {@link org.springframework.web.bind.annotation.ExceptionHandler} methods.
+ * &lt;li&gt;{@link ResponseStatusExceptionResolver} for exceptions annotated
+ * with {@link org.springframework.web.bind.annotation.ResponseStatus}.
+ * &lt;li&gt;{@link DefaultHandlerExceptionResolver} for resolving known Spring
+ * exception types
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;This class registers an {@link org.springframework.util.AntPathMatcher}
+ * and a {@link org.springframework.web.util.UrlPathHelper} to be used by:
+ * &lt;ul&gt;
+ * &lt;li&gt;the {@link RequestMappingHandlerMapping},
+ * &lt;li&gt;the {@link HandlerMapping} for ViewControllers
+ * &lt;li&gt;and the {@link HandlerMapping} for serving resources
+ * &lt;/ul&gt;
+ * Note that those beans can be configured by using the {@code path-matching}
+ * MVC namespace element.
+ *
+ * &lt;p&gt;Both the {@link RequestMappingHandlerAdapter} and the
+ * {@link ExceptionHandlerExceptionResolver} are configured with instances of
+ * the following by default:
+ * &lt;ul&gt;
+ * &lt;li&gt;A {@link ContentNegotiationManager}
+ * &lt;li&gt;A {@link DefaultFormattingConversionService}
+ * &lt;li&gt;A {@link org.springframework.validation.beanvalidation.LocalValidatorFactoryBean}
+ * if a JSR-303 implementation is available on the classpath
+ * &lt;li&gt;A range of {@link HttpMessageConverter HttpMessageConverters} depending on which third-party
+ * libraries are available on the classpath.
+ * &lt;/ul&gt;
+ *
+ * @author Keith Donald
+ * @author Juergen Hoeller
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Agim Emruli
+ * @since 3.0
+ */
+<span class="fc" id="L154">class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {</span>
+
+<span class="fc" id="L156">	public static final String HANDLER_MAPPING_BEAN_NAME = RequestMappingHandlerMapping.class.getName();</span>
+
+<span class="fc" id="L158">	public static final String HANDLER_ADAPTER_BEAN_NAME = RequestMappingHandlerAdapter.class.getName();</span>
+
+	public static final String CONTENT_NEGOTIATION_MANAGER_BEAN_NAME = &quot;mvcContentNegotiationManager&quot;;
+
+
+	private static final boolean javaxValidationPresent;
+
+	private static boolean romePresent;
+
+	private static final boolean jaxb2Present;
+
+	private static final boolean jackson2Present;
+
+	private static final boolean jackson2XmlPresent;
+
+	private static final boolean jackson2SmilePresent;
+
+	private static final boolean jackson2CborPresent;
+
+	private static final boolean gsonPresent;
+
+	static {
+<span class="fc" id="L180">		ClassLoader classLoader = AnnotationDrivenBeanDefinitionParser.class.getClassLoader();</span>
+<span class="fc" id="L181">		javaxValidationPresent = ClassUtils.isPresent(&quot;javax.validation.Validator&quot;, classLoader);</span>
+<span class="fc" id="L182">		romePresent = ClassUtils.isPresent(&quot;com.rometools.rome.feed.WireFeed&quot;, classLoader);</span>
+<span class="fc" id="L183">		jaxb2Present = ClassUtils.isPresent(&quot;javax.xml.bind.Binder&quot;, classLoader);</span>
+<span class="pc bpc" id="L184" title="1 of 2 branches missed.">		jackson2Present = ClassUtils.isPresent(&quot;com.fasterxml.jackson.databind.ObjectMapper&quot;, classLoader) &amp;&amp;</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">						ClassUtils.isPresent(&quot;com.fasterxml.jackson.core.JsonGenerator&quot;, classLoader);</span>
+<span class="fc" id="L186">		jackson2XmlPresent = ClassUtils.isPresent(&quot;com.fasterxml.jackson.dataformat.xml.XmlMapper&quot;, classLoader);</span>
+<span class="fc" id="L187">		jackson2SmilePresent = ClassUtils.isPresent(&quot;com.fasterxml.jackson.dataformat.smile.SmileFactory&quot;, classLoader);</span>
+<span class="fc" id="L188">		jackson2CborPresent = ClassUtils.isPresent(&quot;com.fasterxml.jackson.dataformat.cbor.CBORFactory&quot;, classLoader);</span>
+<span class="fc" id="L189">		gsonPresent = ClassUtils.isPresent(&quot;com.google.gson.Gson&quot;, classLoader);</span>
+<span class="fc" id="L190">	}</span>
+
+
+	@Override
+	@Nullable
+	public BeanDefinition parse(Element element, ParserContext context) {
+<span class="fc" id="L196">		Object source = context.extractSource(element);</span>
+<span class="fc" id="L197">		XmlReaderContext readerContext = context.getReaderContext();</span>
+
+<span class="fc" id="L199">		CompositeComponentDefinition compDefinition = new CompositeComponentDefinition(element.getTagName(), source);</span>
+<span class="fc" id="L200">		context.pushContainingComponent(compDefinition);</span>
+
+<span class="fc" id="L202">		RuntimeBeanReference contentNegotiationManager = getContentNegotiationManager(element, source, context);</span>
+
+<span class="fc" id="L204">		RootBeanDefinition handlerMappingDef = new RootBeanDefinition(RequestMappingHandlerMapping.class);</span>
+<span class="fc" id="L205">		handlerMappingDef.setSource(source);</span>
+<span class="fc" id="L206">		handlerMappingDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L207">		handlerMappingDef.getPropertyValues().add(&quot;order&quot;, 0);</span>
+<span class="fc" id="L208">		handlerMappingDef.getPropertyValues().add(&quot;contentNegotiationManager&quot;, contentNegotiationManager);</span>
+
+<span class="fc bfc" id="L210" title="All 2 branches covered.">		if (element.hasAttribute(&quot;enable-matrix-variables&quot;)) {</span>
+<span class="fc" id="L211">			Boolean enableMatrixVariables = Boolean.valueOf(element.getAttribute(&quot;enable-matrix-variables&quot;));</span>
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">			handlerMappingDef.getPropertyValues().add(&quot;removeSemicolonContent&quot;, !enableMatrixVariables);</span>
+		}
+
+<span class="fc" id="L215">		configurePathMatchingProperties(handlerMappingDef, element, context);</span>
+<span class="fc" id="L216">		readerContext.getRegistry().registerBeanDefinition(HANDLER_MAPPING_BEAN_NAME, handlerMappingDef);</span>
+
+<span class="fc" id="L218">		RuntimeBeanReference corsRef = MvcNamespaceUtils.registerCorsConfigurations(null, context, source);</span>
+<span class="fc" id="L219">		handlerMappingDef.getPropertyValues().add(&quot;corsConfigurations&quot;, corsRef);</span>
+
+<span class="fc" id="L221">		RuntimeBeanReference conversionService = getConversionService(element, source, context);</span>
+<span class="fc" id="L222">		RuntimeBeanReference validator = getValidator(element, source, context);</span>
+<span class="fc" id="L223">		RuntimeBeanReference messageCodesResolver = getMessageCodesResolver(element);</span>
+
+<span class="fc" id="L225">		RootBeanDefinition bindingDef = new RootBeanDefinition(ConfigurableWebBindingInitializer.class);</span>
+<span class="fc" id="L226">		bindingDef.setSource(source);</span>
+<span class="fc" id="L227">		bindingDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L228">		bindingDef.getPropertyValues().add(&quot;conversionService&quot;, conversionService);</span>
+<span class="fc" id="L229">		bindingDef.getPropertyValues().add(&quot;validator&quot;, validator);</span>
+<span class="fc" id="L230">		bindingDef.getPropertyValues().add(&quot;messageCodesResolver&quot;, messageCodesResolver);</span>
+
+<span class="fc" id="L232">		ManagedList&lt;?&gt; messageConverters = getMessageConverters(element, source, context);</span>
+<span class="fc" id="L233">		ManagedList&lt;?&gt; argumentResolvers = getArgumentResolvers(element, context);</span>
+<span class="fc" id="L234">		ManagedList&lt;?&gt; returnValueHandlers = getReturnValueHandlers(element, context);</span>
+<span class="fc" id="L235">		String asyncTimeout = getAsyncTimeout(element);</span>
+<span class="fc" id="L236">		RuntimeBeanReference asyncExecutor = getAsyncExecutor(element);</span>
+<span class="fc" id="L237">		ManagedList&lt;?&gt; callableInterceptors = getCallableInterceptors(element, source, context);</span>
+<span class="fc" id="L238">		ManagedList&lt;?&gt; deferredResultInterceptors = getDeferredResultInterceptors(element, source, context);</span>
+
+<span class="fc" id="L240">		RootBeanDefinition handlerAdapterDef = new RootBeanDefinition(RequestMappingHandlerAdapter.class);</span>
+<span class="fc" id="L241">		handlerAdapterDef.setSource(source);</span>
+<span class="fc" id="L242">		handlerAdapterDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L243">		handlerAdapterDef.getPropertyValues().add(&quot;contentNegotiationManager&quot;, contentNegotiationManager);</span>
+<span class="fc" id="L244">		handlerAdapterDef.getPropertyValues().add(&quot;webBindingInitializer&quot;, bindingDef);</span>
+<span class="fc" id="L245">		handlerAdapterDef.getPropertyValues().add(&quot;messageConverters&quot;, messageConverters);</span>
+<span class="fc" id="L246">		addRequestBodyAdvice(handlerAdapterDef);</span>
+<span class="fc" id="L247">		addResponseBodyAdvice(handlerAdapterDef);</span>
+
+<span class="fc bfc" id="L249" title="All 2 branches covered.">		if (element.hasAttribute(&quot;ignore-default-model-on-redirect&quot;)) {</span>
+<span class="fc" id="L250">			Boolean ignoreDefaultModel = Boolean.valueOf(element.getAttribute(&quot;ignore-default-model-on-redirect&quot;));</span>
+<span class="fc" id="L251">			handlerAdapterDef.getPropertyValues().add(&quot;ignoreDefaultModelOnRedirect&quot;, ignoreDefaultModel);</span>
+		}
+<span class="fc bfc" id="L253" title="All 2 branches covered.">		if (argumentResolvers != null) {</span>
+<span class="fc" id="L254">			handlerAdapterDef.getPropertyValues().add(&quot;customArgumentResolvers&quot;, argumentResolvers);</span>
+		}
+<span class="fc bfc" id="L256" title="All 2 branches covered.">		if (returnValueHandlers != null) {</span>
+<span class="fc" id="L257">			handlerAdapterDef.getPropertyValues().add(&quot;customReturnValueHandlers&quot;, returnValueHandlers);</span>
+		}
+<span class="fc bfc" id="L259" title="All 2 branches covered.">		if (asyncTimeout != null) {</span>
+<span class="fc" id="L260">			handlerAdapterDef.getPropertyValues().add(&quot;asyncRequestTimeout&quot;, asyncTimeout);</span>
+		}
+<span class="fc bfc" id="L262" title="All 2 branches covered.">		if (asyncExecutor != null) {</span>
+<span class="fc" id="L263">			handlerAdapterDef.getPropertyValues().add(&quot;taskExecutor&quot;, asyncExecutor);</span>
+		}
+
+<span class="fc" id="L266">		handlerAdapterDef.getPropertyValues().add(&quot;callableInterceptors&quot;, callableInterceptors);</span>
+<span class="fc" id="L267">		handlerAdapterDef.getPropertyValues().add(&quot;deferredResultInterceptors&quot;, deferredResultInterceptors);</span>
+<span class="fc" id="L268">		readerContext.getRegistry().registerBeanDefinition(HANDLER_ADAPTER_BEAN_NAME, handlerAdapterDef);</span>
+
+<span class="fc" id="L270">		RootBeanDefinition uriContributorDef =</span>
+				new RootBeanDefinition(CompositeUriComponentsContributorFactoryBean.class);
+<span class="fc" id="L272">		uriContributorDef.setSource(source);</span>
+<span class="fc" id="L273">		uriContributorDef.getPropertyValues().addPropertyValue(&quot;handlerAdapter&quot;, handlerAdapterDef);</span>
+<span class="fc" id="L274">		uriContributorDef.getPropertyValues().addPropertyValue(&quot;conversionService&quot;, conversionService);</span>
+<span class="fc" id="L275">		String uriContributorName = MvcUriComponentsBuilder.MVC_URI_COMPONENTS_CONTRIBUTOR_BEAN_NAME;</span>
+<span class="fc" id="L276">		readerContext.getRegistry().registerBeanDefinition(uriContributorName, uriContributorDef);</span>
+
+<span class="fc" id="L278">		RootBeanDefinition csInterceptorDef = new RootBeanDefinition(ConversionServiceExposingInterceptor.class);</span>
+<span class="fc" id="L279">		csInterceptorDef.setSource(source);</span>
+<span class="fc" id="L280">		csInterceptorDef.getConstructorArgumentValues().addIndexedArgumentValue(0, conversionService);</span>
+<span class="fc" id="L281">		RootBeanDefinition mappedInterceptorDef = new RootBeanDefinition(MappedInterceptor.class);</span>
+<span class="fc" id="L282">		mappedInterceptorDef.setSource(source);</span>
+<span class="fc" id="L283">		mappedInterceptorDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L284">		mappedInterceptorDef.getConstructorArgumentValues().addIndexedArgumentValue(0, (Object) null);</span>
+<span class="fc" id="L285">		mappedInterceptorDef.getConstructorArgumentValues().addIndexedArgumentValue(1, csInterceptorDef);</span>
+<span class="fc" id="L286">		String mappedInterceptorName = readerContext.registerWithGeneratedName(mappedInterceptorDef);</span>
+
+<span class="fc" id="L288">		RootBeanDefinition methodExceptionResolver = new RootBeanDefinition(ExceptionHandlerExceptionResolver.class);</span>
+<span class="fc" id="L289">		methodExceptionResolver.setSource(source);</span>
+<span class="fc" id="L290">		methodExceptionResolver.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L291">		methodExceptionResolver.getPropertyValues().add(&quot;contentNegotiationManager&quot;, contentNegotiationManager);</span>
+<span class="fc" id="L292">		methodExceptionResolver.getPropertyValues().add(&quot;messageConverters&quot;, messageConverters);</span>
+<span class="fc" id="L293">		methodExceptionResolver.getPropertyValues().add(&quot;order&quot;, 0);</span>
+<span class="fc" id="L294">		addResponseBodyAdvice(methodExceptionResolver);</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">		if (argumentResolvers != null) {</span>
+<span class="fc" id="L296">			methodExceptionResolver.getPropertyValues().add(&quot;customArgumentResolvers&quot;, argumentResolvers);</span>
+		}
+<span class="fc bfc" id="L298" title="All 2 branches covered.">		if (returnValueHandlers != null) {</span>
+<span class="fc" id="L299">			methodExceptionResolver.getPropertyValues().add(&quot;customReturnValueHandlers&quot;, returnValueHandlers);</span>
+		}
+<span class="fc" id="L301">		String methodExResolverName = readerContext.registerWithGeneratedName(methodExceptionResolver);</span>
+
+<span class="fc" id="L303">		RootBeanDefinition statusExceptionResolver = new RootBeanDefinition(ResponseStatusExceptionResolver.class);</span>
+<span class="fc" id="L304">		statusExceptionResolver.setSource(source);</span>
+<span class="fc" id="L305">		statusExceptionResolver.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L306">		statusExceptionResolver.getPropertyValues().add(&quot;order&quot;, 1);</span>
+<span class="fc" id="L307">		String statusExResolverName = readerContext.registerWithGeneratedName(statusExceptionResolver);</span>
+
+<span class="fc" id="L309">		RootBeanDefinition defaultExceptionResolver = new RootBeanDefinition(DefaultHandlerExceptionResolver.class);</span>
+<span class="fc" id="L310">		defaultExceptionResolver.setSource(source);</span>
+<span class="fc" id="L311">		defaultExceptionResolver.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L312">		defaultExceptionResolver.getPropertyValues().add(&quot;order&quot;, 2);</span>
+<span class="fc" id="L313">		String defaultExResolverName = readerContext.registerWithGeneratedName(defaultExceptionResolver);</span>
+
+<span class="fc" id="L315">		context.registerComponent(new BeanComponentDefinition(handlerMappingDef, HANDLER_MAPPING_BEAN_NAME));</span>
+<span class="fc" id="L316">		context.registerComponent(new BeanComponentDefinition(handlerAdapterDef, HANDLER_ADAPTER_BEAN_NAME));</span>
+<span class="fc" id="L317">		context.registerComponent(new BeanComponentDefinition(uriContributorDef, uriContributorName));</span>
+<span class="fc" id="L318">		context.registerComponent(new BeanComponentDefinition(mappedInterceptorDef, mappedInterceptorName));</span>
+<span class="fc" id="L319">		context.registerComponent(new BeanComponentDefinition(methodExceptionResolver, methodExResolverName));</span>
+<span class="fc" id="L320">		context.registerComponent(new BeanComponentDefinition(statusExceptionResolver, statusExResolverName));</span>
+<span class="fc" id="L321">		context.registerComponent(new BeanComponentDefinition(defaultExceptionResolver, defaultExResolverName));</span>
+
+		// Ensure BeanNameUrlHandlerMapping (SPR-8289) and default HandlerAdapters are not &quot;turned off&quot;
+<span class="fc" id="L324">		MvcNamespaceUtils.registerDefaultComponents(context, source);</span>
+
+<span class="fc" id="L326">		context.popAndRegisterContainingComponent();</span>
+
+<span class="fc" id="L328">		return null;</span>
+	}
+
+	protected void addRequestBodyAdvice(RootBeanDefinition beanDef) {
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">		if (jackson2Present) {</span>
+<span class="fc" id="L333">			beanDef.getPropertyValues().add(&quot;requestBodyAdvice&quot;,</span>
+					new RootBeanDefinition(JsonViewRequestBodyAdvice.class));
+		}
+<span class="fc" id="L336">	}</span>
+
+	protected void addResponseBodyAdvice(RootBeanDefinition beanDef) {
+<span class="pc bpc" id="L339" title="1 of 2 branches missed.">		if (jackson2Present) {</span>
+<span class="fc" id="L340">			beanDef.getPropertyValues().add(&quot;responseBodyAdvice&quot;,</span>
+					new RootBeanDefinition(JsonViewResponseBodyAdvice.class));
+		}
+<span class="fc" id="L343">	}</span>
+
+	private RuntimeBeanReference getConversionService(Element element, @Nullable Object source, ParserContext context) {
+		RuntimeBeanReference conversionServiceRef;
+<span class="fc bfc" id="L347" title="All 2 branches covered.">		if (element.hasAttribute(&quot;conversion-service&quot;)) {</span>
+<span class="fc" id="L348">			conversionServiceRef = new RuntimeBeanReference(element.getAttribute(&quot;conversion-service&quot;));</span>
+		}
+		else {
+<span class="fc" id="L351">			RootBeanDefinition conversionDef = new RootBeanDefinition(FormattingConversionServiceFactoryBean.class);</span>
+<span class="fc" id="L352">			conversionDef.setSource(source);</span>
+<span class="fc" id="L353">			conversionDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L354">			String conversionName = context.getReaderContext().registerWithGeneratedName(conversionDef);</span>
+<span class="fc" id="L355">			context.registerComponent(new BeanComponentDefinition(conversionDef, conversionName));</span>
+<span class="fc" id="L356">			conversionServiceRef = new RuntimeBeanReference(conversionName);</span>
+		}
+<span class="fc" id="L358">		return conversionServiceRef;</span>
+	}
+
+	@Nullable
+	private RuntimeBeanReference getValidator(Element element, @Nullable Object source, ParserContext context) {
+<span class="fc bfc" id="L363" title="All 2 branches covered.">		if (element.hasAttribute(&quot;validator&quot;)) {</span>
+<span class="fc" id="L364">			return new RuntimeBeanReference(element.getAttribute(&quot;validator&quot;));</span>
+		}
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">		else if (javaxValidationPresent) {</span>
+<span class="fc" id="L367">			RootBeanDefinition validatorDef = new RootBeanDefinition(</span>
+					&quot;org.springframework.validation.beanvalidation.OptionalValidatorFactoryBean&quot;);
+<span class="fc" id="L369">			validatorDef.setSource(source);</span>
+<span class="fc" id="L370">			validatorDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L371">			String validatorName = context.getReaderContext().registerWithGeneratedName(validatorDef);</span>
+<span class="fc" id="L372">			context.registerComponent(new BeanComponentDefinition(validatorDef, validatorName));</span>
+<span class="fc" id="L373">			return new RuntimeBeanReference(validatorName);</span>
+		}
+		else {
+<span class="nc" id="L376">			return null;</span>
+		}
+	}
+
+	private RuntimeBeanReference getContentNegotiationManager(
+			Element element, @Nullable Object source, ParserContext context) {
+
+		RuntimeBeanReference beanRef;
+<span class="fc bfc" id="L384" title="All 2 branches covered.">		if (element.hasAttribute(&quot;content-negotiation-manager&quot;)) {</span>
+<span class="fc" id="L385">			String name = element.getAttribute(&quot;content-negotiation-manager&quot;);</span>
+<span class="fc" id="L386">			beanRef = new RuntimeBeanReference(name);</span>
+<span class="fc" id="L387">		}</span>
+		else {
+<span class="fc" id="L389">			RootBeanDefinition factoryBeanDef = new RootBeanDefinition(ContentNegotiationManagerFactoryBean.class);</span>
+<span class="fc" id="L390">			factoryBeanDef.setSource(source);</span>
+<span class="fc" id="L391">			factoryBeanDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L392">			factoryBeanDef.getPropertyValues().add(&quot;mediaTypes&quot;, getDefaultMediaTypes());</span>
+<span class="fc" id="L393">			String name = CONTENT_NEGOTIATION_MANAGER_BEAN_NAME;</span>
+<span class="fc" id="L394">			context.getReaderContext().getRegistry().registerBeanDefinition(name, factoryBeanDef);</span>
+<span class="fc" id="L395">			context.registerComponent(new BeanComponentDefinition(factoryBeanDef, name));</span>
+<span class="fc" id="L396">			beanRef = new RuntimeBeanReference(name);</span>
+		}
+<span class="fc" id="L398">		return beanRef;</span>
+	}
+
+	private void configurePathMatchingProperties(
+			RootBeanDefinition handlerMappingDef, Element element, ParserContext context) {
+
+<span class="fc" id="L404">		Element pathMatchingElement = DomUtils.getChildElementByTagName(element, &quot;path-matching&quot;);</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">		if (pathMatchingElement != null) {</span>
+<span class="fc" id="L406">			Object source = context.extractSource(element);</span>
+
+<span class="fc bfc" id="L408" title="All 2 branches covered.">			if (pathMatchingElement.hasAttribute(&quot;suffix-pattern&quot;)) {</span>
+<span class="fc" id="L409">				Boolean useSuffixPatternMatch = Boolean.valueOf(pathMatchingElement.getAttribute(&quot;suffix-pattern&quot;));</span>
+<span class="fc" id="L410">				handlerMappingDef.getPropertyValues().add(&quot;useSuffixPatternMatch&quot;, useSuffixPatternMatch);</span>
+			}
+<span class="fc bfc" id="L412" title="All 2 branches covered.">			if (pathMatchingElement.hasAttribute(&quot;trailing-slash&quot;)) {</span>
+<span class="fc" id="L413">				Boolean useTrailingSlashMatch = Boolean.valueOf(pathMatchingElement.getAttribute(&quot;trailing-slash&quot;));</span>
+<span class="fc" id="L414">				handlerMappingDef.getPropertyValues().add(&quot;useTrailingSlashMatch&quot;, useTrailingSlashMatch);</span>
+			}
+<span class="fc bfc" id="L416" title="All 2 branches covered.">			if (pathMatchingElement.hasAttribute(&quot;registered-suffixes-only&quot;)) {</span>
+<span class="fc" id="L417">				Boolean useRegisteredSuffixPatternMatch = Boolean.valueOf(pathMatchingElement.getAttribute(&quot;registered-suffixes-only&quot;));</span>
+<span class="fc" id="L418">				handlerMappingDef.getPropertyValues().add(&quot;useRegisteredSuffixPatternMatch&quot;, useRegisteredSuffixPatternMatch);</span>
+			}
+
+<span class="fc" id="L421">			RuntimeBeanReference pathHelperRef = null;</span>
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">			if (pathMatchingElement.hasAttribute(&quot;path-helper&quot;)) {</span>
+<span class="fc" id="L423">				pathHelperRef = new RuntimeBeanReference(pathMatchingElement.getAttribute(&quot;path-helper&quot;));</span>
+			}
+<span class="fc" id="L425">			pathHelperRef = MvcNamespaceUtils.registerUrlPathHelper(pathHelperRef, context, source);</span>
+<span class="fc" id="L426">			handlerMappingDef.getPropertyValues().add(&quot;urlPathHelper&quot;, pathHelperRef);</span>
+
+<span class="fc" id="L428">			RuntimeBeanReference pathMatcherRef = null;</span>
+<span class="pc bpc" id="L429" title="1 of 2 branches missed.">			if (pathMatchingElement.hasAttribute(&quot;path-matcher&quot;)) {</span>
+<span class="fc" id="L430">				pathMatcherRef = new RuntimeBeanReference(pathMatchingElement.getAttribute(&quot;path-matcher&quot;));</span>
+			}
+<span class="fc" id="L432">			pathMatcherRef = MvcNamespaceUtils.registerPathMatcher(pathMatcherRef, context, source);</span>
+<span class="fc" id="L433">			handlerMappingDef.getPropertyValues().add(&quot;pathMatcher&quot;, pathMatcherRef);</span>
+		}
+<span class="fc" id="L435">	}</span>
+
+	private Properties getDefaultMediaTypes() {
+<span class="fc" id="L438">		Properties defaultMediaTypes = new Properties();</span>
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">		if (romePresent) {</span>
+<span class="fc" id="L440">			defaultMediaTypes.put(&quot;atom&quot;, MediaType.APPLICATION_ATOM_XML_VALUE);</span>
+<span class="fc" id="L441">			defaultMediaTypes.put(&quot;rss&quot;, MediaType.APPLICATION_RSS_XML_VALUE);</span>
+		}
+<span class="pc bpc" id="L443" title="3 of 4 branches missed.">		if (jaxb2Present || jackson2XmlPresent) {</span>
+<span class="fc" id="L444">			defaultMediaTypes.put(&quot;xml&quot;, MediaType.APPLICATION_XML_VALUE);</span>
+		}
+<span class="pc bpc" id="L446" title="3 of 4 branches missed.">		if (jackson2Present || gsonPresent) {</span>
+<span class="fc" id="L447">			defaultMediaTypes.put(&quot;json&quot;, MediaType.APPLICATION_JSON_VALUE);</span>
+		}
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">		if (jackson2SmilePresent) {</span>
+<span class="fc" id="L450">			defaultMediaTypes.put(&quot;smile&quot;, &quot;application/x-jackson-smile&quot;);</span>
+		}
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">		if (jackson2CborPresent) {</span>
+<span class="fc" id="L453">			defaultMediaTypes.put(&quot;cbor&quot;, &quot;application/cbor&quot;);</span>
+		}
+<span class="fc" id="L455">		return defaultMediaTypes;</span>
+	}
+
+	@Nullable
+	private RuntimeBeanReference getMessageCodesResolver(Element element) {
+<span class="fc bfc" id="L460" title="All 2 branches covered.">		if (element.hasAttribute(&quot;message-codes-resolver&quot;)) {</span>
+<span class="fc" id="L461">			return new RuntimeBeanReference(element.getAttribute(&quot;message-codes-resolver&quot;));</span>
+		}
+		else {
+<span class="fc" id="L464">			return null;</span>
+		}
+	}
+
+	@Nullable
+	private String getAsyncTimeout(Element element) {
+<span class="fc" id="L470">		Element asyncElement = DomUtils.getChildElementByTagName(element, &quot;async-support&quot;);</span>
+<span class="fc bfc" id="L471" title="All 2 branches covered.">		return (asyncElement != null ? asyncElement.getAttribute(&quot;default-timeout&quot;) : null);</span>
+	}
+
+	@Nullable
+	private RuntimeBeanReference getAsyncExecutor(Element element) {
+<span class="fc" id="L476">		Element asyncElement = DomUtils.getChildElementByTagName(element, &quot;async-support&quot;);</span>
+<span class="pc bpc" id="L477" title="1 of 4 branches missed.">		if (asyncElement != null &amp;&amp; asyncElement.hasAttribute(&quot;task-executor&quot;)) {</span>
+<span class="fc" id="L478">			return new RuntimeBeanReference(asyncElement.getAttribute(&quot;task-executor&quot;));</span>
+		}
+<span class="fc" id="L480">		return null;</span>
+	}
+
+	private ManagedList&lt;?&gt; getCallableInterceptors(
+			Element element, @Nullable Object source, ParserContext context) {
+
+<span class="fc" id="L486">		ManagedList&lt;Object&gt; interceptors = new ManagedList&lt;&gt;();</span>
+<span class="fc" id="L487">		Element asyncElement = DomUtils.getChildElementByTagName(element, &quot;async-support&quot;);</span>
+<span class="fc bfc" id="L488" title="All 2 branches covered.">		if (asyncElement != null) {</span>
+<span class="fc" id="L489">			Element interceptorsElement = DomUtils.getChildElementByTagName(asyncElement, &quot;callable-interceptors&quot;);</span>
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">			if (interceptorsElement != null) {</span>
+<span class="fc" id="L491">				interceptors.setSource(source);</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">				for (Element converter : DomUtils.getChildElementsByTagName(interceptorsElement, &quot;bean&quot;)) {</span>
+<span class="fc" id="L493">					BeanDefinitionHolder beanDef = context.getDelegate().parseBeanDefinitionElement(converter);</span>
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">					if (beanDef != null) {</span>
+<span class="fc" id="L495">						beanDef = context.getDelegate().decorateBeanDefinitionIfRequired(converter, beanDef);</span>
+<span class="fc" id="L496">						interceptors.add(beanDef);</span>
+					}
+<span class="fc" id="L498">				}</span>
+			}
+		}
+<span class="fc" id="L501">		return interceptors;</span>
+	}
+
+	private ManagedList&lt;?&gt; getDeferredResultInterceptors(
+			Element element, @Nullable Object source, ParserContext context) {
+
+<span class="fc" id="L507">		ManagedList&lt;Object&gt; interceptors = new ManagedList&lt;&gt;();</span>
+<span class="fc" id="L508">		Element asyncElement = DomUtils.getChildElementByTagName(element, &quot;async-support&quot;);</span>
+<span class="fc bfc" id="L509" title="All 2 branches covered.">		if (asyncElement != null) {</span>
+<span class="fc" id="L510">			Element interceptorsElement = DomUtils.getChildElementByTagName(asyncElement, &quot;deferred-result-interceptors&quot;);</span>
+<span class="pc bpc" id="L511" title="1 of 2 branches missed.">			if (interceptorsElement != null) {</span>
+<span class="fc" id="L512">				interceptors.setSource(source);</span>
+<span class="fc bfc" id="L513" title="All 2 branches covered.">				for (Element converter : DomUtils.getChildElementsByTagName(interceptorsElement, &quot;bean&quot;)) {</span>
+<span class="fc" id="L514">					BeanDefinitionHolder beanDef = context.getDelegate().parseBeanDefinitionElement(converter);</span>
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">					if (beanDef != null) {</span>
+<span class="fc" id="L516">						beanDef = context.getDelegate().decorateBeanDefinitionIfRequired(converter, beanDef);</span>
+<span class="fc" id="L517">						interceptors.add(beanDef);</span>
+					}
+<span class="fc" id="L519">				}</span>
+			}
+		}
+<span class="fc" id="L522">		return interceptors;</span>
+	}
+
+	@Nullable
+	private ManagedList&lt;?&gt; getArgumentResolvers(Element element, ParserContext context) {
+<span class="fc" id="L527">		Element resolversElement = DomUtils.getChildElementByTagName(element, &quot;argument-resolvers&quot;);</span>
+<span class="fc bfc" id="L528" title="All 2 branches covered.">		if (resolversElement != null) {</span>
+<span class="fc" id="L529">			ManagedList&lt;Object&gt; resolvers = extractBeanSubElements(resolversElement, context);</span>
+<span class="fc" id="L530">			return wrapLegacyResolvers(resolvers, context);</span>
+		}
+<span class="fc" id="L532">		return null;</span>
+	}
+
+	private ManagedList&lt;Object&gt; wrapLegacyResolvers(List&lt;Object&gt; list, ParserContext context) {
+<span class="fc" id="L536">		ManagedList&lt;Object&gt; result = new ManagedList&lt;&gt;();</span>
+<span class="fc bfc" id="L537" title="All 2 branches covered.">		for (Object object : list) {</span>
+<span class="fc bfc" id="L538" title="All 2 branches covered.">			if (object instanceof BeanDefinitionHolder) {</span>
+<span class="fc" id="L539">				BeanDefinitionHolder beanDef = (BeanDefinitionHolder) object;</span>
+<span class="fc" id="L540">				String className = beanDef.getBeanDefinition().getBeanClassName();</span>
+<span class="fc" id="L541">				Assert.notNull(className, &quot;No resolver class&quot;);</span>
+<span class="fc" id="L542">				Class&lt;?&gt; clazz = ClassUtils.resolveClassName(className, context.getReaderContext().getBeanClassLoader());</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">				if (WebArgumentResolver.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L544">					RootBeanDefinition adapter = new RootBeanDefinition(ServletWebArgumentResolverAdapter.class);</span>
+<span class="fc" id="L545">					adapter.getConstructorArgumentValues().addIndexedArgumentValue(0, beanDef);</span>
+<span class="fc" id="L546">					result.add(new BeanDefinitionHolder(adapter, beanDef.getBeanName() + &quot;Adapter&quot;));</span>
+<span class="fc" id="L547">					continue;</span>
+				}
+			}
+<span class="fc" id="L550">			result.add(object);</span>
+<span class="fc" id="L551">		}</span>
+<span class="fc" id="L552">		return result;</span>
+	}
+
+	@Nullable
+	private ManagedList&lt;?&gt; getReturnValueHandlers(Element element, ParserContext context) {
+<span class="fc" id="L557">		Element handlers = DomUtils.getChildElementByTagName(element, &quot;return-value-handlers&quot;);</span>
+<span class="fc bfc" id="L558" title="All 2 branches covered.">		return (handlers != null ? extractBeanSubElements(handlers, context) : null);</span>
+	}
+
+	private ManagedList&lt;?&gt; getMessageConverters(Element element, @Nullable Object source, ParserContext context) {
+<span class="fc" id="L562">		Element convertersElement = DomUtils.getChildElementByTagName(element, &quot;message-converters&quot;);</span>
+<span class="fc" id="L563">		ManagedList&lt;Object&gt; messageConverters = new ManagedList&lt;&gt;();</span>
+<span class="fc bfc" id="L564" title="All 2 branches covered.">		if (convertersElement != null) {</span>
+<span class="fc" id="L565">			messageConverters.setSource(source);</span>
+<span class="fc bfc" id="L566" title="All 2 branches covered.">			for (Element beanElement : DomUtils.getChildElementsByTagName(convertersElement, &quot;bean&quot;, &quot;ref&quot;)) {</span>
+<span class="fc" id="L567">				Object object = context.getDelegate().parsePropertySubElement(beanElement, null);</span>
+<span class="fc" id="L568">				messageConverters.add(object);</span>
+<span class="fc" id="L569">			}</span>
+		}
+
+<span class="fc bfc" id="L572" title="All 4 branches covered.">		if (convertersElement == null || Boolean.valueOf(convertersElement.getAttribute(&quot;register-defaults&quot;))) {</span>
+<span class="fc" id="L573">			messageConverters.setSource(source);</span>
+<span class="fc" id="L574">			messageConverters.add(createConverterDefinition(ByteArrayHttpMessageConverter.class, source));</span>
+
+<span class="fc" id="L576">			RootBeanDefinition stringConverterDef = createConverterDefinition(StringHttpMessageConverter.class, source);</span>
+<span class="fc" id="L577">			stringConverterDef.getPropertyValues().add(&quot;writeAcceptCharset&quot;, false);</span>
+<span class="fc" id="L578">			messageConverters.add(stringConverterDef);</span>
+
+<span class="fc" id="L580">			messageConverters.add(createConverterDefinition(ResourceHttpMessageConverter.class, source));</span>
+<span class="fc" id="L581">			messageConverters.add(createConverterDefinition(ResourceRegionHttpMessageConverter.class, source));</span>
+<span class="fc" id="L582">			messageConverters.add(createConverterDefinition(SourceHttpMessageConverter.class, source));</span>
+<span class="fc" id="L583">			messageConverters.add(createConverterDefinition(AllEncompassingFormHttpMessageConverter.class, source));</span>
+
+<span class="pc bpc" id="L585" title="1 of 2 branches missed.">			if (romePresent) {</span>
+<span class="fc" id="L586">				messageConverters.add(createConverterDefinition(AtomFeedHttpMessageConverter.class, source));</span>
+<span class="fc" id="L587">				messageConverters.add(createConverterDefinition(RssChannelHttpMessageConverter.class, source));</span>
+			}
+
+<span class="pc bpc" id="L590" title="1 of 2 branches missed.">			if (jackson2XmlPresent) {</span>
+<span class="fc" id="L591">				Class&lt;?&gt; type = MappingJackson2XmlHttpMessageConverter.class;</span>
+<span class="fc" id="L592">				RootBeanDefinition jacksonConverterDef = createConverterDefinition(type, source);</span>
+<span class="fc" id="L593">				GenericBeanDefinition jacksonFactoryDef = createObjectMapperFactoryDefinition(source);</span>
+<span class="fc" id="L594">				jacksonFactoryDef.getPropertyValues().add(&quot;createXmlMapper&quot;, true);</span>
+<span class="fc" id="L595">				jacksonConverterDef.getConstructorArgumentValues().addIndexedArgumentValue(0, jacksonFactoryDef);</span>
+<span class="fc" id="L596">				messageConverters.add(jacksonConverterDef);</span>
+<span class="fc" id="L597">			}</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">			else if (jaxb2Present) {</span>
+<span class="nc" id="L599">				messageConverters.add(createConverterDefinition(Jaxb2RootElementHttpMessageConverter.class, source));</span>
+			}
+
+<span class="pc bpc" id="L602" title="1 of 2 branches missed.">			if (jackson2Present) {</span>
+<span class="fc" id="L603">				Class&lt;?&gt; type = MappingJackson2HttpMessageConverter.class;</span>
+<span class="fc" id="L604">				RootBeanDefinition jacksonConverterDef = createConverterDefinition(type, source);</span>
+<span class="fc" id="L605">				GenericBeanDefinition jacksonFactoryDef = createObjectMapperFactoryDefinition(source);</span>
+<span class="fc" id="L606">				jacksonConverterDef.getConstructorArgumentValues().addIndexedArgumentValue(0, jacksonFactoryDef);</span>
+<span class="fc" id="L607">				messageConverters.add(jacksonConverterDef);</span>
+<span class="fc" id="L608">			}</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">			else if (gsonPresent) {</span>
+<span class="nc" id="L610">				messageConverters.add(createConverterDefinition(GsonHttpMessageConverter.class, source));</span>
+			}
+
+<span class="pc bpc" id="L613" title="1 of 2 branches missed.">			if (jackson2SmilePresent) {</span>
+<span class="fc" id="L614">				Class&lt;?&gt; type = MappingJackson2SmileHttpMessageConverter.class;</span>
+<span class="fc" id="L615">				RootBeanDefinition jacksonConverterDef = createConverterDefinition(type, source);</span>
+<span class="fc" id="L616">				GenericBeanDefinition jacksonFactoryDef = createObjectMapperFactoryDefinition(source);</span>
+<span class="fc" id="L617">				jacksonFactoryDef.getPropertyValues().add(&quot;factory&quot;, new SmileFactory());</span>
+<span class="fc" id="L618">				jacksonConverterDef.getConstructorArgumentValues().addIndexedArgumentValue(0, jacksonFactoryDef);</span>
+<span class="fc" id="L619">				messageConverters.add(jacksonConverterDef);</span>
+			}
+<span class="pc bpc" id="L621" title="1 of 2 branches missed.">			if (jackson2CborPresent) {</span>
+<span class="fc" id="L622">				Class&lt;?&gt; type = MappingJackson2CborHttpMessageConverter.class;</span>
+<span class="fc" id="L623">				RootBeanDefinition jacksonConverterDef = createConverterDefinition(type, source);</span>
+<span class="fc" id="L624">				GenericBeanDefinition jacksonFactoryDef = createObjectMapperFactoryDefinition(source);</span>
+<span class="fc" id="L625">				jacksonFactoryDef.getPropertyValues().add(&quot;factory&quot;, new CBORFactory());</span>
+<span class="fc" id="L626">				jacksonConverterDef.getConstructorArgumentValues().addIndexedArgumentValue(0, jacksonFactoryDef);</span>
+<span class="fc" id="L627">				messageConverters.add(jacksonConverterDef);</span>
+			}
+		}
+<span class="fc" id="L630">		return messageConverters;</span>
+	}
+
+	private GenericBeanDefinition createObjectMapperFactoryDefinition(@Nullable Object source) {
+<span class="fc" id="L634">		GenericBeanDefinition beanDefinition = new GenericBeanDefinition();</span>
+<span class="fc" id="L635">		beanDefinition.setBeanClass(Jackson2ObjectMapperFactoryBean.class);</span>
+<span class="fc" id="L636">		beanDefinition.setSource(source);</span>
+<span class="fc" id="L637">		beanDefinition.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L638">		return beanDefinition;</span>
+	}
+
+	private RootBeanDefinition createConverterDefinition(Class&lt;?&gt; converterClass, @Nullable Object source) {
+<span class="fc" id="L642">		RootBeanDefinition beanDefinition = new RootBeanDefinition(converterClass);</span>
+<span class="fc" id="L643">		beanDefinition.setSource(source);</span>
+<span class="fc" id="L644">		beanDefinition.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);</span>
+<span class="fc" id="L645">		return beanDefinition;</span>
+	}
+
+	private ManagedList&lt;Object&gt; extractBeanSubElements(Element parentElement, ParserContext context) {
+<span class="fc" id="L649">		ManagedList&lt;Object&gt; list = new ManagedList&lt;&gt;();</span>
+<span class="fc" id="L650">		list.setSource(context.extractSource(parentElement));</span>
+<span class="fc bfc" id="L651" title="All 2 branches covered.">		for (Element beanElement : DomUtils.getChildElementsByTagName(parentElement, &quot;bean&quot;, &quot;ref&quot;)) {</span>
+<span class="fc" id="L652">			Object object = context.getDelegate().parsePropertySubElement(beanElement, null);</span>
+<span class="fc" id="L653">			list.add(object);</span>
+<span class="fc" id="L654">		}</span>
+<span class="fc" id="L655">		return list;</span>
+	}
+
+
+	/**
+	 * A FactoryBean for a CompositeUriComponentsContributor that obtains the
+	 * HandlerMethodArgumentResolver's configured in RequestMappingHandlerAdapter
+	 * after it is fully initialized.
+	 */
+<span class="fc" id="L664">	static class CompositeUriComponentsContributorFactoryBean</span>
+			implements FactoryBean&lt;CompositeUriComponentsContributor&gt;, InitializingBean {
+
+		@Nullable
+		private RequestMappingHandlerAdapter handlerAdapter;
+
+		@Nullable
+		private ConversionService conversionService;
+
+		@Nullable
+		private CompositeUriComponentsContributor uriComponentsContributor;
+
+		public void setHandlerAdapter(RequestMappingHandlerAdapter handlerAdapter) {
+<span class="fc" id="L677">			this.handlerAdapter = handlerAdapter;</span>
+<span class="fc" id="L678">		}</span>
+
+		public void setConversionService(ConversionService conversionService) {
+<span class="fc" id="L681">			this.conversionService = conversionService;</span>
+<span class="fc" id="L682">		}</span>
+
+		@Override
+		public void afterPropertiesSet() {
+<span class="pc bpc" id="L686" title="1 of 2 branches missed.">			Assert.state(this.handlerAdapter != null, &quot;No RequestMappingHandlerAdapter set&quot;);</span>
+<span class="fc" id="L687">			this.uriComponentsContributor = new CompositeUriComponentsContributor(</span>
+<span class="fc" id="L688">					this.handlerAdapter.getArgumentResolvers(), this.conversionService);</span>
+<span class="fc" id="L689">		}</span>
+
+		@Override
+		@Nullable
+		public CompositeUriComponentsContributor getObject() {
+<span class="fc" id="L694">			return this.uriComponentsContributor;</span>
+		}
+
+		@Override
+		public Class&lt;?&gt; getObjectType() {
+<span class="fc" id="L699">			return CompositeUriComponentsContributor.class;</span>
+		}
+
+		@Override
+		public boolean isSingleton() {
+<span class="fc" id="L704">			return true;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,626 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SubProtocolWebSocketHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-websocket</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.messaging</a> &gt; <span class="el_source">SubProtocolWebSocketHandler.java</span></div><h1>SubProtocolWebSocketHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.messaging;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.context.SmartLifecycle;
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHandler;
+import org.springframework.messaging.MessagingException;
+import org.springframework.messaging.SubscribableChannel;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.SubProtocolCapable;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.WebSocketMessage;
+import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
+import org.springframework.web.socket.sockjs.transport.session.PollingSockJsSession;
+import org.springframework.web.socket.sockjs.transport.session.StreamingSockJsSession;
+
+/**
+ * An implementation of {@link WebSocketHandler} that delegates incoming WebSocket
+ * messages to a {@link SubProtocolHandler} along with a {@link MessageChannel} to which
+ * the sub-protocol handler can send messages from WebSocket clients to the application.
+ *
+ * &lt;p&gt;Also an implementation of {@link MessageHandler} that finds the WebSocket session
+ * associated with the {@link Message} and passes it, along with the message, to the
+ * sub-protocol handler to send messages from the application back to the client.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @author Andy Wilkinson
+ * @author Artem Bilan
+ * @since 4.0
+ */
+public class SubProtocolWebSocketHandler
+		implements WebSocketHandler, SubProtocolCapable, MessageHandler, SmartLifecycle {
+
+	/** The default value for {@link #setTimeToFirstMessage(int) timeToFirstMessage}. */
+	private static final int DEFAULT_TIME_TO_FIRST_MESSAGE = 60 * 1000;
+
+
+<span class="fc" id="L75">	private final Log logger = LogFactory.getLog(SubProtocolWebSocketHandler.class);</span>
+
+
+	private final MessageChannel clientInboundChannel;
+
+	private final SubscribableChannel clientOutboundChannel;
+
+<span class="fc" id="L82">	private final Map&lt;String, SubProtocolHandler&gt; protocolHandlerLookup =</span>
+			new TreeMap&lt;&gt;(String.CASE_INSENSITIVE_ORDER);
+
+<span class="fc" id="L85">	private final Set&lt;SubProtocolHandler&gt; protocolHandlers = new LinkedHashSet&lt;&gt;();</span>
+
+	@Nullable
+	private SubProtocolHandler defaultProtocolHandler;
+
+<span class="fc" id="L90">	private final Map&lt;String, WebSocketSessionHolder&gt; sessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L92">	private int sendTimeLimit = 10 * 1000;</span>
+
+<span class="fc" id="L94">	private int sendBufferSizeLimit = 512 * 1024;</span>
+
+<span class="fc" id="L96">	private int timeToFirstMessage = DEFAULT_TIME_TO_FIRST_MESSAGE;</span>
+
+<span class="fc" id="L98">	private volatile long lastSessionCheckTime = System.currentTimeMillis();</span>
+
+<span class="fc" id="L100">	private final ReentrantLock sessionCheckLock = new ReentrantLock();</span>
+
+<span class="fc" id="L102">	private final Stats stats = new Stats();</span>
+
+<span class="fc" id="L104">	private volatile boolean running = false;</span>
+
+<span class="fc" id="L106">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Create a new {@code SubProtocolWebSocketHandler} for the given inbound and outbound channels.
+	 * @param clientInboundChannel the inbound {@code MessageChannel}
+	 * @param clientOutboundChannel the outbound {@code MessageChannel}
+	 */
+<span class="fc" id="L114">	public SubProtocolWebSocketHandler(MessageChannel clientInboundChannel, SubscribableChannel clientOutboundChannel) {</span>
+<span class="fc" id="L115">		Assert.notNull(clientInboundChannel, &quot;Inbound MessageChannel must not be null&quot;);</span>
+<span class="fc" id="L116">		Assert.notNull(clientOutboundChannel, &quot;Outbound MessageChannel must not be null&quot;);</span>
+<span class="fc" id="L117">		this.clientInboundChannel = clientInboundChannel;</span>
+<span class="fc" id="L118">		this.clientOutboundChannel = clientOutboundChannel;</span>
+<span class="fc" id="L119">	}</span>
+
+
+	/**
+	 * Configure one or more handlers to use depending on the sub-protocol requested by
+	 * the client in the WebSocket handshake request.
+	 * @param protocolHandlers the sub-protocol handlers to use
+	 */
+	public void setProtocolHandlers(List&lt;SubProtocolHandler&gt; protocolHandlers) {
+<span class="fc" id="L128">		this.protocolHandlerLookup.clear();</span>
+<span class="fc" id="L129">		this.protocolHandlers.clear();</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">		for (SubProtocolHandler handler : protocolHandlers) {</span>
+<span class="fc" id="L131">			addProtocolHandler(handler);</span>
+<span class="fc" id="L132">		}</span>
+<span class="fc" id="L133">	}</span>
+
+	public List&lt;SubProtocolHandler&gt; getProtocolHandlers() {
+<span class="fc" id="L136">		return new ArrayList&lt;&gt;(this.protocolHandlers);</span>
+	}
+
+	/**
+	 * Register a sub-protocol handler.
+	 */
+	public void addProtocolHandler(SubProtocolHandler handler) {
+<span class="fc" id="L143">		List&lt;String&gt; protocols = handler.getSupportedProtocols();</span>
+<span class="fc bfc" id="L144" title="All 2 branches covered.">		if (CollectionUtils.isEmpty(protocols)) {</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">			if (logger.isErrorEnabled()) {</span>
+<span class="fc" id="L146">				logger.error(&quot;No sub-protocols for &quot; + handler);</span>
+			}
+<span class="fc" id="L148">			return;</span>
+		}
+<span class="fc bfc" id="L150" title="All 2 branches covered.">		for (String protocol : protocols) {</span>
+<span class="fc" id="L151">			SubProtocolHandler replaced = this.protocolHandlerLookup.put(protocol, handler);</span>
+<span class="pc bpc" id="L152" title="1 of 4 branches missed.">			if (replaced != null &amp;&amp; replaced != handler) {</span>
+<span class="nc" id="L153">				throw new IllegalStateException(&quot;Cannot map &quot; + handler +</span>
+						&quot; to protocol '&quot; + protocol + &quot;': already mapped to &quot; + replaced + &quot;.&quot;);
+			}
+<span class="fc" id="L156">		}</span>
+<span class="fc" id="L157">		this.protocolHandlers.add(handler);</span>
+<span class="fc" id="L158">	}</span>
+
+	/**
+	 * Return the sub-protocols keyed by protocol name.
+	 */
+	public Map&lt;String, SubProtocolHandler&gt; getProtocolHandlerMap() {
+<span class="fc" id="L164">		return this.protocolHandlerLookup;</span>
+	}
+
+	/**
+	 * Set the {@link SubProtocolHandler} to use when the client did not request a
+	 * sub-protocol.
+	 * @param defaultProtocolHandler the default handler
+	 */
+	public void setDefaultProtocolHandler(@Nullable SubProtocolHandler defaultProtocolHandler) {
+<span class="fc" id="L173">		this.defaultProtocolHandler = defaultProtocolHandler;</span>
+<span class="pc bpc" id="L174" title="1 of 2 branches missed.">		if (this.protocolHandlerLookup.isEmpty()) {</span>
+<span class="fc" id="L175">			setProtocolHandlers(Collections.singletonList(defaultProtocolHandler));</span>
+		}
+<span class="fc" id="L177">	}</span>
+
+	/**
+	 * Return the default sub-protocol handler to use.
+	 */
+	@Nullable
+	public SubProtocolHandler getDefaultProtocolHandler() {
+<span class="nc" id="L184">		return this.defaultProtocolHandler;</span>
+	}
+
+	/**
+	 * Return all supported protocols.
+	 */
+	public List&lt;String&gt; getSubProtocols() {
+<span class="fc" id="L191">		return new ArrayList&lt;&gt;(this.protocolHandlerLookup.keySet());</span>
+	}
+
+	/**
+	 * Specify the send-time limit (milliseconds).
+	 * @see ConcurrentWebSocketSessionDecorator
+	 */
+	public void setSendTimeLimit(int sendTimeLimit) {
+<span class="fc" id="L199">		this.sendTimeLimit = sendTimeLimit;</span>
+<span class="fc" id="L200">	}</span>
+
+	/**
+	 * Return the send-time limit (milliseconds).
+	 */
+	public int getSendTimeLimit() {
+<span class="fc" id="L206">		return this.sendTimeLimit;</span>
+	}
+
+	/**
+	 * Specify the buffer-size limit (number of bytes).
+	 * @see ConcurrentWebSocketSessionDecorator
+	 */
+	public void setSendBufferSizeLimit(int sendBufferSizeLimit) {
+<span class="fc" id="L214">		this.sendBufferSizeLimit = sendBufferSizeLimit;</span>
+<span class="fc" id="L215">	}</span>
+
+	/**
+	 * Return the buffer-size limit (number of bytes).
+	 */
+	public int getSendBufferSizeLimit() {
+<span class="fc" id="L221">		return this.sendBufferSizeLimit;</span>
+	}
+
+	/**
+	 * Set the maximum time allowed in milliseconds after the WebSocket connection
+	 * is established and before the first sub-protocol message is received.
+	 * &lt;p&gt;This handler is for WebSocket connections that use a sub-protocol.
+	 * Therefore, we expect the client to send at least one sub-protocol message
+	 * in the beginning, or else we assume the connection isn't doing well, e.g.
+	 * proxy issue, slow network, and can be closed.
+	 * &lt;p&gt;By default this is set to {@code 60,000} (1 minute).
+	 * @param timeToFirstMessage the maximum time allowed in milliseconds
+	 * @since 5.1
+	 * @see #checkSessions()
+	 */
+	public void setTimeToFirstMessage(int timeToFirstMessage) {
+<span class="fc" id="L237">		this.timeToFirstMessage = timeToFirstMessage;</span>
+<span class="fc" id="L238">	}</span>
+
+	/**
+	 * Return the maximum time allowed after the WebSocket connection is
+	 * established and before the first sub-protocol message.
+	 * @since 5.1
+	 */
+	public int getTimeToFirstMessage() {
+<span class="fc" id="L246">		return this.timeToFirstMessage;</span>
+	}
+
+	/**
+	 * Return a String describing internal state and counters.
+	 */
+	public String getStatsInfo() {
+<span class="fc" id="L253">		return this.stats.toString();</span>
+	}
+
+
+	@Override
+	public final void start() {
+<span class="pc bpc" id="L259" title="2 of 4 branches missed.">		Assert.isTrue(this.defaultProtocolHandler != null || !this.protocolHandlers.isEmpty(), &quot;No handlers&quot;);</span>
+
+<span class="fc" id="L261">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L262">			this.clientOutboundChannel.subscribe(this);</span>
+<span class="fc" id="L263">			this.running = true;</span>
+<span class="fc" id="L264">		}</span>
+<span class="fc" id="L265">	}</span>
+
+	@Override
+	public final void stop() {
+<span class="fc" id="L269">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L270">			this.running = false;</span>
+<span class="fc" id="L271">			this.clientOutboundChannel.unsubscribe(this);</span>
+<span class="fc" id="L272">		}</span>
+
+		// Proactively notify all active WebSocket sessions
+<span class="fc bfc" id="L275" title="All 2 branches covered.">		for (WebSocketSessionHolder holder : this.sessions.values()) {</span>
+			try {
+<span class="fc" id="L277">				holder.getSession().close(CloseStatus.GOING_AWAY);</span>
+			}
+<span class="nc" id="L279">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L281">					logger.warn(&quot;Failed to close '&quot; + holder.getSession() + &quot;': &quot; + ex);</span>
+				}
+<span class="fc" id="L283">			}</span>
+<span class="fc" id="L284">		}</span>
+<span class="fc" id="L285">	}</span>
+
+	@Override
+	public final void stop(Runnable callback) {
+<span class="fc" id="L289">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L290">			stop();</span>
+<span class="fc" id="L291">			callback.run();</span>
+<span class="fc" id="L292">		}</span>
+<span class="fc" id="L293">	}</span>
+
+	@Override
+	public final boolean isRunning() {
+<span class="fc" id="L297">		return this.running;</span>
+	}
+
+
+	@Override
+	public void afterConnectionEstablished(WebSocketSession session) throws Exception {
+		// WebSocketHandlerDecorator could close the session
+<span class="fc bfc" id="L304" title="All 2 branches covered.">		if (!session.isOpen()) {</span>
+<span class="fc" id="L305">			return;</span>
+		}
+
+<span class="fc" id="L308">		this.stats.incrementSessionCount(session);</span>
+<span class="fc" id="L309">		session = decorateSession(session);</span>
+<span class="fc" id="L310">		this.sessions.put(session.getId(), new WebSocketSessionHolder(session));</span>
+<span class="fc" id="L311">		findProtocolHandler(session).afterSessionStarted(session, this.clientInboundChannel);</span>
+<span class="fc" id="L312">	}</span>
+
+	/**
+	 * Handle an inbound message from a WebSocket client.
+	 */
+	@Override
+	public void handleMessage(WebSocketSession session, WebSocketMessage&lt;?&gt; message) throws Exception {
+<span class="fc" id="L319">		WebSocketSessionHolder holder = this.sessions.get(session.getId());</span>
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">		if (holder != null) {</span>
+<span class="fc" id="L321">			session = holder.getSession();</span>
+		}
+<span class="fc" id="L323">		SubProtocolHandler protocolHandler = findProtocolHandler(session);</span>
+<span class="fc" id="L324">		protocolHandler.handleMessageFromClient(session, message, this.clientInboundChannel);</span>
+<span class="pc bpc" id="L325" title="1 of 2 branches missed.">		if (holder != null) {</span>
+<span class="fc" id="L326">			holder.setHasHandledMessages();</span>
+		}
+<span class="fc" id="L328">		checkSessions();</span>
+<span class="fc" id="L329">	}</span>
+
+	/**
+	 * Handle an outbound Spring Message to a WebSocket client.
+	 */
+	@Override
+	public void handleMessage(Message&lt;?&gt; message) throws MessagingException {
+<span class="fc" id="L336">		String sessionId = resolveSessionId(message);</span>
+<span class="pc bpc" id="L337" title="1 of 2 branches missed.">		if (sessionId == null) {</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">			if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L339">				logger.error(&quot;Could not find session id in &quot; + message);</span>
+			}
+<span class="nc" id="L341">			return;</span>
+		}
+
+<span class="fc" id="L344">		WebSocketSessionHolder holder = this.sessions.get(sessionId);</span>
+<span class="fc bfc" id="L345" title="All 2 branches covered.">		if (holder == null) {</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+				// The broker may not have removed the session yet
+<span class="nc" id="L348">				logger.debug(&quot;No session for &quot; + message);</span>
+			}
+<span class="fc" id="L350">			return;</span>
+		}
+
+<span class="fc" id="L353">		WebSocketSession session = holder.getSession();</span>
+		try {
+<span class="fc" id="L355">			findProtocolHandler(session).handleMessageToClient(session, message);</span>
+		}
+<span class="nc" id="L357">		catch (SessionLimitExceededException ex) {</span>
+			try {
+<span class="nc bnc" id="L359" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L360">					logger.debug(&quot;Terminating '&quot; + session + &quot;'&quot;, ex);</span>
+				}
+<span class="nc" id="L362">				this.stats.incrementLimitExceededCount();</span>
+<span class="nc" id="L363">				clearSession(session, ex.getStatus()); // clear first, session may be unresponsive</span>
+<span class="nc" id="L364">				session.close(ex.getStatus());</span>
+			}
+<span class="nc" id="L366">			catch (Exception secondException) {</span>
+<span class="nc" id="L367">				logger.debug(&quot;Failure while closing session &quot; + sessionId + &quot;.&quot;, secondException);</span>
+<span class="nc" id="L368">			}</span>
+		}
+<span class="nc" id="L370">		catch (Exception ex) {</span>
+			// Could be part of normal workflow (e.g. browser tab closed)
+<span class="nc bnc" id="L372" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L373">				logger.debug(&quot;Failed to send message to client in &quot; + session + &quot;: &quot; + message, ex);</span>
+			}
+<span class="pc" id="L375">		}</span>
+<span class="fc" id="L376">	}</span>
+
+	@Override
+	public void handleTransportError(WebSocketSession session, Throwable exception) throws Exception {
+<span class="nc" id="L380">		this.stats.incrementTransportError();</span>
+<span class="nc" id="L381">	}</span>
+
+	@Override
+	public void afterConnectionClosed(WebSocketSession session, CloseStatus closeStatus) throws Exception {
+<span class="fc" id="L385">		clearSession(session, closeStatus);</span>
+<span class="fc" id="L386">	}</span>
+
+	@Override
+	public boolean supportsPartialMessages() {
+<span class="fc" id="L390">		return false;</span>
+	}
+
+
+	/**
+	 * Decorate the given {@link WebSocketSession}, if desired.
+	 * &lt;p&gt;The default implementation builds a {@link ConcurrentWebSocketSessionDecorator}
+	 * with the configured {@link #getSendTimeLimit() send-time limit} and
+	 * {@link #getSendBufferSizeLimit() buffer-size limit}.
+	 * @param session the original {@code WebSocketSession}
+	 * @return the decorated {@code WebSocketSession}, or potentially the given session as-is
+	 * @since 4.3.13
+	 */
+	protected WebSocketSession decorateSession(WebSocketSession session) {
+<span class="fc" id="L404">		return new ConcurrentWebSocketSessionDecorator(session, getSendTimeLimit(), getSendBufferSizeLimit());</span>
+	}
+
+	/**
+	 * Find a {@link SubProtocolHandler} for the given session.
+	 * @param session the {@code WebSocketSession} to find a handler for
+	 */
+	protected final SubProtocolHandler findProtocolHandler(WebSocketSession session) {
+<span class="fc" id="L412">		String protocol = null;</span>
+		try {
+<span class="fc" id="L414">			protocol = session.getAcceptedProtocol();</span>
+		}
+<span class="nc" id="L416">		catch (Exception ex) {</span>
+			// Shouldn't happen
+<span class="nc" id="L418">			logger.error(&quot;Failed to obtain session.getAcceptedProtocol(): &quot; +</span>
+					&quot;will use the default protocol handler (if configured).&quot;, ex);
+<span class="fc" id="L420">		}</span>
+
+		SubProtocolHandler handler;
+<span class="fc bfc" id="L423" title="All 2 branches covered.">		if (!StringUtils.isEmpty(protocol)) {</span>
+<span class="fc" id="L424">			handler = this.protocolHandlerLookup.get(protocol);</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">			if (handler == null) {</span>
+<span class="fc" id="L426">				throw new IllegalStateException(</span>
+						&quot;No handler for '&quot; + protocol + &quot;' among &quot; + this.protocolHandlerLookup);
+			}
+		}
+		else {
+<span class="fc bfc" id="L431" title="All 2 branches covered.">			if (this.defaultProtocolHandler != null) {</span>
+<span class="fc" id="L432">				handler = this.defaultProtocolHandler;</span>
+			}
+<span class="fc bfc" id="L434" title="All 2 branches covered.">			else if (this.protocolHandlers.size() == 1) {</span>
+<span class="fc" id="L435">				handler = this.protocolHandlers.iterator().next();</span>
+			}
+			else {
+<span class="fc" id="L438">				throw new IllegalStateException(&quot;Multiple protocol handlers configured and &quot; +</span>
+						&quot;no protocol was negotiated. Consider configuring a default SubProtocolHandler.&quot;);
+			}
+		}
+<span class="fc" id="L442">		return handler;</span>
+	}
+
+	@Nullable
+	private String resolveSessionId(Message&lt;?&gt; message) {
+<span class="pc bpc" id="L447" title="1 of 2 branches missed.">		for (SubProtocolHandler handler : this.protocolHandlerLookup.values()) {</span>
+<span class="fc" id="L448">			String sessionId = handler.resolveSessionId(message);</span>
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">			if (sessionId != null) {</span>
+<span class="fc" id="L450">				return sessionId;</span>
+			}
+<span class="nc" id="L452">		}</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">		if (this.defaultProtocolHandler != null) {</span>
+<span class="nc" id="L454">			String sessionId = this.defaultProtocolHandler.resolveSessionId(message);</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">			if (sessionId != null) {</span>
+<span class="nc" id="L456">				return sessionId;</span>
+			}
+		}
+<span class="nc" id="L459">		return null;</span>
+	}
+
+	/**
+	 * When a session is connected through a higher-level protocol it has a chance
+	 * to use heartbeat management to shut down sessions that are too slow to send
+	 * or receive messages. However, after a WebSocketSession is established and
+	 * before the higher level protocol is fully connected there is a possibility for
+	 * sessions to hang. This method checks and closes any sessions that have been
+	 * connected for more than 60 seconds without having received a single message.
+	 */
+	private void checkSessions() {
+<span class="fc" id="L471">		long currentTime = System.currentTimeMillis();</span>
+<span class="pc bpc" id="L472" title="1 of 4 branches missed.">		if (!isRunning() || (currentTime - this.lastSessionCheckTime &lt; getTimeToFirstMessage())) {</span>
+<span class="fc" id="L473">			return;</span>
+		}
+
+<span class="pc bpc" id="L476" title="1 of 2 branches missed.">		if (this.sessionCheckLock.tryLock()) {</span>
+			try {
+<span class="fc bfc" id="L478" title="All 2 branches covered.">				for (WebSocketSessionHolder holder : this.sessions.values()) {</span>
+<span class="fc bfc" id="L479" title="All 2 branches covered.">					if (holder.hasHandledMessages()) {</span>
+<span class="fc" id="L480">						continue;</span>
+					}
+<span class="fc" id="L482">					long timeSinceCreated = currentTime - holder.getCreateTime();</span>
+<span class="pc bpc" id="L483" title="1 of 2 branches missed.">					if (timeSinceCreated &lt; getTimeToFirstMessage()) {</span>
+<span class="nc" id="L484">						continue;</span>
+					}
+<span class="fc" id="L486">					WebSocketSession session = holder.getSession();</span>
+<span class="pc bpc" id="L487" title="1 of 2 branches missed.">					if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L488">						logger.info(&quot;No messages received after &quot; + timeSinceCreated + &quot; ms. &quot; +</span>
+<span class="nc" id="L489">								&quot;Closing &quot; + holder.getSession() + &quot;.&quot;);</span>
+					}
+					try {
+<span class="fc" id="L492">						this.stats.incrementNoMessagesReceivedCount();</span>
+<span class="fc" id="L493">						session.close(CloseStatus.SESSION_NOT_RELIABLE);</span>
+					}
+<span class="nc" id="L495">					catch (Throwable ex) {</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">						if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L497">							logger.warn(&quot;Failed to close unreliable &quot; + session, ex);</span>
+						}
+<span class="fc" id="L499">					}</span>
+<span class="fc" id="L500">				}</span>
+			}
+			finally {
+<span class="fc" id="L503">				this.lastSessionCheckTime = currentTime;</span>
+<span class="fc" id="L504">				this.sessionCheckLock.unlock();</span>
+			}
+		}
+<span class="fc" id="L507">	}</span>
+
+	private void clearSession(WebSocketSession session, CloseStatus closeStatus) throws Exception {
+<span class="pc bpc" id="L510" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L511">			logger.debug(&quot;Clearing session &quot; + session.getId());</span>
+		}
+<span class="pc bpc" id="L513" title="1 of 2 branches missed.">		if (this.sessions.remove(session.getId()) != null) {</span>
+<span class="fc" id="L514">			this.stats.decrementSessionCount(session);</span>
+		}
+<span class="fc" id="L516">		findProtocolHandler(session).afterSessionEnded(session, closeStatus, this.clientInboundChannel);</span>
+<span class="fc" id="L517">	}</span>
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L522">		return &quot;SubProtocolWebSocketHandler&quot; + this.protocolHandlers;</span>
+	}
+
+
+	private static class WebSocketSessionHolder {
+
+		private final WebSocketSession session;
+
+		private final long createTime;
+
+		private volatile boolean hasHandledMessages;
+
+<span class="fc" id="L534">		public WebSocketSessionHolder(WebSocketSession session) {</span>
+<span class="fc" id="L535">			this.session = session;</span>
+<span class="fc" id="L536">			this.createTime = System.currentTimeMillis();</span>
+<span class="fc" id="L537">		}</span>
+
+		public WebSocketSession getSession() {
+<span class="fc" id="L540">			return this.session;</span>
+		}
+
+		public long getCreateTime() {
+<span class="fc" id="L544">			return this.createTime;</span>
+		}
+
+		public void setHasHandledMessages() {
+<span class="fc" id="L548">			this.hasHandledMessages = true;</span>
+<span class="fc" id="L549">		}</span>
+
+		public boolean hasHandledMessages() {
+<span class="fc" id="L552">			return this.hasHandledMessages;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L557">			return &quot;WebSocketSessionHolder[session=&quot; + this.session + &quot;, createTime=&quot; +</span>
+					this.createTime + &quot;, hasHandledMessages=&quot; + this.hasHandledMessages + &quot;]&quot;;
+		}
+	}
+
+
+<span class="fc" id="L563">	private class Stats {</span>
+
+<span class="fc" id="L565">		private final AtomicInteger total = new AtomicInteger();</span>
+
+<span class="fc" id="L567">		private final AtomicInteger webSocket = new AtomicInteger();</span>
+
+<span class="fc" id="L569">		private final AtomicInteger httpStreaming = new AtomicInteger();</span>
+
+<span class="fc" id="L571">		private final AtomicInteger httpPolling = new AtomicInteger();</span>
+
+<span class="fc" id="L573">		private final AtomicInteger limitExceeded = new AtomicInteger();</span>
+
+<span class="fc" id="L575">		private final AtomicInteger noMessagesReceived = new AtomicInteger();</span>
+
+<span class="fc" id="L577">		private final AtomicInteger transportError = new AtomicInteger();</span>
+
+		public void incrementSessionCount(WebSocketSession session) {
+<span class="fc" id="L580">			getCountFor(session).incrementAndGet();</span>
+<span class="fc" id="L581">			this.total.incrementAndGet();</span>
+<span class="fc" id="L582">		}</span>
+
+		public void decrementSessionCount(WebSocketSession session) {
+<span class="fc" id="L585">			getCountFor(session).decrementAndGet();</span>
+<span class="fc" id="L586">		}</span>
+
+		public void incrementLimitExceededCount() {
+<span class="nc" id="L589">			this.limitExceeded.incrementAndGet();</span>
+<span class="nc" id="L590">		}</span>
+
+		public void incrementNoMessagesReceivedCount() {
+<span class="fc" id="L593">			this.noMessagesReceived.incrementAndGet();</span>
+<span class="fc" id="L594">		}</span>
+
+		public void incrementTransportError() {
+<span class="nc" id="L597">			this.transportError.incrementAndGet();</span>
+<span class="nc" id="L598">		}</span>
+
+		private AtomicInteger getCountFor(WebSocketSession session) {
+<span class="pc bpc" id="L601" title="1 of 2 branches missed.">			if (session instanceof PollingSockJsSession) {</span>
+<span class="nc" id="L602">				return this.httpPolling;</span>
+			}
+<span class="pc bpc" id="L604" title="1 of 2 branches missed.">			else if (session instanceof StreamingSockJsSession) {</span>
+<span class="nc" id="L605">				return this.httpStreaming;</span>
+			}
+			else {
+<span class="fc" id="L608">				return this.webSocket;</span>
+			}
+		}
+
+		public String toString() {
+<span class="fc" id="L613">			return SubProtocolWebSocketHandler.this.sessions.size() +</span>
+<span class="fc" id="L614">					&quot; current WS(&quot; + this.webSocket.get() +</span>
+<span class="fc" id="L615">					&quot;)-HttpStream(&quot; + this.httpStreaming.get() +</span>
+<span class="fc" id="L616">					&quot;)-HttpPoll(&quot; + this.httpPolling.get() + &quot;), &quot; +</span>
+<span class="fc" id="L617">					this.total.get() + &quot; total, &quot; +</span>
+<span class="fc" id="L618">					(this.limitExceeded.get() + this.noMessagesReceived.get()) + &quot; closed abnormally (&quot; +</span>
+<span class="fc" id="L619">					this.noMessagesReceived.get() + &quot; connect failure, &quot; +</span>
+<span class="fc" id="L620">					this.limitExceeded.get() + &quot; send limit, &quot; +</span>
+<span class="fc" id="L621">					this.transportError.get() + &quot; transport error)&quot;;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

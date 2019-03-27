@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AutowireUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">AutowireUtils.java</span></div><h1>AutowireUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.beans.PropertyDescriptor;
+import java.io.Serializable;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Set;
+
+import org.springframework.beans.BeanMetadataElement;
+import org.springframework.beans.factory.ObjectFactory;
+import org.springframework.beans.factory.config.TypedStringValue;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Utility class that contains various methods useful for the implementation of
+ * autowire-capable bean factories.
+ *
+ * @author Juergen Hoeller
+ * @author Mark Fisher
+ * @author Sam Brannen
+ * @since 1.1.2
+ * @see AbstractAutowireCapableBeanFactory
+ */
+<span class="nc" id="L52">abstract class AutowireUtils {</span>
+
+<span class="fc" id="L54">	private static final Comparator&lt;Executable&gt; EXECUTABLE_COMPARATOR = (e1, e2) -&gt; {</span>
+<span class="fc" id="L55">		int result = Boolean.compare(Modifier.isPublic(e2.getModifiers()), Modifier.isPublic(e1.getModifiers()));</span>
+<span class="fc bfc" id="L56" title="All 2 branches covered.">		return result != 0 ? result : Integer.compare(e2.getParameterCount(), e1.getParameterCount());</span>
+	};
+
+
+	/**
+	 * Sort the given constructors, preferring public constructors and &quot;greedy&quot; ones with
+	 * a maximum number of arguments. The result will contain public constructors first,
+	 * with decreasing number of arguments, then non-public constructors, again with
+	 * decreasing number of arguments.
+	 * @param constructors the constructor array to sort
+	 */
+	public static void sortConstructors(Constructor&lt;?&gt;[] constructors) {
+<span class="fc" id="L68">		Arrays.sort(constructors, EXECUTABLE_COMPARATOR);</span>
+<span class="fc" id="L69">	}</span>
+
+	/**
+	 * Sort the given factory methods, preferring public methods and &quot;greedy&quot; ones
+	 * with a maximum of arguments. The result will contain public methods first,
+	 * with decreasing number of arguments, then non-public methods, again with
+	 * decreasing number of arguments.
+	 * @param factoryMethods the factory method array to sort
+	 */
+	public static void sortFactoryMethods(Method[] factoryMethods) {
+<span class="fc" id="L79">		Arrays.sort(factoryMethods, EXECUTABLE_COMPARATOR);</span>
+<span class="fc" id="L80">	}</span>
+
+	/**
+	 * Determine whether the given bean property is excluded from dependency checks.
+	 * &lt;p&gt;This implementation excludes properties defined by CGLIB.
+	 * @param pd the PropertyDescriptor of the bean property
+	 * @return whether the bean property is excluded
+	 */
+	public static boolean isExcludedFromDependencyCheck(PropertyDescriptor pd) {
+<span class="fc" id="L89">		Method wm = pd.getWriteMethod();</span>
+<span class="fc bfc" id="L90" title="All 2 branches covered.">		if (wm == null) {</span>
+<span class="fc" id="L91">			return false;</span>
+		}
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">		if (!wm.getDeclaringClass().getName().contains(&quot;$$&quot;)) {</span>
+			// Not a CGLIB method so it's OK.
+<span class="fc" id="L95">			return false;</span>
+		}
+		// It was declared by CGLIB, but we might still want to autowire it
+		// if it was actually declared by the superclass.
+<span class="nc" id="L99">		Class&lt;?&gt; superclass = wm.getDeclaringClass().getSuperclass();</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">		return !ClassUtils.hasMethod(superclass, wm.getName(), wm.getParameterTypes());</span>
+	}
+
+	/**
+	 * Return whether the setter method of the given bean property is defined
+	 * in any of the given interfaces.
+	 * @param pd the PropertyDescriptor of the bean property
+	 * @param interfaces the Set of interfaces (Class objects)
+	 * @return whether the setter method is defined by an interface
+	 */
+	public static boolean isSetterDefinedInInterface(PropertyDescriptor pd, Set&lt;Class&lt;?&gt;&gt; interfaces) {
+<span class="fc" id="L111">		Method setter = pd.getWriteMethod();</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">		if (setter != null) {</span>
+<span class="fc" id="L113">			Class&lt;?&gt; targetClass = setter.getDeclaringClass();</span>
+<span class="fc bfc" id="L114" title="All 2 branches covered.">			for (Class&lt;?&gt; ifc : interfaces) {</span>
+<span class="fc bfc" id="L115" title="All 2 branches covered.">				if (ifc.isAssignableFrom(targetClass) &amp;&amp;</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">						ClassUtils.hasMethod(ifc, setter.getName(), setter.getParameterTypes())) {</span>
+<span class="fc" id="L117">					return true;</span>
+				}
+<span class="fc" id="L119">			}</span>
+		}
+<span class="fc" id="L121">		return false;</span>
+	}
+
+	/**
+	 * Resolve the given autowiring value against the given required type,
+	 * e.g. an {@link ObjectFactory} value to its actual object result.
+	 * @param autowiringValue the value to resolve
+	 * @param requiredType the type to assign the result to
+	 * @return the resolved value
+	 */
+	public static Object resolveAutowiringValue(Object autowiringValue, Class&lt;?&gt; requiredType) {
+<span class="pc bpc" id="L132" title="3 of 4 branches missed.">		if (autowiringValue instanceof ObjectFactory &amp;&amp; !requiredType.isInstance(autowiringValue)) {</span>
+<span class="nc" id="L133">			ObjectFactory&lt;?&gt; factory = (ObjectFactory&lt;?&gt;) autowiringValue;</span>
+<span class="nc bnc" id="L134" title="All 4 branches missed.">			if (autowiringValue instanceof Serializable &amp;&amp; requiredType.isInterface()) {</span>
+<span class="nc" id="L135">				autowiringValue = Proxy.newProxyInstance(requiredType.getClassLoader(),</span>
+						new Class&lt;?&gt;[] {requiredType}, new ObjectFactoryDelegatingInvocationHandler(factory));
+			}
+			else {
+<span class="nc" id="L139">				return factory.getObject();</span>
+			}
+		}
+<span class="fc" id="L142">		return autowiringValue;</span>
+	}
+
+	/**
+	 * Determine the target type for the generic return type of the given
+	 * &lt;em&gt;generic factory method&lt;/em&gt;, where formal type variables are declared
+	 * on the given method itself.
+	 * &lt;p&gt;For example, given a factory method with the following signature, if
+	 * {@code resolveReturnTypeForFactoryMethod()} is invoked with the reflected
+	 * method for {@code createProxy()} and an {@code Object[]} array containing
+	 * {@code MyService.class}, {@code resolveReturnTypeForFactoryMethod()} will
+	 * infer that the target return type is {@code MyService}.
+	 * &lt;pre class=&quot;code&quot;&gt;{@code public static &lt;T&gt; T createProxy(Class&lt;T&gt; clazz)}&lt;/pre&gt;
+	 * &lt;h4&gt;Possible Return Values&lt;/h4&gt;
+	 * &lt;ul&gt;
+	 * &lt;li&gt;the target return type, if it can be inferred&lt;/li&gt;
+	 * &lt;li&gt;the {@linkplain Method#getReturnType() standard return type}, if
+	 * the given {@code method} does not declare any {@linkplain
+	 * Method#getTypeParameters() formal type variables}&lt;/li&gt;
+	 * &lt;li&gt;the {@linkplain Method#getReturnType() standard return type}, if the
+	 * target return type cannot be inferred (e.g., due to type erasure)&lt;/li&gt;
+	 * &lt;li&gt;{@code null}, if the length of the given arguments array is shorter
+	 * than the length of the {@linkplain
+	 * Method#getGenericParameterTypes() formal argument list} for the given
+	 * method&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * @param method the method to introspect (never {@code null})
+	 * @param args the arguments that will be supplied to the method when it is
+	 * invoked (never {@code null})
+	 * @param classLoader the ClassLoader to resolve class names against,
+	 * if necessary (never {@code null})
+	 * @return the resolved target return type or the standard method return type
+	 * @since 3.2.5
+	 */
+	public static Class&lt;?&gt; resolveReturnTypeForFactoryMethod(
+			Method method, Object[] args, @Nullable ClassLoader classLoader) {
+
+<span class="fc" id="L179">		Assert.notNull(method, &quot;Method must not be null&quot;);</span>
+<span class="fc" id="L180">		Assert.notNull(args, &quot;Argument array must not be null&quot;);</span>
+
+<span class="fc" id="L182">		TypeVariable&lt;Method&gt;[] declaredTypeVariables = method.getTypeParameters();</span>
+<span class="fc" id="L183">		Type genericReturnType = method.getGenericReturnType();</span>
+<span class="fc" id="L184">		Type[] methodParameterTypes = method.getGenericParameterTypes();</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">		Assert.isTrue(args.length == methodParameterTypes.length, &quot;Argument array does not match parameter count&quot;);</span>
+
+		// Ensure that the type variable (e.g., T) is declared directly on the method
+		// itself (e.g., via &lt;T&gt;), not on the enclosing class or interface.
+<span class="fc" id="L189">		boolean locallyDeclaredTypeVariableMatchesReturnType = false;</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">		for (TypeVariable&lt;Method&gt; currentTypeVariable : declaredTypeVariables) {</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">			if (currentTypeVariable.equals(genericReturnType)) {</span>
+<span class="fc" id="L192">				locallyDeclaredTypeVariableMatchesReturnType = true;</span>
+<span class="fc" id="L193">				break;</span>
+			}
+		}
+
+<span class="fc bfc" id="L197" title="All 2 branches covered.">		if (locallyDeclaredTypeVariableMatchesReturnType) {</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">			for (int i = 0; i &lt; methodParameterTypes.length; i++) {</span>
+<span class="fc" id="L199">				Type methodParameterType = methodParameterTypes[i];</span>
+<span class="fc" id="L200">				Object arg = args[i];</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">				if (methodParameterType.equals(genericReturnType)) {</span>
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">					if (arg instanceof TypedStringValue) {</span>
+<span class="nc" id="L203">						TypedStringValue typedValue = ((TypedStringValue) arg);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">						if (typedValue.hasTargetType()) {</span>
+<span class="nc" id="L205">							return typedValue.getTargetType();</span>
+						}
+						try {
+<span class="nc" id="L208">							Class&lt;?&gt; resolvedType = typedValue.resolveTargetType(classLoader);</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">							if (resolvedType != null) {</span>
+<span class="nc" id="L210">								return resolvedType;</span>
+							}
+						}
+<span class="nc" id="L213">						catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L214">							throw new IllegalStateException(&quot;Failed to resolve value type [&quot; +</span>
+<span class="nc" id="L215">									typedValue.getTargetTypeName() + &quot;] for factory method argument&quot;, ex);</span>
+<span class="nc" id="L216">						}</span>
+<span class="nc" id="L217">					}</span>
+<span class="pc bpc" id="L218" title="2 of 4 branches missed.">					else if (arg != null &amp;&amp; !(arg instanceof BeanMetadataElement)) {</span>
+						// Only consider argument type if it is a simple value...
+<span class="fc" id="L220">						return arg.getClass();</span>
+					}
+<span class="nc" id="L222">					return method.getReturnType();</span>
+				}
+<span class="fc bfc" id="L224" title="All 2 branches covered.">				else if (methodParameterType instanceof ParameterizedType) {</span>
+<span class="fc" id="L225">					ParameterizedType parameterizedType = (ParameterizedType) methodParameterType;</span>
+<span class="fc" id="L226">					Type[] actualTypeArguments = parameterizedType.getActualTypeArguments();</span>
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">					for (Type typeArg : actualTypeArguments) {</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">						if (typeArg.equals(genericReturnType)) {</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">							if (arg instanceof Class) {</span>
+<span class="fc" id="L230">								return (Class&lt;?&gt;) arg;</span>
+							}
+							else {
+<span class="fc" id="L233">								String className = null;</span>
+<span class="fc bfc" id="L234" title="All 2 branches covered.">								if (arg instanceof String) {</span>
+<span class="fc" id="L235">									className = (String) arg;</span>
+								}
+<span class="fc bfc" id="L237" title="All 2 branches covered.">								else if (arg instanceof TypedStringValue) {</span>
+<span class="fc" id="L238">									TypedStringValue typedValue = ((TypedStringValue) arg);</span>
+<span class="fc" id="L239">									String targetTypeName = typedValue.getTargetTypeName();</span>
+<span class="pc bpc" id="L240" title="3 of 4 branches missed.">									if (targetTypeName == null || Class.class.getName().equals(targetTypeName)) {</span>
+<span class="fc" id="L241">										className = typedValue.getValue();</span>
+									}
+								}
+<span class="fc bfc" id="L244" title="All 2 branches covered.">								if (className != null) {</span>
+									try {
+<span class="fc" id="L246">										return ClassUtils.forName(className, classLoader);</span>
+									}
+<span class="fc" id="L248">									catch (ClassNotFoundException ex) {</span>
+<span class="fc" id="L249">										throw new IllegalStateException(&quot;Could not resolve class name [&quot; + arg +</span>
+												&quot;] for factory method argument&quot;, ex);
+									}
+								}
+								// Consider adding logic to determine the class of the typeArg, if possible.
+								// For now, just fall back...
+<span class="fc" id="L255">								return method.getReturnType();</span>
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Fall back...
+<span class="fc" id="L264">		return method.getReturnType();</span>
+	}
+
+
+	/**
+	 * Reflective {@link InvocationHandler} for lazy access to the current target object.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class ObjectFactoryDelegatingInvocationHandler implements InvocationHandler, Serializable {
+
+		private final ObjectFactory&lt;?&gt; objectFactory;
+
+<span class="nc" id="L276">		public ObjectFactoryDelegatingInvocationHandler(ObjectFactory&lt;?&gt; objectFactory) {</span>
+<span class="nc" id="L277">			this.objectFactory = objectFactory;</span>
+<span class="nc" id="L278">		}</span>
+
+		@Override
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+<span class="nc" id="L282">			String methodName = method.getName();</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">			if (methodName.equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L285" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="nc bnc" id="L287" title="All 2 branches missed.">			else if (methodName.equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of proxy.
+<span class="nc" id="L289">				return System.identityHashCode(proxy);</span>
+			}
+<span class="nc bnc" id="L291" title="All 2 branches missed.">			else if (methodName.equals(&quot;toString&quot;)) {</span>
+<span class="nc" id="L292">				return this.objectFactory.toString();</span>
+			}
+			try {
+<span class="nc" id="L295">				return method.invoke(this.objectFactory.getObject(), args);</span>
+			}
+<span class="nc" id="L297">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L298">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractJackson2Encoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.json</a> &gt; <span class="el_source">AbstractJackson2Encoder.java</span></div><h1>AbstractJackson2Encoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.json;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.lang.annotation.Annotation;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import com.fasterxml.jackson.core.JsonEncoding;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JavaType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.fasterxml.jackson.databind.exc.InvalidDefinitionException;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.CodecException;
+import org.springframework.core.codec.EncodingException;
+import org.springframework.core.codec.Hints;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.HttpMessageEncoder;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+
+/**
+ * Base class providing support methods for Jackson 2.9 encoding. For non-streaming use
+ * cases, {@link Flux} elements are collected into a {@link List} before serialization for
+ * performance reason.
+ *
+ * @author Sebastien Deleuze
+ * @author Arjen Poutsma
+ * @since 5.0
+ */
+public abstract class AbstractJackson2Encoder extends Jackson2CodecSupport implements HttpMessageEncoder&lt;Object&gt; {
+
+<span class="fc" id="L68">	private static final byte[] NEWLINE_SEPARATOR = {'\n'};</span>
+
+	private static final Map&lt;MediaType, byte[]&gt; STREAM_SEPARATORS;
+
+	static {
+<span class="fc" id="L73">		STREAM_SEPARATORS = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L74">		STREAM_SEPARATORS.put(MediaType.APPLICATION_STREAM_JSON, NEWLINE_SEPARATOR);</span>
+<span class="fc" id="L75">		STREAM_SEPARATORS.put(MediaType.parseMediaType(&quot;application/stream+x-jackson-smile&quot;), new byte[0]);</span>
+<span class="fc" id="L76">	}</span>
+
+
+<span class="fc" id="L79">	private final List&lt;MediaType&gt; streamingMediaTypes = new ArrayList&lt;&gt;(1);</span>
+
+
+	/**
+	 * Constructor with a Jackson {@link ObjectMapper} to use.
+	 */
+	protected AbstractJackson2Encoder(ObjectMapper mapper, MimeType... mimeTypes) {
+<span class="fc" id="L86">		super(mapper, mimeTypes);</span>
+<span class="fc" id="L87">	}</span>
+
+
+	/**
+	 * Configure &quot;streaming&quot; media types for which flushing should be performed
+	 * automatically vs at the end of the stream.
+	 * &lt;p&gt;By default this is set to {@link MediaType#APPLICATION_STREAM_JSON}.
+	 * @param mediaTypes one or more media types to add to the list
+	 * @see HttpMessageEncoder#getStreamingMediaTypes()
+	 */
+	public void setStreamingMediaTypes(List&lt;MediaType&gt; mediaTypes) {
+<span class="fc" id="L98">		this.streamingMediaTypes.clear();</span>
+<span class="fc" id="L99">		this.streamingMediaTypes.addAll(mediaTypes);</span>
+<span class="fc" id="L100">	}</span>
+
+
+	@Override
+	public boolean canEncode(ResolvableType elementType, @Nullable MimeType mimeType) {
+<span class="fc" id="L105">		Class&lt;?&gt; clazz = elementType.toClass();</span>
+<span class="fc bfc" id="L106" title="All 4 branches covered.">		return supportsMimeType(mimeType) &amp;&amp; (Object.class == clazz ||</span>
+<span class="fc bfc" id="L107" title="All 4 branches covered.">				(!String.class.isAssignableFrom(elementType.resolve(clazz)) &amp;&amp; getObjectMapper().canSerialize(clazz)));</span>
+	}
+
+	@Override
+	public Flux&lt;DataBuffer&gt; encode(Publisher&lt;?&gt; inputStream, DataBufferFactory bufferFactory,
+			ResolvableType elementType, @Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L114">		Assert.notNull(inputStream, &quot;'inputStream' must not be null&quot;);</span>
+<span class="fc" id="L115">		Assert.notNull(bufferFactory, &quot;'bufferFactory' must not be null&quot;);</span>
+<span class="fc" id="L116">		Assert.notNull(elementType, &quot;'elementType' must not be null&quot;);</span>
+
+<span class="fc" id="L118">		JsonEncoding encoding = getJsonEncoding(mimeType);</span>
+
+<span class="fc bfc" id="L120" title="All 2 branches covered.">		if (inputStream instanceof Mono) {</span>
+<span class="fc" id="L121">			return Mono.from(inputStream).map(value -&gt;</span>
+<span class="fc" id="L122">					encodeValue(value, mimeType, bufferFactory, elementType, hints, encoding)).flux();</span>
+		}
+		else {
+<span class="fc" id="L125">			return this.streamingMediaTypes.stream()</span>
+<span class="fc" id="L126">					.filter(mediaType -&gt; mediaType.isCompatibleWith(mimeType))</span>
+<span class="fc" id="L127">					.findFirst()</span>
+<span class="fc" id="L128">					.map(mediaType -&gt; {</span>
+<span class="fc" id="L129">						byte[] separator = STREAM_SEPARATORS.getOrDefault(mediaType, NEWLINE_SEPARATOR);</span>
+<span class="fc" id="L130">						return Flux.from(inputStream).map(value -&gt; {</span>
+<span class="fc" id="L131">							DataBuffer buffer = encodeValue(</span>
+									value, mimeType, bufferFactory, elementType, hints, encoding);
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">							if (separator != null) {</span>
+<span class="fc" id="L134">								buffer.write(separator);</span>
+							}
+<span class="fc" id="L136">							return buffer;</span>
+						});
+					})
+<span class="fc" id="L139">					.orElseGet(() -&gt; {</span>
+<span class="fc" id="L140">						ResolvableType listType = ResolvableType.forClassWithGenerics(List.class, elementType);</span>
+<span class="fc" id="L141">						return Flux.from(inputStream).collectList().map(list -&gt;</span>
+<span class="fc" id="L142">								encodeValue(list, mimeType, bufferFactory, listType, hints, encoding)).flux();</span>
+					});
+		}
+	}
+
+	private DataBuffer encodeValue(Object value, @Nullable MimeType mimeType, DataBufferFactory bufferFactory,
+			ResolvableType elementType, @Nullable Map&lt;String, Object&gt; hints, JsonEncoding encoding) {
+
+<span class="fc bfc" id="L150" title="All 2 branches covered.">		if (!Hints.isLoggingSuppressed(hints)) {</span>
+<span class="fc" id="L151">			LogFormatUtils.traceDebug(logger, traceOn -&gt; {</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">				String formatted = LogFormatUtils.formatValue(value, !traceOn);</span>
+<span class="fc" id="L153">				return Hints.getLogPrefix(hints) + &quot;Encoding [&quot; + formatted + &quot;]&quot;;</span>
+			});
+		}
+
+<span class="fc" id="L157">		JavaType javaType = getJavaType(elementType.getType(), null);</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">		Class&lt;?&gt; jsonView = (hints != null ? (Class&lt;?&gt;) hints.get(Jackson2CodecSupport.JSON_VIEW_HINT) : null);</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		ObjectWriter writer = (jsonView != null ?</span>
+<span class="fc" id="L160">				getObjectMapper().writerWithView(jsonView) : getObjectMapper().writer());</span>
+
+<span class="fc bfc" id="L162" title="All 2 branches covered.">		if (javaType.isContainerType()) {</span>
+<span class="fc" id="L163">			writer = writer.forType(javaType);</span>
+		}
+
+<span class="fc" id="L166">		writer = customizeWriter(writer, mimeType, elementType, hints);</span>
+
+<span class="fc" id="L168">		DataBuffer buffer = bufferFactory.allocateBuffer();</span>
+<span class="fc" id="L169">		boolean release = true;</span>
+<span class="fc" id="L170">		OutputStream outputStream = buffer.asOutputStream();</span>
+
+		try {
+<span class="fc" id="L173">			JsonGenerator generator = getObjectMapper().getFactory().createGenerator(outputStream, encoding);</span>
+<span class="fc" id="L174">			writer.writeValue(generator, value);</span>
+<span class="fc" id="L175">			release = false;</span>
+		}
+<span class="nc" id="L177">		catch (InvalidDefinitionException ex) {</span>
+<span class="nc" id="L178">			throw new CodecException(&quot;Type definition error: &quot; + ex.getType(), ex);</span>
+		}
+<span class="nc" id="L180">		catch (JsonProcessingException ex) {</span>
+<span class="nc" id="L181">			throw new EncodingException(&quot;JSON encoding error: &quot; + ex.getOriginalMessage(), ex);</span>
+		}
+<span class="nc" id="L183">		catch (IOException ex) {</span>
+<span class="nc" id="L184">			throw new IllegalStateException(&quot;Unexpected I/O error while writing to data buffer&quot;,</span>
+					ex);
+		}
+		finally {
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">			if (release) {</span>
+<span class="nc" id="L189">				DataBufferUtils.release(buffer);</span>
+			}
+		}
+
+<span class="fc" id="L193">		return buffer;</span>
+	}
+
+	protected ObjectWriter customizeWriter(ObjectWriter writer, @Nullable MimeType mimeType,
+			ResolvableType elementType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L199">		return writer;</span>
+	}
+
+	/**
+	 * Determine the JSON encoding to use for the given mime type.
+	 * @param mimeType the mime type as requested by the caller
+	 * @return the JSON encoding to use (never {@code null})
+	 * @since 5.0.5
+	 */
+	protected JsonEncoding getJsonEncoding(@Nullable MimeType mimeType) {
+<span class="fc bfc" id="L209" title="All 4 branches covered.">		if (mimeType != null &amp;&amp; mimeType.getCharset() != null) {</span>
+<span class="fc" id="L210">			Charset charset = mimeType.getCharset();</span>
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">			for (JsonEncoding encoding : JsonEncoding.values()) {</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">				if (charset.name().equals(encoding.getJavaName())) {</span>
+<span class="fc" id="L213">					return encoding;</span>
+				}
+			}
+		}
+<span class="fc" id="L217">		return JsonEncoding.UTF8;</span>
+	}
+
+
+	// HttpMessageEncoder...
+
+	@Override
+	public List&lt;MimeType&gt; getEncodableMimeTypes() {
+<span class="fc" id="L225">		return getMimeTypes();</span>
+	}
+
+	@Override
+	public List&lt;MediaType&gt; getStreamingMediaTypes() {
+<span class="nc" id="L230">		return Collections.unmodifiableList(this.streamingMediaTypes);</span>
+	}
+
+	@Override
+	public Map&lt;String, Object&gt; getEncodeHints(@Nullable ResolvableType actualType, ResolvableType elementType,
+			@Nullable MediaType mediaType, ServerHttpRequest request, ServerHttpResponse response) {
+
+<span class="nc bnc" id="L237" title="All 2 branches missed.">		return (actualType != null ? getHints(actualType) : Hints.none());</span>
+	}
+
+	// Jackson2CodecSupport ...
+
+	@Override
+	protected &lt;A extends Annotation&gt; A getAnnotation(MethodParameter parameter, Class&lt;A&gt; annotType) {
+<span class="nc" id="L244">		return parameter.getMethodAnnotation(annotType);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

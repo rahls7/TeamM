@@ -1,0 +1,409 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ThreadPoolTaskScheduler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.concurrent</a> &gt; <span class="el_source">ThreadPoolTaskScheduler.java</span></div><h1>ThreadPoolTaskScheduler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.concurrent;
+
+import java.util.Date;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+
+import org.springframework.core.task.AsyncListenableTaskExecutor;
+import org.springframework.core.task.TaskRejectedException;
+import org.springframework.lang.Nullable;
+import org.springframework.scheduling.SchedulingTaskExecutor;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.Trigger;
+import org.springframework.scheduling.support.TaskUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.ErrorHandler;
+import org.springframework.util.concurrent.ListenableFuture;
+import org.springframework.util.concurrent.ListenableFutureTask;
+
+/**
+ * Implementation of Spring's {@link TaskScheduler} interface, wrapping
+ * a native {@link java.util.concurrent.ScheduledThreadPoolExecutor}.
+ *
+ * @author Juergen Hoeller
+ * @author Mark Fisher
+ * @since 3.0
+ * @see #setPoolSize
+ * @see #setRemoveOnCancelPolicy
+ * @see #setThreadFactory
+ * @see #setErrorHandler
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L59">public class ThreadPoolTaskScheduler extends ExecutorConfigurationSupport</span>
+		implements AsyncListenableTaskExecutor, SchedulingTaskExecutor, TaskScheduler {
+
+<span class="fc" id="L62">	private volatile int poolSize = 1;</span>
+
+<span class="fc" id="L64">	private volatile boolean removeOnCancelPolicy = false;</span>
+
+	@Nullable
+	private volatile ErrorHandler errorHandler;
+
+	@Nullable
+	private ScheduledExecutorService scheduledExecutor;
+
+	// Underlying ScheduledFutureTask to user-level ListenableFuture handle, if any
+<span class="fc" id="L73">	private final Map&lt;Object, ListenableFuture&lt;?&gt;&gt; listenableFutureMap =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(16, ConcurrentReferenceHashMap.ReferenceType.WEAK);
+
+
+	/**
+	 * Set the ScheduledExecutorService's pool size.
+	 * Default is 1.
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 */
+	public void setPoolSize(int poolSize) {
+<span class="pc bpc" id="L83" title="1 of 2 branches missed.">		Assert.isTrue(poolSize &gt; 0, &quot;'poolSize' must be 1 or higher&quot;);</span>
+<span class="fc" id="L84">		this.poolSize = poolSize;</span>
+<span class="pc bpc" id="L85" title="1 of 2 branches missed.">		if (this.scheduledExecutor instanceof ScheduledThreadPoolExecutor) {</span>
+<span class="nc" id="L86">			((ScheduledThreadPoolExecutor) this.scheduledExecutor).setCorePoolSize(poolSize);</span>
+		}
+<span class="fc" id="L88">	}</span>
+
+	/**
+	 * Set the remove-on-cancel mode on {@link ScheduledThreadPoolExecutor}.
+	 * &lt;p&gt;Default is {@code false}. If set to {@code true}, the target executor will be
+	 * switched into remove-on-cancel mode (if possible, with a soft fallback otherwise).
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 */
+	public void setRemoveOnCancelPolicy(boolean removeOnCancelPolicy) {
+<span class="nc" id="L97">		this.removeOnCancelPolicy = removeOnCancelPolicy;</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">		if (this.scheduledExecutor instanceof ScheduledThreadPoolExecutor) {</span>
+<span class="nc" id="L99">			((ScheduledThreadPoolExecutor) this.scheduledExecutor).setRemoveOnCancelPolicy(removeOnCancelPolicy);</span>
+		}
+<span class="nc bnc" id="L101" title="All 4 branches missed.">		else if (removeOnCancelPolicy &amp;&amp; this.scheduledExecutor != null) {</span>
+<span class="nc" id="L102">			logger.debug(&quot;Could not apply remove-on-cancel policy - not a ScheduledThreadPoolExecutor&quot;);</span>
+		}
+<span class="nc" id="L104">	}</span>
+
+	/**
+	 * Set a custom {@link ErrorHandler} strategy.
+	 */
+	public void setErrorHandler(ErrorHandler errorHandler) {
+<span class="fc" id="L110">		this.errorHandler = errorHandler;</span>
+<span class="fc" id="L111">	}</span>
+
+
+	@Override
+	protected ExecutorService initializeExecutor(
+			ThreadFactory threadFactory, RejectedExecutionHandler rejectedExecutionHandler) {
+
+<span class="fc" id="L118">		this.scheduledExecutor = createExecutor(this.poolSize, threadFactory, rejectedExecutionHandler);</span>
+
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">		if (this.removeOnCancelPolicy) {</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">			if (this.scheduledExecutor instanceof ScheduledThreadPoolExecutor) {</span>
+<span class="nc" id="L122">				((ScheduledThreadPoolExecutor) this.scheduledExecutor).setRemoveOnCancelPolicy(true);</span>
+			}
+			else {
+<span class="nc" id="L125">				logger.debug(&quot;Could not apply remove-on-cancel policy - not a ScheduledThreadPoolExecutor&quot;);</span>
+			}
+		}
+
+<span class="fc" id="L129">		return this.scheduledExecutor;</span>
+	}
+
+	/**
+	 * Create a new {@link ScheduledExecutorService} instance.
+	 * &lt;p&gt;The default implementation creates a {@link ScheduledThreadPoolExecutor}.
+	 * Can be overridden in subclasses to provide custom {@link ScheduledExecutorService} instances.
+	 * @param poolSize the specified pool size
+	 * @param threadFactory the ThreadFactory to use
+	 * @param rejectedExecutionHandler the RejectedExecutionHandler to use
+	 * @return a new ScheduledExecutorService instance
+	 * @see #afterPropertiesSet()
+	 * @see java.util.concurrent.ScheduledThreadPoolExecutor
+	 */
+	protected ScheduledExecutorService createExecutor(
+			int poolSize, ThreadFactory threadFactory, RejectedExecutionHandler rejectedExecutionHandler) {
+
+<span class="fc" id="L146">		return new ScheduledThreadPoolExecutor(poolSize, threadFactory, rejectedExecutionHandler);</span>
+	}
+
+	/**
+	 * Return the underlying ScheduledExecutorService for native access.
+	 * @return the underlying ScheduledExecutorService (never {@code null})
+	 * @throws IllegalStateException if the ThreadPoolTaskScheduler hasn't been initialized yet
+	 */
+	public ScheduledExecutorService getScheduledExecutor() throws IllegalStateException {
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">		Assert.state(this.scheduledExecutor != null, &quot;ThreadPoolTaskScheduler not initialized&quot;);</span>
+<span class="fc" id="L156">		return this.scheduledExecutor;</span>
+	}
+
+	/**
+	 * Return the underlying ScheduledThreadPoolExecutor, if available.
+	 * @return the underlying ScheduledExecutorService (never {@code null})
+	 * @throws IllegalStateException if the ThreadPoolTaskScheduler hasn't been initialized yet
+	 * or if the underlying ScheduledExecutorService isn't a ScheduledThreadPoolExecutor
+	 * @see #getScheduledExecutor()
+	 */
+	public ScheduledThreadPoolExecutor getScheduledThreadPoolExecutor() throws IllegalStateException {
+<span class="nc" id="L167">		Assert.state(this.scheduledExecutor instanceof ScheduledThreadPoolExecutor,</span>
+				&quot;No ScheduledThreadPoolExecutor available&quot;);
+<span class="nc" id="L169">		return (ScheduledThreadPoolExecutor) this.scheduledExecutor;</span>
+	}
+
+	/**
+	 * Return the current pool size.
+	 * &lt;p&gt;Requires an underlying {@link ScheduledThreadPoolExecutor}.
+	 * @see #getScheduledThreadPoolExecutor()
+	 * @see java.util.concurrent.ScheduledThreadPoolExecutor#getPoolSize()
+	 */
+	public int getPoolSize() {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">		if (this.scheduledExecutor == null) {</span>
+			// Not initialized yet: assume initial pool size.
+<span class="nc" id="L181">			return this.poolSize;</span>
+		}
+<span class="nc" id="L183">		return getScheduledThreadPoolExecutor().getPoolSize();</span>
+	}
+
+	/**
+	 * Return the current setting for the remove-on-cancel mode.
+	 * &lt;p&gt;Requires an underlying {@link ScheduledThreadPoolExecutor}.
+	 */
+	public boolean isRemoveOnCancelPolicy() {
+<span class="nc bnc" id="L191" title="All 2 branches missed.">		if (this.scheduledExecutor == null) {</span>
+			// Not initialized yet: return our setting for the time being.
+<span class="nc" id="L193">			return this.removeOnCancelPolicy;</span>
+		}
+<span class="nc" id="L195">		return getScheduledThreadPoolExecutor().getRemoveOnCancelPolicy();</span>
+	}
+
+	/**
+	 * Return the number of currently active threads.
+	 * &lt;p&gt;Requires an underlying {@link ScheduledThreadPoolExecutor}.
+	 * @see #getScheduledThreadPoolExecutor()
+	 * @see java.util.concurrent.ScheduledThreadPoolExecutor#getActiveCount()
+	 */
+	public int getActiveCount() {
+<span class="nc bnc" id="L205" title="All 2 branches missed.">		if (this.scheduledExecutor == null) {</span>
+			// Not initialized yet: assume no active threads.
+<span class="nc" id="L207">			return 0;</span>
+		}
+<span class="nc" id="L209">		return getScheduledThreadPoolExecutor().getActiveCount();</span>
+	}
+
+
+	// SchedulingTaskExecutor implementation
+
+	@Override
+	public void execute(Runnable task) {
+<span class="fc" id="L217">		Executor executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L219">			executor.execute(errorHandlingTask(task, false));</span>
+		}
+<span class="nc" id="L221">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L222">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+<span class="fc" id="L223">		}</span>
+<span class="fc" id="L224">	}</span>
+
+	@Override
+	public void execute(Runnable task, long startTimeout) {
+<span class="nc" id="L228">		execute(task);</span>
+<span class="nc" id="L229">	}</span>
+
+	@Override
+	public Future&lt;?&gt; submit(Runnable task) {
+<span class="fc" id="L233">		ExecutorService executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L235">			return executor.submit(errorHandlingTask(task, false));</span>
+		}
+<span class="nc" id="L237">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L238">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public &lt;T&gt; Future&lt;T&gt; submit(Callable&lt;T&gt; task) {
+<span class="fc" id="L244">		ExecutorService executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L246">			Callable&lt;T&gt; taskToUse = task;</span>
+<span class="fc" id="L247">			ErrorHandler errorHandler = this.errorHandler;</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">			if (errorHandler != null) {</span>
+<span class="fc" id="L249">				taskToUse = new DelegatingErrorHandlingCallable&lt;&gt;(task, errorHandler);</span>
+			}
+<span class="fc" id="L251">			return executor.submit(taskToUse);</span>
+		}
+<span class="nc" id="L253">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L254">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public ListenableFuture&lt;?&gt; submitListenable(Runnable task) {
+<span class="fc" id="L260">		ExecutorService executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L262">			ListenableFutureTask&lt;Object&gt; listenableFuture = new ListenableFutureTask&lt;&gt;(task, null);</span>
+<span class="fc" id="L263">			executeAndTrack(executor, listenableFuture);</span>
+<span class="fc" id="L264">			return listenableFuture;</span>
+		}
+<span class="nc" id="L266">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L267">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public &lt;T&gt; ListenableFuture&lt;T&gt; submitListenable(Callable&lt;T&gt; task) {
+<span class="fc" id="L273">		ExecutorService executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L275">			ListenableFutureTask&lt;T&gt; listenableFuture = new ListenableFutureTask&lt;&gt;(task);</span>
+<span class="fc" id="L276">			executeAndTrack(executor, listenableFuture);</span>
+<span class="fc" id="L277">			return listenableFuture;</span>
+		}
+<span class="nc" id="L279">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L280">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	private void executeAndTrack(ExecutorService executor, ListenableFutureTask&lt;?&gt; listenableFuture) {
+<span class="fc" id="L285">		Future&lt;?&gt; scheduledFuture = executor.submit(errorHandlingTask(listenableFuture, false));</span>
+<span class="fc" id="L286">		this.listenableFutureMap.put(scheduledFuture, listenableFuture);</span>
+<span class="fc" id="L287">		listenableFuture.addCallback(result -&gt; this.listenableFutureMap.remove(scheduledFuture),</span>
+<span class="fc" id="L288">				ex -&gt; this.listenableFutureMap.remove(scheduledFuture));</span>
+<span class="fc" id="L289">	}</span>
+
+	@Override
+	protected void cancelRemainingTask(Runnable task) {
+<span class="fc" id="L293">		super.cancelRemainingTask(task);</span>
+		// Cancel associated user-level ListenableFuture handle as well
+<span class="fc" id="L295">		ListenableFuture&lt;?&gt; listenableFuture = this.listenableFutureMap.get(task);</span>
+<span class="fc bfc" id="L296" title="All 2 branches covered.">		if (listenableFuture != null) {</span>
+<span class="fc" id="L297">			listenableFuture.cancel(true);</span>
+		}
+<span class="fc" id="L299">	}</span>
+
+
+	// TaskScheduler implementation
+
+	@Override
+	@Nullable
+	public ScheduledFuture&lt;?&gt; schedule(Runnable task, Trigger trigger) {
+<span class="fc" id="L307">		ScheduledExecutorService executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L309">			ErrorHandler errorHandler = this.errorHandler;</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">			if (errorHandler == null) {</span>
+<span class="fc" id="L311">				errorHandler = TaskUtils.getDefaultErrorHandler(true);</span>
+			}
+<span class="fc" id="L313">			return new ReschedulingRunnable(task, trigger, executor, errorHandler).schedule();</span>
+		}
+<span class="nc" id="L315">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L316">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; schedule(Runnable task, Date startTime) {
+<span class="fc" id="L322">		ScheduledExecutorService executor = getScheduledExecutor();</span>
+<span class="fc" id="L323">		long initialDelay = startTime.getTime() - System.currentTimeMillis();</span>
+		try {
+<span class="fc" id="L325">			return executor.schedule(errorHandlingTask(task, false), initialDelay, TimeUnit.MILLISECONDS);</span>
+		}
+<span class="nc" id="L327">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L328">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, Date startTime, long period) {
+<span class="fc" id="L334">		ScheduledExecutorService executor = getScheduledExecutor();</span>
+<span class="fc" id="L335">		long initialDelay = startTime.getTime() - System.currentTimeMillis();</span>
+		try {
+<span class="fc" id="L337">			return executor.scheduleAtFixedRate(errorHandlingTask(task, true), initialDelay, period, TimeUnit.MILLISECONDS);</span>
+		}
+<span class="nc" id="L339">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L340">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, long period) {
+<span class="fc" id="L346">		ScheduledExecutorService executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L348">			return executor.scheduleAtFixedRate(errorHandlingTask(task, true), 0, period, TimeUnit.MILLISECONDS);</span>
+		}
+<span class="nc" id="L350">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L351">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, Date startTime, long delay) {
+<span class="fc" id="L357">		ScheduledExecutorService executor = getScheduledExecutor();</span>
+<span class="fc" id="L358">		long initialDelay = startTime.getTime() - System.currentTimeMillis();</span>
+		try {
+<span class="fc" id="L360">			return executor.scheduleWithFixedDelay(errorHandlingTask(task, true), initialDelay, delay, TimeUnit.MILLISECONDS);</span>
+		}
+<span class="nc" id="L362">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L363">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, long delay) {
+<span class="fc" id="L369">		ScheduledExecutorService executor = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L371">			return executor.scheduleWithFixedDelay(errorHandlingTask(task, true), 0, delay, TimeUnit.MILLISECONDS);</span>
+		}
+<span class="nc" id="L373">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L374">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+
+	private Runnable errorHandlingTask(Runnable task, boolean isRepeatingTask) {
+<span class="fc" id="L380">		return TaskUtils.decorateTaskWithErrorHandler(task, this.errorHandler, isRepeatingTask);</span>
+	}
+
+
+	private static class DelegatingErrorHandlingCallable&lt;V&gt; implements Callable&lt;V&gt; {
+
+		private final Callable&lt;V&gt; delegate;
+
+		private final ErrorHandler errorHandler;
+
+<span class="fc" id="L390">		public DelegatingErrorHandlingCallable(Callable&lt;V&gt; delegate, ErrorHandler errorHandler) {</span>
+<span class="fc" id="L391">			this.delegate = delegate;</span>
+<span class="fc" id="L392">			this.errorHandler = errorHandler;</span>
+<span class="fc" id="L393">		}</span>
+
+		@Override
+		@Nullable
+		public V call() throws Exception {
+			try {
+<span class="nc" id="L399">				return this.delegate.call();</span>
+			}
+<span class="fc" id="L401">			catch (Throwable ex) {</span>
+<span class="fc" id="L402">				this.errorHandler.handleError(ex);</span>
+<span class="fc" id="L403">				return null;</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

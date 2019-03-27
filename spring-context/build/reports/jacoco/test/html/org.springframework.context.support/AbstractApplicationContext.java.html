@@ -1,0 +1,1418 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractApplicationContext.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.support</a> &gt; <span class="el_source">AbstractApplicationContext.java</span></div><h1>AbstractApplicationContext.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.support;
+
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.CachedIntrospectionResults;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.support.ResourceEditorRegistrar;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.ApplicationEvent;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.ApplicationEventPublisherAware;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.EmbeddedValueResolverAware;
+import org.springframework.context.EnvironmentAware;
+import org.springframework.context.HierarchicalMessageSource;
+import org.springframework.context.LifecycleProcessor;
+import org.springframework.context.MessageSource;
+import org.springframework.context.MessageSourceAware;
+import org.springframework.context.MessageSourceResolvable;
+import org.springframework.context.NoSuchMessageException;
+import org.springframework.context.PayloadApplicationEvent;
+import org.springframework.context.ResourceLoaderAware;
+import org.springframework.context.event.ApplicationEventMulticaster;
+import org.springframework.context.event.ContextClosedEvent;
+import org.springframework.context.event.ContextRefreshedEvent;
+import org.springframework.context.event.ContextStartedEvent;
+import org.springframework.context.event.ContextStoppedEvent;
+import org.springframework.context.event.SimpleApplicationEventMulticaster;
+import org.springframework.context.expression.StandardBeanExpressionResolver;
+import org.springframework.context.weaving.LoadTimeWeaverAware;
+import org.springframework.context.weaving.LoadTimeWeaverAwareProcessor;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.io.DefaultResourceLoader;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Abstract implementation of the {@link org.springframework.context.ApplicationContext}
+ * interface. Doesn't mandate the type of storage used for configuration; simply
+ * implements common context functionality. Uses the Template Method design pattern,
+ * requiring concrete subclasses to implement abstract methods.
+ *
+ * &lt;p&gt;In contrast to a plain BeanFactory, an ApplicationContext is supposed
+ * to detect special beans defined in its internal bean factory:
+ * Therefore, this class automatically registers
+ * {@link org.springframework.beans.factory.config.BeanFactoryPostProcessor BeanFactoryPostProcessors},
+ * {@link org.springframework.beans.factory.config.BeanPostProcessor BeanPostProcessors},
+ * and {@link org.springframework.context.ApplicationListener ApplicationListeners}
+ * which are defined as beans in the context.
+ *
+ * &lt;p&gt;A {@link org.springframework.context.MessageSource} may also be supplied
+ * as a bean in the context, with the name &quot;messageSource&quot;; otherwise, message
+ * resolution is delegated to the parent context. Furthermore, a multicaster
+ * for application events can be supplied as an &quot;applicationEventMulticaster&quot; bean
+ * of type {@link org.springframework.context.event.ApplicationEventMulticaster}
+ * in the context; otherwise, a default multicaster of type
+ * {@link org.springframework.context.event.SimpleApplicationEventMulticaster} will be used.
+ *
+ * &lt;p&gt;Implements resource loading by extending
+ * {@link org.springframework.core.io.DefaultResourceLoader}.
+ * Consequently treats non-URL resource paths as class path resources
+ * (supporting full class path resource names that include the package path,
+ * e.g. &quot;mypackage/myresource.dat&quot;), unless the {@link #getResourceByPath}
+ * method is overridden in a subclass.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Mark Fisher
+ * @author Stephane Nicoll
+ * @since January 21, 2001
+ * @see #refreshBeanFactory
+ * @see #getBeanFactory
+ * @see org.springframework.beans.factory.config.BeanFactoryPostProcessor
+ * @see org.springframework.beans.factory.config.BeanPostProcessor
+ * @see org.springframework.context.event.ApplicationEventMulticaster
+ * @see org.springframework.context.ApplicationListener
+ * @see org.springframework.context.MessageSource
+ */
+public abstract class AbstractApplicationContext extends DefaultResourceLoader
+		implements ConfigurableApplicationContext {
+
+	/**
+	 * Name of the MessageSource bean in the factory.
+	 * If none is supplied, message resolution is delegated to the parent.
+	 * @see MessageSource
+	 */
+	public static final String MESSAGE_SOURCE_BEAN_NAME = &quot;messageSource&quot;;
+
+	/**
+	 * Name of the LifecycleProcessor bean in the factory.
+	 * If none is supplied, a DefaultLifecycleProcessor is used.
+	 * @see org.springframework.context.LifecycleProcessor
+	 * @see org.springframework.context.support.DefaultLifecycleProcessor
+	 */
+	public static final String LIFECYCLE_PROCESSOR_BEAN_NAME = &quot;lifecycleProcessor&quot;;
+
+	/**
+	 * Name of the ApplicationEventMulticaster bean in the factory.
+	 * If none is supplied, a default SimpleApplicationEventMulticaster is used.
+	 * @see org.springframework.context.event.ApplicationEventMulticaster
+	 * @see org.springframework.context.event.SimpleApplicationEventMulticaster
+	 */
+	public static final String APPLICATION_EVENT_MULTICASTER_BEAN_NAME = &quot;applicationEventMulticaster&quot;;
+
+
+	static {
+		// Eagerly load the ContextClosedEvent class to avoid weird classloader issues
+		// on application shutdown in WebLogic 8.1. (Reported by Dustin Woods.)
+<span class="fc" id="L157">		ContextClosedEvent.class.getName();</span>
+<span class="fc" id="L158">	}</span>
+
+
+	/** Logger used by this class. Available to subclasses. */
+<span class="fc" id="L162">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	/** Unique id for this context, if any. */
+<span class="fc" id="L165">	private String id = ObjectUtils.identityToString(this);</span>
+
+	/** Display name. */
+<span class="fc" id="L168">	private String displayName = ObjectUtils.identityToString(this);</span>
+
+	/** Parent context. */
+	@Nullable
+	private ApplicationContext parent;
+
+	/** Environment used by this context. */
+	@Nullable
+	private ConfigurableEnvironment environment;
+
+	/** BeanFactoryPostProcessors to apply on refresh. */
+<span class="fc" id="L179">	private final List&lt;BeanFactoryPostProcessor&gt; beanFactoryPostProcessors = new ArrayList&lt;&gt;();</span>
+
+	/** System time in milliseconds when this context started. */
+	private long startupDate;
+
+	/** Flag that indicates whether this context is currently active. */
+<span class="fc" id="L185">	private final AtomicBoolean active = new AtomicBoolean();</span>
+
+	/** Flag that indicates whether this context has been closed already. */
+<span class="fc" id="L188">	private final AtomicBoolean closed = new AtomicBoolean();</span>
+
+	/** Synchronization monitor for the &quot;refresh&quot; and &quot;destroy&quot;. */
+<span class="fc" id="L191">	private final Object startupShutdownMonitor = new Object();</span>
+
+	/** Reference to the JVM shutdown hook, if registered. */
+	@Nullable
+	private Thread shutdownHook;
+
+	/** ResourcePatternResolver used by this context. */
+	private ResourcePatternResolver resourcePatternResolver;
+
+	/** LifecycleProcessor for managing the lifecycle of beans within this context. */
+	@Nullable
+	private LifecycleProcessor lifecycleProcessor;
+
+	/** MessageSource we delegate our implementation of this interface to. */
+	@Nullable
+	private MessageSource messageSource;
+
+	/** Helper class used in event publishing. */
+	@Nullable
+	private ApplicationEventMulticaster applicationEventMulticaster;
+
+	/** Statically specified listeners. */
+<span class="fc" id="L213">	private final Set&lt;ApplicationListener&lt;?&gt;&gt; applicationListeners = new LinkedHashSet&lt;&gt;();</span>
+
+	/** Local listeners registered before refresh. */
+	@Nullable
+	private Set&lt;ApplicationListener&lt;?&gt;&gt; earlyApplicationListeners;
+
+	/** ApplicationEvents published before the multicaster setup. */
+	@Nullable
+	private Set&lt;ApplicationEvent&gt; earlyApplicationEvents;
+
+
+	/**
+	 * Create a new AbstractApplicationContext with no parent.
+	 */
+<span class="fc" id="L227">	public AbstractApplicationContext() {</span>
+<span class="fc" id="L228">		this.resourcePatternResolver = getResourcePatternResolver();</span>
+<span class="fc" id="L229">	}</span>
+
+	/**
+	 * Create a new AbstractApplicationContext with the given parent context.
+	 * @param parent the parent context
+	 */
+	public AbstractApplicationContext(@Nullable ApplicationContext parent) {
+<span class="fc" id="L236">		this();</span>
+<span class="fc" id="L237">		setParent(parent);</span>
+<span class="fc" id="L238">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ApplicationContext interface
+	//---------------------------------------------------------------------
+
+	/**
+	 * Set the unique id of this application context.
+	 * &lt;p&gt;Default is the object id of the context instance, or the name
+	 * of the context bean if the context is itself defined as a bean.
+	 * @param id the unique id of the context
+	 */
+	@Override
+	public void setId(String id) {
+<span class="fc" id="L253">		this.id = id;</span>
+<span class="fc" id="L254">	}</span>
+
+	@Override
+	public String getId() {
+<span class="fc" id="L258">		return this.id;</span>
+	}
+
+	@Override
+	public String getApplicationName() {
+<span class="nc" id="L263">		return &quot;&quot;;</span>
+	}
+
+	/**
+	 * Set a friendly name for this context.
+	 * Typically done during initialization of concrete context implementations.
+	 * &lt;p&gt;Default is the object id of the context instance.
+	 */
+	public void setDisplayName(String displayName) {
+<span class="fc" id="L272">		Assert.hasLength(displayName, &quot;Display name must not be empty&quot;);</span>
+<span class="fc" id="L273">		this.displayName = displayName;</span>
+<span class="fc" id="L274">	}</span>
+
+	/**
+	 * Return a friendly name for this context.
+	 * @return a display name for this context (never {@code null})
+	 */
+	@Override
+	public String getDisplayName() {
+<span class="fc" id="L282">		return this.displayName;</span>
+	}
+
+	/**
+	 * Return the parent context, or {@code null} if there is no parent
+	 * (that is, this context is the root of the context hierarchy).
+	 */
+	@Override
+	@Nullable
+	public ApplicationContext getParent() {
+<span class="fc" id="L292">		return this.parent;</span>
+	}
+
+	/**
+	 * Set the {@code Environment} for this application context.
+	 * &lt;p&gt;Default value is determined by {@link #createEnvironment()}. Replacing the
+	 * default with this method is one option but configuration through {@link
+	 * #getEnvironment()} should also be considered. In either case, such modifications
+	 * should be performed &lt;em&gt;before&lt;/em&gt; {@link #refresh()}.
+	 * @see org.springframework.context.support.AbstractApplicationContext#createEnvironment
+	 */
+	@Override
+	public void setEnvironment(ConfigurableEnvironment environment) {
+<span class="fc" id="L305">		this.environment = environment;</span>
+<span class="fc" id="L306">	}</span>
+
+	/**
+	 * Return the {@code Environment} for this application context in configurable
+	 * form, allowing for further customization.
+	 * &lt;p&gt;If none specified, a default environment will be initialized via
+	 * {@link #createEnvironment()}.
+	 */
+	@Override
+	public ConfigurableEnvironment getEnvironment() {
+<span class="fc bfc" id="L316" title="All 2 branches covered.">		if (this.environment == null) {</span>
+<span class="fc" id="L317">			this.environment = createEnvironment();</span>
+		}
+<span class="fc" id="L319">		return this.environment;</span>
+	}
+
+	/**
+	 * Create and return a new {@link StandardEnvironment}.
+	 * &lt;p&gt;Subclasses may override this method in order to supply
+	 * a custom {@link ConfigurableEnvironment} implementation.
+	 */
+	protected ConfigurableEnvironment createEnvironment() {
+<span class="fc" id="L328">		return new StandardEnvironment();</span>
+	}
+
+	/**
+	 * Return this context's internal bean factory as AutowireCapableBeanFactory,
+	 * if already available.
+	 * @see #getBeanFactory()
+	 */
+	@Override
+	public AutowireCapableBeanFactory getAutowireCapableBeanFactory() throws IllegalStateException {
+<span class="fc" id="L338">		return getBeanFactory();</span>
+	}
+
+	/**
+	 * Return the timestamp (ms) when this context was first loaded.
+	 */
+	@Override
+	public long getStartupDate() {
+<span class="fc" id="L346">		return this.startupDate;</span>
+	}
+
+	/**
+	 * Publish the given event to all listeners.
+	 * &lt;p&gt;Note: Listeners get initialized after the MessageSource, to be able
+	 * to access it within listener implementations. Thus, MessageSource
+	 * implementations cannot publish events.
+	 * @param event the event to publish (may be application-specific or a
+	 * standard framework event)
+	 */
+	@Override
+	public void publishEvent(ApplicationEvent event) {
+<span class="fc" id="L359">		publishEvent(event, null);</span>
+<span class="fc" id="L360">	}</span>
+
+	/**
+	 * Publish the given event to all listeners.
+	 * &lt;p&gt;Note: Listeners get initialized after the MessageSource, to be able
+	 * to access it within listener implementations. Thus, MessageSource
+	 * implementations cannot publish events.
+	 * @param event the event to publish (may be an {@link ApplicationEvent}
+	 * or a payload object to be turned into a {@link PayloadApplicationEvent})
+	 */
+	@Override
+	public void publishEvent(Object event) {
+<span class="fc" id="L372">		publishEvent(event, null);</span>
+<span class="fc" id="L373">	}</span>
+
+	/**
+	 * Publish the given event to all listeners.
+	 * @param event the event to publish (may be an {@link ApplicationEvent}
+	 * or a payload object to be turned into a {@link PayloadApplicationEvent})
+	 * @param eventType the resolved event type, if known
+	 * @since 4.2
+	 */
+	protected void publishEvent(Object event, @Nullable ResolvableType eventType) {
+<span class="fc" id="L383">		Assert.notNull(event, &quot;Event must not be null&quot;);</span>
+
+		// Decorate event as an ApplicationEvent if necessary
+		ApplicationEvent applicationEvent;
+<span class="fc bfc" id="L387" title="All 2 branches covered.">		if (event instanceof ApplicationEvent) {</span>
+<span class="fc" id="L388">			applicationEvent = (ApplicationEvent) event;</span>
+		}
+		else {
+<span class="fc" id="L391">			applicationEvent = new PayloadApplicationEvent&lt;&gt;(this, event);</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">			if (eventType == null) {</span>
+<span class="fc" id="L393">				eventType = ((PayloadApplicationEvent&lt;?&gt;) applicationEvent).getResolvableType();</span>
+			}
+		}
+
+		// Multicast right now if possible - or lazily once the multicaster is initialized
+<span class="fc bfc" id="L398" title="All 2 branches covered.">		if (this.earlyApplicationEvents != null) {</span>
+<span class="fc" id="L399">			this.earlyApplicationEvents.add(applicationEvent);</span>
+		}
+		else {
+<span class="fc" id="L402">			getApplicationEventMulticaster().multicastEvent(applicationEvent, eventType);</span>
+		}
+
+		// Publish event via parent context as well...
+<span class="fc bfc" id="L406" title="All 2 branches covered.">		if (this.parent != null) {</span>
+<span class="pc bpc" id="L407" title="1 of 2 branches missed.">			if (this.parent instanceof AbstractApplicationContext) {</span>
+<span class="fc" id="L408">				((AbstractApplicationContext) this.parent).publishEvent(event, eventType);</span>
+			}
+			else {
+<span class="nc" id="L411">				this.parent.publishEvent(event);</span>
+			}
+		}
+<span class="fc" id="L414">	}</span>
+
+	/**
+	 * Return the internal ApplicationEventMulticaster used by the context.
+	 * @return the internal ApplicationEventMulticaster (never {@code null})
+	 * @throws IllegalStateException if the context has not been initialized yet
+	 */
+	ApplicationEventMulticaster getApplicationEventMulticaster() throws IllegalStateException {
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">		if (this.applicationEventMulticaster == null) {</span>
+<span class="nc" id="L423">			throw new IllegalStateException(&quot;ApplicationEventMulticaster not initialized - &quot; +</span>
+					&quot;call 'refresh' before multicasting events via the context: &quot; + this);
+		}
+<span class="fc" id="L426">		return this.applicationEventMulticaster;</span>
+	}
+
+	/**
+	 * Return the internal LifecycleProcessor used by the context.
+	 * @return the internal LifecycleProcessor (never {@code null})
+	 * @throws IllegalStateException if the context has not been initialized yet
+	 */
+	LifecycleProcessor getLifecycleProcessor() throws IllegalStateException {
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">		if (this.lifecycleProcessor == null) {</span>
+<span class="nc" id="L436">			throw new IllegalStateException(&quot;LifecycleProcessor not initialized - &quot; +</span>
+					&quot;call 'refresh' before invoking lifecycle methods via the context: &quot; + this);
+		}
+<span class="fc" id="L439">		return this.lifecycleProcessor;</span>
+	}
+
+	/**
+	 * Return the ResourcePatternResolver to use for resolving location patterns
+	 * into Resource instances. Default is a
+	 * {@link org.springframework.core.io.support.PathMatchingResourcePatternResolver},
+	 * supporting Ant-style location patterns.
+	 * &lt;p&gt;Can be overridden in subclasses, for extended resolution strategies,
+	 * for example in a web environment.
+	 * &lt;p&gt;&lt;b&gt;Do not call this when needing to resolve a location pattern.&lt;/b&gt;
+	 * Call the context's {@code getResources} method instead, which
+	 * will delegate to the ResourcePatternResolver.
+	 * @return the ResourcePatternResolver for this context
+	 * @see #getResources
+	 * @see org.springframework.core.io.support.PathMatchingResourcePatternResolver
+	 */
+	protected ResourcePatternResolver getResourcePatternResolver() {
+<span class="fc" id="L457">		return new PathMatchingResourcePatternResolver(this);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ConfigurableApplicationContext interface
+	//---------------------------------------------------------------------
+
+	/**
+	 * Set the parent of this application context.
+	 * &lt;p&gt;The parent {@linkplain ApplicationContext#getEnvironment() environment} is
+	 * {@linkplain ConfigurableEnvironment#merge(ConfigurableEnvironment) merged} with
+	 * this (child) application context environment if the parent is non-{@code null} and
+	 * its environment is an instance of {@link ConfigurableEnvironment}.
+	 * @see ConfigurableEnvironment#merge(ConfigurableEnvironment)
+	 */
+	@Override
+	public void setParent(@Nullable ApplicationContext parent) {
+<span class="fc" id="L475">		this.parent = parent;</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">		if (parent != null) {</span>
+<span class="fc" id="L477">			Environment parentEnvironment = parent.getEnvironment();</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">			if (parentEnvironment instanceof ConfigurableEnvironment) {</span>
+<span class="fc" id="L479">				getEnvironment().merge((ConfigurableEnvironment) parentEnvironment);</span>
+			}
+		}
+<span class="fc" id="L482">	}</span>
+
+	@Override
+	public void addBeanFactoryPostProcessor(BeanFactoryPostProcessor postProcessor) {
+<span class="fc" id="L486">		Assert.notNull(postProcessor, &quot;BeanFactoryPostProcessor must not be null&quot;);</span>
+<span class="fc" id="L487">		this.beanFactoryPostProcessors.add(postProcessor);</span>
+<span class="fc" id="L488">	}</span>
+
+	/**
+	 * Return the list of BeanFactoryPostProcessors that will get applied
+	 * to the internal BeanFactory.
+	 */
+	public List&lt;BeanFactoryPostProcessor&gt; getBeanFactoryPostProcessors() {
+<span class="fc" id="L495">		return this.beanFactoryPostProcessors;</span>
+	}
+
+	@Override
+	public void addApplicationListener(ApplicationListener&lt;?&gt; listener) {
+<span class="fc" id="L500">		Assert.notNull(listener, &quot;ApplicationListener must not be null&quot;);</span>
+<span class="fc bfc" id="L501" title="All 2 branches covered.">		if (this.applicationEventMulticaster != null) {</span>
+<span class="fc" id="L502">			this.applicationEventMulticaster.addApplicationListener(listener);</span>
+		}
+<span class="fc" id="L504">		this.applicationListeners.add(listener);</span>
+<span class="fc" id="L505">	}</span>
+
+	/**
+	 * Return the list of statically specified ApplicationListeners.
+	 */
+	public Collection&lt;ApplicationListener&lt;?&gt;&gt; getApplicationListeners() {
+<span class="fc" id="L511">		return this.applicationListeners;</span>
+	}
+
+	@Override
+	public void refresh() throws BeansException, IllegalStateException {
+<span class="fc" id="L516">		synchronized (this.startupShutdownMonitor) {</span>
+			// Prepare this context for refreshing.
+<span class="fc" id="L518">			prepareRefresh();</span>
+
+			// Tell the subclass to refresh the internal bean factory.
+<span class="fc" id="L521">			ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();</span>
+
+			// Prepare the bean factory for use in this context.
+<span class="fc" id="L524">			prepareBeanFactory(beanFactory);</span>
+
+			try {
+				// Allows post-processing of the bean factory in context subclasses.
+<span class="fc" id="L528">				postProcessBeanFactory(beanFactory);</span>
+
+				// Invoke factory processors registered as beans in the context.
+<span class="fc" id="L531">				invokeBeanFactoryPostProcessors(beanFactory);</span>
+
+				// Register bean processors that intercept bean creation.
+<span class="fc" id="L534">				registerBeanPostProcessors(beanFactory);</span>
+
+				// Initialize message source for this context.
+<span class="fc" id="L537">				initMessageSource();</span>
+
+				// Initialize event multicaster for this context.
+<span class="fc" id="L540">				initApplicationEventMulticaster();</span>
+
+				// Initialize other special beans in specific context subclasses.
+<span class="fc" id="L543">				onRefresh();</span>
+
+				// Check for listener beans and register them.
+<span class="fc" id="L546">				registerListeners();</span>
+
+				// Instantiate all remaining (non-lazy-init) singletons.
+<span class="fc" id="L549">				finishBeanFactoryInitialization(beanFactory);</span>
+
+				// Last step: publish corresponding event.
+<span class="fc" id="L552">				finishRefresh();</span>
+			}
+
+<span class="fc" id="L555">			catch (BeansException ex) {</span>
+<span class="pc bpc" id="L556" title="1 of 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L557">					logger.warn(&quot;Exception encountered during context initialization - &quot; +</span>
+							&quot;cancelling refresh attempt: &quot; + ex);
+				}
+
+				// Destroy already created singletons to avoid dangling resources.
+<span class="fc" id="L562">				destroyBeans();</span>
+
+				// Reset 'active' flag.
+<span class="fc" id="L565">				cancelRefresh(ex);</span>
+
+				// Propagate exception to caller.
+<span class="fc" id="L568">				throw ex;</span>
+			}
+
+			finally {
+				// Reset common introspection caches in Spring's core, since we
+				// might not ever need metadata for singleton beans anymore...
+<span class="fc" id="L574">				resetCommonCaches();</span>
+			}
+<span class="fc" id="L576">		}</span>
+<span class="fc" id="L577">	}</span>
+
+	/**
+	 * Prepare this context for refreshing, setting its startup date and
+	 * active flag as well as performing any initialization of property sources.
+	 */
+	protected void prepareRefresh() {
+		// Switch to active.
+<span class="fc" id="L585">		this.startupDate = System.currentTimeMillis();</span>
+<span class="fc" id="L586">		this.closed.set(false);</span>
+<span class="fc" id="L587">		this.active.set(true);</span>
+
+<span class="pc bpc" id="L589" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L591">				logger.trace(&quot;Refreshing &quot; + this);</span>
+			}
+			else {
+<span class="nc" id="L594">				logger.debug(&quot;Refreshing &quot; + getDisplayName());</span>
+			}
+		}
+
+		// Initialize any placeholder property sources in the context environment.
+<span class="fc" id="L599">		initPropertySources();</span>
+
+		// Validate that all properties marked as required are resolvable:
+		// see ConfigurablePropertyResolver#setRequiredProperties
+<span class="fc" id="L603">		getEnvironment().validateRequiredProperties();</span>
+
+		// Store pre-refresh ApplicationListeners...
+<span class="fc bfc" id="L606" title="All 2 branches covered.">		if (this.earlyApplicationListeners == null) {</span>
+<span class="fc" id="L607">			this.earlyApplicationListeners = new LinkedHashSet&lt;&gt;(this.applicationListeners);</span>
+		}
+		else {
+			// Reset local application listeners to pre-refresh state.
+<span class="fc" id="L611">			this.applicationListeners.clear();</span>
+<span class="fc" id="L612">			this.applicationListeners.addAll(this.earlyApplicationListeners);</span>
+		}
+
+		// Allow for the collection of early ApplicationEvents,
+		// to be published once the multicaster is available...
+<span class="fc" id="L617">		this.earlyApplicationEvents = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L618">	}</span>
+
+	/**
+	 * &lt;p&gt;Replace any stub property sources with actual instances.
+	 * @see org.springframework.core.env.PropertySource.StubPropertySource
+	 * @see org.springframework.web.context.support.WebApplicationContextUtils#initServletPropertySources
+	 */
+	protected void initPropertySources() {
+		// For subclasses: do nothing by default.
+<span class="fc" id="L627">	}</span>
+
+	/**
+	 * Tell the subclass to refresh the internal bean factory.
+	 * @return the fresh BeanFactory instance
+	 * @see #refreshBeanFactory()
+	 * @see #getBeanFactory()
+	 */
+	protected ConfigurableListableBeanFactory obtainFreshBeanFactory() {
+<span class="fc" id="L636">		refreshBeanFactory();</span>
+<span class="fc" id="L637">		return getBeanFactory();</span>
+	}
+
+	/**
+	 * Configure the factory's standard context characteristics,
+	 * such as the context's ClassLoader and post-processors.
+	 * @param beanFactory the BeanFactory to configure
+	 */
+	protected void prepareBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+		// Tell the internal bean factory to use the context's class loader etc.
+<span class="fc" id="L647">		beanFactory.setBeanClassLoader(getClassLoader());</span>
+<span class="fc" id="L648">		beanFactory.setBeanExpressionResolver(new StandardBeanExpressionResolver(beanFactory.getBeanClassLoader()));</span>
+<span class="fc" id="L649">		beanFactory.addPropertyEditorRegistrar(new ResourceEditorRegistrar(this, getEnvironment()));</span>
+
+		// Configure the bean factory with context callbacks.
+<span class="fc" id="L652">		beanFactory.addBeanPostProcessor(new ApplicationContextAwareProcessor(this));</span>
+<span class="fc" id="L653">		beanFactory.ignoreDependencyInterface(EnvironmentAware.class);</span>
+<span class="fc" id="L654">		beanFactory.ignoreDependencyInterface(EmbeddedValueResolverAware.class);</span>
+<span class="fc" id="L655">		beanFactory.ignoreDependencyInterface(ResourceLoaderAware.class);</span>
+<span class="fc" id="L656">		beanFactory.ignoreDependencyInterface(ApplicationEventPublisherAware.class);</span>
+<span class="fc" id="L657">		beanFactory.ignoreDependencyInterface(MessageSourceAware.class);</span>
+<span class="fc" id="L658">		beanFactory.ignoreDependencyInterface(ApplicationContextAware.class);</span>
+
+		// BeanFactory interface not registered as resolvable type in a plain factory.
+		// MessageSource registered (and found for autowiring) as a bean.
+<span class="fc" id="L662">		beanFactory.registerResolvableDependency(BeanFactory.class, beanFactory);</span>
+<span class="fc" id="L663">		beanFactory.registerResolvableDependency(ResourceLoader.class, this);</span>
+<span class="fc" id="L664">		beanFactory.registerResolvableDependency(ApplicationEventPublisher.class, this);</span>
+<span class="fc" id="L665">		beanFactory.registerResolvableDependency(ApplicationContext.class, this);</span>
+
+		// Register early post-processor for detecting inner beans as ApplicationListeners.
+<span class="fc" id="L668">		beanFactory.addBeanPostProcessor(new ApplicationListenerDetector(this));</span>
+
+		// Detect a LoadTimeWeaver and prepare for weaving, if found.
+<span class="fc bfc" id="L671" title="All 2 branches covered.">		if (beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {</span>
+<span class="fc" id="L672">			beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));</span>
+			// Set a temporary ClassLoader for type matching.
+<span class="fc" id="L674">			beanFactory.setTempClassLoader(new ContextTypeMatchClassLoader(beanFactory.getBeanClassLoader()));</span>
+		}
+
+		// Register default environment beans.
+<span class="pc bpc" id="L678" title="1 of 2 branches missed.">		if (!beanFactory.containsLocalBean(ENVIRONMENT_BEAN_NAME)) {</span>
+<span class="fc" id="L679">			beanFactory.registerSingleton(ENVIRONMENT_BEAN_NAME, getEnvironment());</span>
+		}
+<span class="pc bpc" id="L681" title="1 of 2 branches missed.">		if (!beanFactory.containsLocalBean(SYSTEM_PROPERTIES_BEAN_NAME)) {</span>
+<span class="fc" id="L682">			beanFactory.registerSingleton(SYSTEM_PROPERTIES_BEAN_NAME, getEnvironment().getSystemProperties());</span>
+		}
+<span class="pc bpc" id="L684" title="1 of 2 branches missed.">		if (!beanFactory.containsLocalBean(SYSTEM_ENVIRONMENT_BEAN_NAME)) {</span>
+<span class="fc" id="L685">			beanFactory.registerSingleton(SYSTEM_ENVIRONMENT_BEAN_NAME, getEnvironment().getSystemEnvironment());</span>
+		}
+<span class="fc" id="L687">	}</span>
+
+	/**
+	 * Modify the application context's internal bean factory after its standard
+	 * initialization. All bean definitions will have been loaded, but no beans
+	 * will have been instantiated yet. This allows for registering special
+	 * BeanPostProcessors etc in certain ApplicationContext implementations.
+	 * @param beanFactory the bean factory used by the application context
+	 */
+	protected void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+<span class="fc" id="L697">	}</span>
+
+	/**
+	 * Instantiate and invoke all registered BeanFactoryPostProcessor beans,
+	 * respecting explicit order if given.
+	 * &lt;p&gt;Must be called before singleton instantiation.
+	 */
+	protected void invokeBeanFactoryPostProcessors(ConfigurableListableBeanFactory beanFactory) {
+<span class="fc" id="L705">		PostProcessorRegistrationDelegate.invokeBeanFactoryPostProcessors(beanFactory, getBeanFactoryPostProcessors());</span>
+
+		// Detect a LoadTimeWeaver and prepare for weaving, if found in the meantime
+		// (e.g. through an @Bean method registered by ConfigurationClassPostProcessor)
+<span class="fc bfc" id="L709" title="All 4 branches covered.">		if (beanFactory.getTempClassLoader() == null &amp;&amp; beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {</span>
+<span class="fc" id="L710">			beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));</span>
+<span class="fc" id="L711">			beanFactory.setTempClassLoader(new ContextTypeMatchClassLoader(beanFactory.getBeanClassLoader()));</span>
+		}
+<span class="fc" id="L713">	}</span>
+
+	/**
+	 * Instantiate and register all BeanPostProcessor beans,
+	 * respecting explicit order if given.
+	 * &lt;p&gt;Must be called before any instantiation of application beans.
+	 */
+	protected void registerBeanPostProcessors(ConfigurableListableBeanFactory beanFactory) {
+<span class="fc" id="L721">		PostProcessorRegistrationDelegate.registerBeanPostProcessors(beanFactory, this);</span>
+<span class="fc" id="L722">	}</span>
+
+	/**
+	 * Initialize the MessageSource.
+	 * Use parent's if none defined in this context.
+	 */
+	protected void initMessageSource() {
+<span class="fc" id="L729">		ConfigurableListableBeanFactory beanFactory = getBeanFactory();</span>
+<span class="fc bfc" id="L730" title="All 2 branches covered.">		if (beanFactory.containsLocalBean(MESSAGE_SOURCE_BEAN_NAME)) {</span>
+<span class="fc" id="L731">			this.messageSource = beanFactory.getBean(MESSAGE_SOURCE_BEAN_NAME, MessageSource.class);</span>
+			// Make MessageSource aware of parent MessageSource.
+<span class="pc bpc" id="L733" title="1 of 4 branches missed.">			if (this.parent != null &amp;&amp; this.messageSource instanceof HierarchicalMessageSource) {</span>
+<span class="fc" id="L734">				HierarchicalMessageSource hms = (HierarchicalMessageSource) this.messageSource;</span>
+<span class="pc bpc" id="L735" title="1 of 2 branches missed.">				if (hms.getParentMessageSource() == null) {</span>
+					// Only set parent context as parent MessageSource if no parent MessageSource
+					// registered already.
+<span class="fc" id="L738">					hms.setParentMessageSource(getInternalParentMessageSource());</span>
+				}
+			}
+<span class="pc bpc" id="L741" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L742">				logger.trace(&quot;Using MessageSource [&quot; + this.messageSource + &quot;]&quot;);</span>
+			}
+		}
+		else {
+			// Use empty MessageSource to be able to accept getMessage calls.
+<span class="fc" id="L747">			DelegatingMessageSource dms = new DelegatingMessageSource();</span>
+<span class="fc" id="L748">			dms.setParentMessageSource(getInternalParentMessageSource());</span>
+<span class="fc" id="L749">			this.messageSource = dms;</span>
+<span class="fc" id="L750">			beanFactory.registerSingleton(MESSAGE_SOURCE_BEAN_NAME, this.messageSource);</span>
+<span class="pc bpc" id="L751" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L752">				logger.trace(&quot;No '&quot; + MESSAGE_SOURCE_BEAN_NAME + &quot;' bean, using [&quot; + this.messageSource + &quot;]&quot;);</span>
+			}
+		}
+<span class="fc" id="L755">	}</span>
+
+	/**
+	 * Initialize the ApplicationEventMulticaster.
+	 * Uses SimpleApplicationEventMulticaster if none defined in the context.
+	 * @see org.springframework.context.event.SimpleApplicationEventMulticaster
+	 */
+	protected void initApplicationEventMulticaster() {
+<span class="fc" id="L763">		ConfigurableListableBeanFactory beanFactory = getBeanFactory();</span>
+<span class="fc bfc" id="L764" title="All 2 branches covered.">		if (beanFactory.containsLocalBean(APPLICATION_EVENT_MULTICASTER_BEAN_NAME)) {</span>
+<span class="fc" id="L765">			this.applicationEventMulticaster =</span>
+<span class="fc" id="L766">					beanFactory.getBean(APPLICATION_EVENT_MULTICASTER_BEAN_NAME, ApplicationEventMulticaster.class);</span>
+<span class="pc bpc" id="L767" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L768">				logger.trace(&quot;Using ApplicationEventMulticaster [&quot; + this.applicationEventMulticaster + &quot;]&quot;);</span>
+			}
+		}
+		else {
+<span class="fc" id="L772">			this.applicationEventMulticaster = new SimpleApplicationEventMulticaster(beanFactory);</span>
+<span class="fc" id="L773">			beanFactory.registerSingleton(APPLICATION_EVENT_MULTICASTER_BEAN_NAME, this.applicationEventMulticaster);</span>
+<span class="pc bpc" id="L774" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L775">				logger.trace(&quot;No '&quot; + APPLICATION_EVENT_MULTICASTER_BEAN_NAME + &quot;' bean, using &quot; +</span>
+<span class="nc" id="L776">						&quot;[&quot; + this.applicationEventMulticaster.getClass().getSimpleName() + &quot;]&quot;);</span>
+			}
+		}
+<span class="fc" id="L779">	}</span>
+
+	/**
+	 * Initialize the LifecycleProcessor.
+	 * Uses DefaultLifecycleProcessor if none defined in the context.
+	 * @see org.springframework.context.support.DefaultLifecycleProcessor
+	 */
+	protected void initLifecycleProcessor() {
+<span class="fc" id="L787">		ConfigurableListableBeanFactory beanFactory = getBeanFactory();</span>
+<span class="fc bfc" id="L788" title="All 2 branches covered.">		if (beanFactory.containsLocalBean(LIFECYCLE_PROCESSOR_BEAN_NAME)) {</span>
+<span class="fc" id="L789">			this.lifecycleProcessor =</span>
+<span class="fc" id="L790">					beanFactory.getBean(LIFECYCLE_PROCESSOR_BEAN_NAME, LifecycleProcessor.class);</span>
+<span class="pc bpc" id="L791" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L792">				logger.trace(&quot;Using LifecycleProcessor [&quot; + this.lifecycleProcessor + &quot;]&quot;);</span>
+			}
+		}
+		else {
+<span class="fc" id="L796">			DefaultLifecycleProcessor defaultProcessor = new DefaultLifecycleProcessor();</span>
+<span class="fc" id="L797">			defaultProcessor.setBeanFactory(beanFactory);</span>
+<span class="fc" id="L798">			this.lifecycleProcessor = defaultProcessor;</span>
+<span class="fc" id="L799">			beanFactory.registerSingleton(LIFECYCLE_PROCESSOR_BEAN_NAME, this.lifecycleProcessor);</span>
+<span class="pc bpc" id="L800" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L801">				logger.trace(&quot;No '&quot; + LIFECYCLE_PROCESSOR_BEAN_NAME + &quot;' bean, using &quot; +</span>
+<span class="nc" id="L802">						&quot;[&quot; + this.lifecycleProcessor.getClass().getSimpleName() + &quot;]&quot;);</span>
+			}
+		}
+<span class="fc" id="L805">	}</span>
+
+	/**
+	 * Template method which can be overridden to add context-specific refresh work.
+	 * Called on initialization of special beans, before instantiation of singletons.
+	 * &lt;p&gt;This implementation is empty.
+	 * @throws BeansException in case of errors
+	 * @see #refresh()
+	 */
+	protected void onRefresh() throws BeansException {
+		// For subclasses: do nothing by default.
+<span class="fc" id="L816">	}</span>
+
+	/**
+	 * Add beans that implement ApplicationListener as listeners.
+	 * Doesn't affect other listeners, which can be added without being beans.
+	 */
+	protected void registerListeners() {
+		// Register statically specified listeners first.
+<span class="fc bfc" id="L824" title="All 2 branches covered.">		for (ApplicationListener&lt;?&gt; listener : getApplicationListeners()) {</span>
+<span class="fc" id="L825">			getApplicationEventMulticaster().addApplicationListener(listener);</span>
+<span class="fc" id="L826">		}</span>
+
+		// Do not initialize FactoryBeans here: We need to leave all regular beans
+		// uninitialized to let post-processors apply to them!
+<span class="fc" id="L830">		String[] listenerBeanNames = getBeanNamesForType(ApplicationListener.class, true, false);</span>
+<span class="fc bfc" id="L831" title="All 2 branches covered.">		for (String listenerBeanName : listenerBeanNames) {</span>
+<span class="fc" id="L832">			getApplicationEventMulticaster().addApplicationListenerBean(listenerBeanName);</span>
+		}
+
+		// Publish early application events now that we finally have a multicaster...
+<span class="fc" id="L836">		Set&lt;ApplicationEvent&gt; earlyEventsToProcess = this.earlyApplicationEvents;</span>
+<span class="fc" id="L837">		this.earlyApplicationEvents = null;</span>
+<span class="pc bpc" id="L838" title="1 of 2 branches missed.">		if (earlyEventsToProcess != null) {</span>
+<span class="fc bfc" id="L839" title="All 2 branches covered.">			for (ApplicationEvent earlyEvent : earlyEventsToProcess) {</span>
+<span class="fc" id="L840">				getApplicationEventMulticaster().multicastEvent(earlyEvent);</span>
+<span class="fc" id="L841">			}</span>
+		}
+<span class="fc" id="L843">	}</span>
+
+	/**
+	 * Finish the initialization of this context's bean factory,
+	 * initializing all remaining singleton beans.
+	 */
+	protected void finishBeanFactoryInitialization(ConfigurableListableBeanFactory beanFactory) {
+		// Initialize conversion service for this context.
+<span class="fc bfc" id="L851" title="All 2 branches covered.">		if (beanFactory.containsBean(CONVERSION_SERVICE_BEAN_NAME) &amp;&amp;</span>
+<span class="pc bpc" id="L852" title="1 of 2 branches missed.">				beanFactory.isTypeMatch(CONVERSION_SERVICE_BEAN_NAME, ConversionService.class)) {</span>
+<span class="fc" id="L853">			beanFactory.setConversionService(</span>
+<span class="fc" id="L854">					beanFactory.getBean(CONVERSION_SERVICE_BEAN_NAME, ConversionService.class));</span>
+		}
+
+		// Register a default embedded value resolver if no bean post-processor
+		// (such as a PropertyPlaceholderConfigurer bean) registered any before:
+		// at this point, primarily for resolution in annotation attribute values.
+<span class="fc bfc" id="L860" title="All 2 branches covered.">		if (!beanFactory.hasEmbeddedValueResolver()) {</span>
+<span class="fc" id="L861">			beanFactory.addEmbeddedValueResolver(strVal -&gt; getEnvironment().resolvePlaceholders(strVal));</span>
+		}
+
+		// Initialize LoadTimeWeaverAware beans early to allow for registering their transformers early.
+<span class="fc" id="L865">		String[] weaverAwareNames = beanFactory.getBeanNamesForType(LoadTimeWeaverAware.class, false, false);</span>
+<span class="pc bpc" id="L866" title="1 of 2 branches missed.">		for (String weaverAwareName : weaverAwareNames) {</span>
+<span class="nc" id="L867">			getBean(weaverAwareName);</span>
+		}
+
+		// Stop using the temporary ClassLoader for type matching.
+<span class="fc" id="L871">		beanFactory.setTempClassLoader(null);</span>
+
+		// Allow for caching all bean definition metadata, not expecting further changes.
+<span class="fc" id="L874">		beanFactory.freezeConfiguration();</span>
+
+		// Instantiate all remaining (non-lazy-init) singletons.
+<span class="fc" id="L877">		beanFactory.preInstantiateSingletons();</span>
+<span class="fc" id="L878">	}</span>
+
+	/**
+	 * Finish the refresh of this context, invoking the LifecycleProcessor's
+	 * onRefresh() method and publishing the
+	 * {@link org.springframework.context.event.ContextRefreshedEvent}.
+	 */
+	protected void finishRefresh() {
+		// Clear context-level resource caches (such as ASM metadata from scanning).
+<span class="fc" id="L887">		clearResourceCaches();</span>
+
+		// Initialize lifecycle processor for this context.
+<span class="fc" id="L890">		initLifecycleProcessor();</span>
+
+		// Propagate refresh to lifecycle processor first.
+<span class="fc" id="L893">		getLifecycleProcessor().onRefresh();</span>
+
+		// Publish the final event.
+<span class="fc" id="L896">		publishEvent(new ContextRefreshedEvent(this));</span>
+
+		// Participate in LiveBeansView MBean, if active.
+<span class="fc" id="L899">		LiveBeansView.registerApplicationContext(this);</span>
+<span class="fc" id="L900">	}</span>
+
+	/**
+	 * Cancel this context's refresh attempt, resetting the {@code active} flag
+	 * after an exception got thrown.
+	 * @param ex the exception that led to the cancellation
+	 */
+	protected void cancelRefresh(BeansException ex) {
+<span class="fc" id="L908">		this.active.set(false);</span>
+<span class="fc" id="L909">	}</span>
+
+	/**
+	 * Reset Spring's common reflection metadata caches, in particular the
+	 * {@link ReflectionUtils}, {@link AnnotationUtils}, {@link ResolvableType}
+	 * and {@link CachedIntrospectionResults} caches.
+	 * @since 4.2
+	 * @see ReflectionUtils#clearCache()
+	 * @see AnnotationUtils#clearCache()
+	 * @see ResolvableType#clearCache()
+	 * @see CachedIntrospectionResults#clearClassLoader(ClassLoader)
+	 */
+	protected void resetCommonCaches() {
+<span class="fc" id="L922">		ReflectionUtils.clearCache();</span>
+<span class="fc" id="L923">		AnnotationUtils.clearCache();</span>
+<span class="fc" id="L924">		ResolvableType.clearCache();</span>
+<span class="fc" id="L925">		CachedIntrospectionResults.clearClassLoader(getClassLoader());</span>
+<span class="fc" id="L926">	}</span>
+
+
+	/**
+	 * Register a shutdown hook with the JVM runtime, closing this context
+	 * on JVM shutdown unless it has already been closed at that time.
+	 * &lt;p&gt;Delegates to {@code doClose()} for the actual closing procedure.
+	 * @see Runtime#addShutdownHook
+	 * @see #close()
+	 * @see #doClose()
+	 */
+	@Override
+	public void registerShutdownHook() {
+<span class="nc bnc" id="L939" title="All 2 branches missed.">		if (this.shutdownHook == null) {</span>
+			// No shutdown hook registered yet.
+<span class="nc" id="L941">			this.shutdownHook = new Thread() {</span>
+				@Override
+				public void run() {
+<span class="nc" id="L944">					synchronized (startupShutdownMonitor) {</span>
+<span class="nc" id="L945">						doClose();</span>
+<span class="nc" id="L946">					}</span>
+<span class="nc" id="L947">				}</span>
+			};
+<span class="nc" id="L949">			Runtime.getRuntime().addShutdownHook(this.shutdownHook);</span>
+		}
+<span class="nc" id="L951">	}</span>
+
+	/**
+	 * Callback for destruction of this instance, originally attached
+	 * to a {@code DisposableBean} implementation (not anymore in 5.0).
+	 * &lt;p&gt;The {@link #close()} method is the native way to shut down
+	 * an ApplicationContext, which this method simply delegates to.
+	 * @deprecated as of Spring Framework 5.0, in favor of {@link #close()}
+	 */
+	@Deprecated
+	public void destroy() {
+<span class="nc" id="L962">		close();</span>
+<span class="nc" id="L963">	}</span>
+
+	/**
+	 * Close this application context, destroying all beans in its bean factory.
+	 * &lt;p&gt;Delegates to {@code doClose()} for the actual closing procedure.
+	 * Also removes a JVM shutdown hook, if registered, as it's not needed anymore.
+	 * @see #doClose()
+	 * @see #registerShutdownHook()
+	 */
+	@Override
+	public void close() {
+<span class="fc" id="L974">		synchronized (this.startupShutdownMonitor) {</span>
+<span class="fc" id="L975">			doClose();</span>
+			// If we registered a JVM shutdown hook, we don't need it anymore now:
+			// We've already explicitly closed the context.
+<span class="pc bpc" id="L978" title="1 of 2 branches missed.">			if (this.shutdownHook != null) {</span>
+				try {
+<span class="nc" id="L980">					Runtime.getRuntime().removeShutdownHook(this.shutdownHook);</span>
+				}
+<span class="nc" id="L982">				catch (IllegalStateException ex) {</span>
+					// ignore - VM is already shutting down
+<span class="nc" id="L984">				}</span>
+			}
+<span class="fc" id="L986">		}</span>
+<span class="fc" id="L987">	}</span>
+
+	/**
+	 * Actually performs context closing: publishes a ContextClosedEvent and
+	 * destroys the singletons in the bean factory of this application context.
+	 * &lt;p&gt;Called by both {@code close()} and a JVM shutdown hook, if any.
+	 * @see org.springframework.context.event.ContextClosedEvent
+	 * @see #destroyBeans()
+	 * @see #close()
+	 * @see #registerShutdownHook()
+	 */
+	protected void doClose() {
+		// Check whether an actual close attempt is necessary...
+<span class="pc bpc" id="L1000" title="1 of 4 branches missed.">		if (this.active.get() &amp;&amp; this.closed.compareAndSet(false, true)) {</span>
+<span class="pc bpc" id="L1001" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1002">				logger.debug(&quot;Closing &quot; + this);</span>
+			}
+
+<span class="fc" id="L1005">			LiveBeansView.unregisterApplicationContext(this);</span>
+
+			try {
+				// Publish shutdown event.
+<span class="fc" id="L1009">				publishEvent(new ContextClosedEvent(this));</span>
+			}
+<span class="nc" id="L1011">			catch (Throwable ex) {</span>
+<span class="nc" id="L1012">				logger.warn(&quot;Exception thrown from ApplicationListener handling ContextClosedEvent&quot;, ex);</span>
+<span class="fc" id="L1013">			}</span>
+
+			// Stop all Lifecycle beans, to avoid delays during individual destruction.
+<span class="pc bpc" id="L1016" title="1 of 2 branches missed.">			if (this.lifecycleProcessor != null) {</span>
+				try {
+<span class="fc" id="L1018">					this.lifecycleProcessor.onClose();</span>
+				}
+<span class="nc" id="L1020">				catch (Throwable ex) {</span>
+<span class="nc" id="L1021">					logger.warn(&quot;Exception thrown from LifecycleProcessor on context close&quot;, ex);</span>
+<span class="fc" id="L1022">				}</span>
+			}
+
+			// Destroy all cached singletons in the context's BeanFactory.
+<span class="fc" id="L1026">			destroyBeans();</span>
+
+			// Close the state of this context itself.
+<span class="fc" id="L1029">			closeBeanFactory();</span>
+
+			// Let subclasses do some final clean-up if they wish...
+<span class="fc" id="L1032">			onClose();</span>
+
+			// Reset local application listeners to pre-refresh state.
+<span class="pc bpc" id="L1035" title="1 of 2 branches missed.">			if (this.earlyApplicationListeners != null) {</span>
+<span class="fc" id="L1036">				this.applicationListeners.clear();</span>
+<span class="fc" id="L1037">				this.applicationListeners.addAll(this.earlyApplicationListeners);</span>
+			}
+
+			// Switch to inactive.
+<span class="fc" id="L1041">			this.active.set(false);</span>
+		}
+<span class="fc" id="L1043">	}</span>
+
+	/**
+	 * Template method for destroying all beans that this context manages.
+	 * The default implementation destroy all cached singletons in this context,
+	 * invoking {@code DisposableBean.destroy()} and/or the specified
+	 * &quot;destroy-method&quot;.
+	 * &lt;p&gt;Can be overridden to add context-specific bean destruction steps
+	 * right before or right after standard singleton destruction,
+	 * while the context's BeanFactory is still active.
+	 * @see #getBeanFactory()
+	 * @see org.springframework.beans.factory.config.ConfigurableBeanFactory#destroySingletons()
+	 */
+	protected void destroyBeans() {
+<span class="fc" id="L1057">		getBeanFactory().destroySingletons();</span>
+<span class="fc" id="L1058">	}</span>
+
+	/**
+	 * Template method which can be overridden to add context-specific shutdown work.
+	 * The default implementation is empty.
+	 * &lt;p&gt;Called at the end of {@link #doClose}'s shutdown procedure, after
+	 * this context's BeanFactory has been closed. If custom shutdown logic
+	 * needs to execute while the BeanFactory is still active, override
+	 * the {@link #destroyBeans()} method instead.
+	 */
+	protected void onClose() {
+		// For subclasses: do nothing by default.
+<span class="fc" id="L1070">	}</span>
+
+	@Override
+	public boolean isActive() {
+<span class="fc" id="L1074">		return this.active.get();</span>
+	}
+
+	/**
+	 * Assert that this context's BeanFactory is currently active,
+	 * throwing an {@link IllegalStateException} if it isn't.
+	 * &lt;p&gt;Invoked by all {@link BeanFactory} delegation methods that depend
+	 * on an active context, i.e. in particular all bean accessor methods.
+	 * &lt;p&gt;The default implementation checks the {@link #isActive() 'active'} status
+	 * of this context overall. May be overridden for more specific checks, or for a
+	 * no-op if {@link #getBeanFactory()} itself throws an exception in such a case.
+	 */
+	protected void assertBeanFactoryActive() {
+<span class="fc bfc" id="L1087" title="All 2 branches covered.">		if (!this.active.get()) {</span>
+<span class="pc bpc" id="L1088" title="1 of 2 branches missed.">			if (this.closed.get()) {</span>
+<span class="fc" id="L1089">				throw new IllegalStateException(getDisplayName() + &quot; has been closed already&quot;);</span>
+			}
+			else {
+<span class="nc" id="L1092">				throw new IllegalStateException(getDisplayName() + &quot; has not been refreshed yet&quot;);</span>
+			}
+		}
+<span class="fc" id="L1095">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of BeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public Object getBean(String name) throws BeansException {
+<span class="fc" id="L1104">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1105">		return getBeanFactory().getBean(name);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getBean(String name, Class&lt;T&gt; requiredType) throws BeansException {
+<span class="fc" id="L1110">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1111">		return getBeanFactory().getBean(name, requiredType);</span>
+	}
+
+	@Override
+	public Object getBean(String name, Object... args) throws BeansException {
+<span class="nc" id="L1116">		assertBeanFactoryActive();</span>
+<span class="nc" id="L1117">		return getBeanFactory().getBean(name, args);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getBean(Class&lt;T&gt; requiredType) throws BeansException {
+<span class="fc" id="L1122">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1123">		return getBeanFactory().getBean(requiredType);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getBean(Class&lt;T&gt; requiredType, Object... args) throws BeansException {
+<span class="nc" id="L1128">		assertBeanFactoryActive();</span>
+<span class="nc" id="L1129">		return getBeanFactory().getBean(requiredType, args);</span>
+	}
+
+	@Override
+	public &lt;T&gt; ObjectProvider&lt;T&gt; getBeanProvider(Class&lt;T&gt; requiredType) {
+<span class="nc" id="L1134">		assertBeanFactoryActive();</span>
+<span class="nc" id="L1135">		return getBeanFactory().getBeanProvider(requiredType);</span>
+	}
+
+	@Override
+	public &lt;T&gt; ObjectProvider&lt;T&gt; getBeanProvider(ResolvableType requiredType) {
+<span class="fc" id="L1140">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1141">		return getBeanFactory().getBeanProvider(requiredType);</span>
+	}
+
+	@Override
+	public boolean containsBean(String name) {
+<span class="fc" id="L1146">		return getBeanFactory().containsBean(name);</span>
+	}
+
+	@Override
+	public boolean isSingleton(String name) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L1151">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1152">		return getBeanFactory().isSingleton(name);</span>
+	}
+
+	@Override
+	public boolean isPrototype(String name) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L1157">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1158">		return getBeanFactory().isPrototype(name);</span>
+	}
+
+	@Override
+	public boolean isTypeMatch(String name, ResolvableType typeToMatch) throws NoSuchBeanDefinitionException {
+<span class="nc" id="L1163">		assertBeanFactoryActive();</span>
+<span class="nc" id="L1164">		return getBeanFactory().isTypeMatch(name, typeToMatch);</span>
+	}
+
+	@Override
+	public boolean isTypeMatch(String name, Class&lt;?&gt; typeToMatch) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L1169">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1170">		return getBeanFactory().isTypeMatch(name, typeToMatch);</span>
+	}
+
+	@Override
+	@Nullable
+	public Class&lt;?&gt; getType(String name) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L1176">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1177">		return getBeanFactory().getType(name);</span>
+	}
+
+	@Override
+	public String[] getAliases(String name) {
+<span class="fc" id="L1182">		return getBeanFactory().getAliases(name);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ListableBeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public boolean containsBeanDefinition(String beanName) {
+<span class="fc" id="L1192">		return getBeanFactory().containsBeanDefinition(beanName);</span>
+	}
+
+	@Override
+	public int getBeanDefinitionCount() {
+<span class="fc" id="L1197">		return getBeanFactory().getBeanDefinitionCount();</span>
+	}
+
+	@Override
+	public String[] getBeanDefinitionNames() {
+<span class="fc" id="L1202">		return getBeanFactory().getBeanDefinitionNames();</span>
+	}
+
+	@Override
+	public String[] getBeanNamesForType(ResolvableType type) {
+<span class="nc" id="L1207">		assertBeanFactoryActive();</span>
+<span class="nc" id="L1208">		return getBeanFactory().getBeanNamesForType(type);</span>
+	}
+
+	@Override
+	public String[] getBeanNamesForType(@Nullable Class&lt;?&gt; type) {
+<span class="fc" id="L1213">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1214">		return getBeanFactory().getBeanNamesForType(type);</span>
+	}
+
+	@Override
+	public String[] getBeanNamesForType(@Nullable Class&lt;?&gt; type, boolean includeNonSingletons, boolean allowEagerInit) {
+<span class="fc" id="L1219">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1220">		return getBeanFactory().getBeanNamesForType(type, includeNonSingletons, allowEagerInit);</span>
+	}
+
+	@Override
+	public &lt;T&gt; Map&lt;String, T&gt; getBeansOfType(@Nullable Class&lt;T&gt; type) throws BeansException {
+<span class="fc" id="L1225">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1226">		return getBeanFactory().getBeansOfType(type);</span>
+	}
+
+	@Override
+	public &lt;T&gt; Map&lt;String, T&gt; getBeansOfType(@Nullable Class&lt;T&gt; type, boolean includeNonSingletons, boolean allowEagerInit)
+			throws BeansException {
+
+<span class="fc" id="L1233">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1234">		return getBeanFactory().getBeansOfType(type, includeNonSingletons, allowEagerInit);</span>
+	}
+
+	@Override
+	public String[] getBeanNamesForAnnotation(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="nc" id="L1239">		assertBeanFactoryActive();</span>
+<span class="nc" id="L1240">		return getBeanFactory().getBeanNamesForAnnotation(annotationType);</span>
+	}
+
+	@Override
+	public Map&lt;String, Object&gt; getBeansWithAnnotation(Class&lt;? extends Annotation&gt; annotationType)
+			throws BeansException {
+
+<span class="fc" id="L1247">		assertBeanFactoryActive();</span>
+<span class="fc" id="L1248">		return getBeanFactory().getBeansWithAnnotation(annotationType);</span>
+	}
+
+	@Override
+	@Nullable
+	public &lt;A extends Annotation&gt; A findAnnotationOnBean(String beanName, Class&lt;A&gt; annotationType)
+			throws NoSuchBeanDefinitionException {
+
+<span class="nc" id="L1256">		assertBeanFactoryActive();</span>
+<span class="nc" id="L1257">		return getBeanFactory().findAnnotationOnBean(beanName, annotationType);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of HierarchicalBeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	@Nullable
+	public BeanFactory getParentBeanFactory() {
+<span class="fc" id="L1268">		return getParent();</span>
+	}
+
+	@Override
+	public boolean containsLocalBean(String name) {
+<span class="fc" id="L1273">		return getBeanFactory().containsLocalBean(name);</span>
+	}
+
+	/**
+	 * Return the internal bean factory of the parent context if it implements
+	 * ConfigurableApplicationContext; else, return the parent context itself.
+	 * @see org.springframework.context.ConfigurableApplicationContext#getBeanFactory
+	 */
+	@Nullable
+	protected BeanFactory getInternalParentBeanFactory() {
+<span class="fc bfc" id="L1283" title="All 2 branches covered.">		return (getParent() instanceof ConfigurableApplicationContext ?</span>
+<span class="fc" id="L1284">				((ConfigurableApplicationContext) getParent()).getBeanFactory() : getParent());</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of MessageSource interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public String getMessage(String code, @Nullable Object[] args, @Nullable String defaultMessage, Locale locale) {
+<span class="fc" id="L1294">		return getMessageSource().getMessage(code, args, defaultMessage, locale);</span>
+	}
+
+	@Override
+	public String getMessage(String code, @Nullable Object[] args, Locale locale) throws NoSuchMessageException {
+<span class="fc" id="L1299">		return getMessageSource().getMessage(code, args, locale);</span>
+	}
+
+	@Override
+	public String getMessage(MessageSourceResolvable resolvable, Locale locale) throws NoSuchMessageException {
+<span class="fc" id="L1304">		return getMessageSource().getMessage(resolvable, locale);</span>
+	}
+
+	/**
+	 * Return the internal MessageSource used by the context.
+	 * @return the internal MessageSource (never {@code null})
+	 * @throws IllegalStateException if the context has not been initialized yet
+	 */
+	private MessageSource getMessageSource() throws IllegalStateException {
+<span class="pc bpc" id="L1313" title="1 of 2 branches missed.">		if (this.messageSource == null) {</span>
+<span class="nc" id="L1314">			throw new IllegalStateException(&quot;MessageSource not initialized - &quot; +</span>
+					&quot;call 'refresh' before accessing messages via the context: &quot; + this);
+		}
+<span class="fc" id="L1317">		return this.messageSource;</span>
+	}
+
+	/**
+	 * Return the internal message source of the parent context if it is an
+	 * AbstractApplicationContext too; else, return the parent context itself.
+	 */
+	@Nullable
+	protected MessageSource getInternalParentMessageSource() {
+<span class="fc bfc" id="L1326" title="All 2 branches covered.">		return (getParent() instanceof AbstractApplicationContext ?</span>
+<span class="fc" id="L1327">				((AbstractApplicationContext) getParent()).messageSource : getParent());</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ResourcePatternResolver interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public Resource[] getResources(String locationPattern) throws IOException {
+<span class="fc" id="L1337">		return this.resourcePatternResolver.getResources(locationPattern);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of Lifecycle interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public void start() {
+<span class="fc" id="L1347">		getLifecycleProcessor().start();</span>
+<span class="fc" id="L1348">		publishEvent(new ContextStartedEvent(this));</span>
+<span class="fc" id="L1349">	}</span>
+
+	@Override
+	public void stop() {
+<span class="fc" id="L1353">		getLifecycleProcessor().stop();</span>
+<span class="fc" id="L1354">		publishEvent(new ContextStoppedEvent(this));</span>
+<span class="fc" id="L1355">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="pc bpc" id="L1359" title="2 of 4 branches missed.">		return (this.lifecycleProcessor != null &amp;&amp; this.lifecycleProcessor.isRunning());</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Abstract methods that must be implemented by subclasses
+	//---------------------------------------------------------------------
+
+	/**
+	 * Subclasses must implement this method to perform the actual configuration load.
+	 * The method is invoked by {@link #refresh()} before any other initialization work.
+	 * &lt;p&gt;A subclass will either create a new bean factory and hold a reference to it,
+	 * or return a single BeanFactory instance that it holds. In the latter case, it will
+	 * usually throw an IllegalStateException if refreshing the context more than once.
+	 * @throws BeansException if initialization of the bean factory failed
+	 * @throws IllegalStateException if already initialized and multiple refresh
+	 * attempts are not supported
+	 */
+	protected abstract void refreshBeanFactory() throws BeansException, IllegalStateException;
+
+	/**
+	 * Subclasses must implement this method to release their internal bean factory.
+	 * This method gets invoked by {@link #close()} after all other shutdown work.
+	 * &lt;p&gt;Should never throw an exception but rather log shutdown failures.
+	 */
+	protected abstract void closeBeanFactory();
+
+	/**
+	 * Subclasses must return their internal bean factory here. They should implement the
+	 * lookup efficiently, so that it can be called repeatedly without a performance penalty.
+	 * &lt;p&gt;Note: Subclasses should check whether the context is still active before
+	 * returning the internal bean factory. The internal factory should generally be
+	 * considered unavailable once the context has been closed.
+	 * @return this application context's internal bean factory (never {@code null})
+	 * @throws IllegalStateException if the context does not hold an internal bean factory yet
+	 * (usually if {@link #refresh()} has never been called) or if the context has been
+	 * closed already
+	 * @see #refreshBeanFactory()
+	 * @see #closeBeanFactory()
+	 */
+	@Override
+	public abstract ConfigurableListableBeanFactory getBeanFactory() throws IllegalStateException;
+
+
+	/**
+	 * Return information about this context.
+	 */
+	@Override
+	public String toString() {
+<span class="fc" id="L1408">		StringBuilder sb = new StringBuilder(getDisplayName());</span>
+<span class="fc" id="L1409">		sb.append(&quot;, started on &quot;).append(new Date(getStartupDate()));</span>
+<span class="fc" id="L1410">		ApplicationContext parent = getParent();</span>
+<span class="pc bpc" id="L1411" title="1 of 2 branches missed.">		if (parent != null) {</span>
+<span class="nc" id="L1412">			sb.append(&quot;, parent: &quot;).append(parent.getDisplayName());</span>
+		}
+<span class="fc" id="L1414">		return sb.toString();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

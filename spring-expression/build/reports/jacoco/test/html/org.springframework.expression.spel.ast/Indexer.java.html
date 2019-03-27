@@ -1,0 +1,771 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Indexer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.ast</a> &gt; <span class="el_source">Indexer.java</span></div><h1>Indexer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.ast;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.StringJoiner;
+
+import org.springframework.asm.MethodVisitor;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.AccessException;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.PropertyAccessor;
+import org.springframework.expression.TypeConverter;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.ExpressionState;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.support.ReflectivePropertyAccessor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * An Indexer can index into some proceeding structure to access a particular piece of it.
+ * Supported structures are: strings / collections (lists/sets) / arrays.
+ *
+ * @author Andy Clement
+ * @author Phillip Webb
+ * @author Stephane Nicoll
+ * @since 3.0
+ */
+// TODO support multidimensional arrays
+// TODO support correct syntax for multidimensional [][][] and not [,,,]
+public class Indexer extends SpelNodeImpl {
+
+<span class="fc" id="L59">	private enum IndexedType {ARRAY, LIST, MAP, STRING, OBJECT}</span>
+
+
+	// These fields are used when the indexer is being used as a property read accessor.
+	// If the name and target type match these cached values then the cachedReadAccessor
+	// is used to read the property. If they do not match, the correct accessor is
+	// discovered and then cached for later use.
+
+	@Nullable
+	private String cachedReadName;
+
+	@Nullable
+	private Class&lt;?&gt; cachedReadTargetType;
+
+	@Nullable
+	private PropertyAccessor cachedReadAccessor;
+
+	// These fields are used when the indexer is being used as a property write accessor.
+	// If the name and target type match these cached values then the cachedWriteAccessor
+	// is used to write the property. If they do not match, the correct accessor is
+	// discovered and then cached for later use.
+
+	@Nullable
+	private String cachedWriteName;
+
+	@Nullable
+	private Class&lt;?&gt; cachedWriteTargetType;
+
+	@Nullable
+	private PropertyAccessor cachedWriteAccessor;
+
+	@Nullable
+	private IndexedType indexedType;
+
+
+	public Indexer(int startPos, int endPos, SpelNodeImpl expr) {
+<span class="fc" id="L95">		super(startPos, endPos, expr);</span>
+<span class="fc" id="L96">	}</span>
+
+
+	@Override
+	public TypedValue getValueInternal(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L101">		return getValueRef(state).getValue();</span>
+	}
+
+	@Override
+	public void setValue(ExpressionState state, @Nullable Object newValue) throws EvaluationException {
+<span class="nc" id="L106">		getValueRef(state).setValue(newValue);</span>
+<span class="nc" id="L107">	}</span>
+
+	@Override
+	public boolean isWritable(ExpressionState expressionState) throws SpelEvaluationException {
+<span class="nc" id="L111">		return true;</span>
+	}
+
+
+	@Override
+	protected ValueRef getValueRef(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L117">		TypedValue context = state.getActiveContextObject();</span>
+<span class="fc" id="L118">		Object target = context.getValue();</span>
+<span class="fc" id="L119">		TypeDescriptor targetDescriptor = context.getTypeDescriptor();</span>
+		TypedValue indexValue;
+		Object index;
+
+		// This first part of the if clause prevents a 'double dereference' of the property (SPR-5847)
+<span class="fc bfc" id="L124" title="All 4 branches covered.">		if (target instanceof Map &amp;&amp; (this.children[0] instanceof PropertyOrFieldReference)) {</span>
+<span class="fc" id="L125">			PropertyOrFieldReference reference = (PropertyOrFieldReference) this.children[0];</span>
+<span class="fc" id="L126">			index = reference.getName();</span>
+<span class="fc" id="L127">			indexValue = new TypedValue(index);</span>
+<span class="fc" id="L128">		}</span>
+		else {
+			// In case the map key is unqualified, we want it evaluated against the root object
+			// so temporarily push that on whilst evaluating the key
+			try {
+<span class="fc" id="L133">				state.pushActiveContextObject(state.getRootContextObject());</span>
+<span class="fc" id="L134">				indexValue = this.children[0].getValueInternal(state);</span>
+<span class="fc" id="L135">				index = indexValue.getValue();</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">				Assert.state(index != null, &quot;No index&quot;);</span>
+			}
+			finally {
+<span class="fc" id="L139">				state.popActiveContextObject();</span>
+			}
+		}
+
+		// Raise a proper exception in case of a null target
+<span class="fc bfc" id="L144" title="All 2 branches covered.">		if (target == null) {</span>
+<span class="fc" id="L145">			throw new SpelEvaluationException(getStartPosition(), SpelMessage.CANNOT_INDEX_INTO_NULL_VALUE);</span>
+		}
+		// At this point, we need a TypeDescriptor for a non-null target object
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">		Assert.state(targetDescriptor != null, &quot;No type descriptor&quot;);</span>
+
+		// Indexing into a Map
+<span class="fc bfc" id="L151" title="All 2 branches covered.">		if (target instanceof Map) {</span>
+<span class="fc" id="L152">			Object key = index;</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">			if (targetDescriptor.getMapKeyTypeDescriptor() != null) {</span>
+<span class="fc" id="L154">				key = state.convertValue(key, targetDescriptor.getMapKeyTypeDescriptor());</span>
+			}
+<span class="fc" id="L156">			this.indexedType = IndexedType.MAP;</span>
+<span class="fc" id="L157">			return new MapIndexingValueRef(state.getTypeConverter(), (Map&lt;?, ?&gt;) target, key, targetDescriptor);</span>
+		}
+
+		// If the object is something that looks indexable by an integer,
+		// attempt to treat the index value as a number
+<span class="fc bfc" id="L162" title="All 6 branches covered.">		if (target.getClass().isArray() || target instanceof Collection || target instanceof String) {</span>
+<span class="fc" id="L163">			int idx = (Integer) state.convertValue(index, TypeDescriptor.valueOf(Integer.class));</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">			if (target.getClass().isArray()) {</span>
+<span class="fc" id="L165">				this.indexedType = IndexedType.ARRAY;</span>
+<span class="fc" id="L166">				return new ArrayIndexingValueRef(state.getTypeConverter(), target, idx, targetDescriptor);</span>
+			}
+<span class="fc bfc" id="L168" title="All 2 branches covered.">			else if (target instanceof Collection) {</span>
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">				if (target instanceof List) {</span>
+<span class="fc" id="L170">					this.indexedType = IndexedType.LIST;</span>
+				}
+<span class="fc" id="L172">				return new CollectionIndexingValueRef((Collection&lt;?&gt;) target, idx, targetDescriptor,</span>
+<span class="fc" id="L173">						state.getTypeConverter(), state.getConfiguration().isAutoGrowCollections(),</span>
+<span class="fc" id="L174">						state.getConfiguration().getMaximumAutoGrowSize());</span>
+			}
+			else {
+<span class="fc" id="L177">				this.indexedType = IndexedType.STRING;</span>
+<span class="fc" id="L178">				return new StringIndexingLValue((String) target, idx, targetDescriptor);</span>
+			}
+		}
+
+		// Try and treat the index value as a property of the context object
+		// TODO: could call the conversion service to convert the value to a String
+<span class="fc" id="L184">		TypeDescriptor valueType = indexValue.getTypeDescriptor();</span>
+<span class="pc bpc" id="L185" title="1 of 4 branches missed.">		if (valueType != null &amp;&amp; String.class == valueType.getType()) {</span>
+<span class="fc" id="L186">			this.indexedType = IndexedType.OBJECT;</span>
+<span class="fc" id="L187">			return new PropertyIndexingValueRef(</span>
+<span class="fc" id="L188">					target, (String) index, state.getEvaluationContext(), targetDescriptor);</span>
+		}
+
+<span class="fc" id="L191">		throw new SpelEvaluationException(</span>
+<span class="fc" id="L192">				getStartPosition(), SpelMessage.INDEXING_NOT_SUPPORTED_FOR_TYPE, targetDescriptor);</span>
+	}
+
+	@Override
+	public boolean isCompilable() {
+<span class="fc bfc" id="L197" title="All 2 branches covered.">		if (this.indexedType == IndexedType.ARRAY) {</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">			return (this.exitTypeDescriptor != null);</span>
+		}
+<span class="fc bfc" id="L200" title="All 2 branches covered.">		else if (this.indexedType == IndexedType.LIST) {</span>
+<span class="fc" id="L201">			return this.children[0].isCompilable();</span>
+		}
+<span class="fc bfc" id="L203" title="All 2 branches covered.">		else if (this.indexedType == IndexedType.MAP) {</span>
+<span class="pc bpc" id="L204" title="1 of 4 branches missed.">			return (this.children[0] instanceof PropertyOrFieldReference || this.children[0].isCompilable());</span>
+		}
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">		else if (this.indexedType == IndexedType.OBJECT) {</span>
+			// If the string name is changing the accessor is clearly going to change (so no compilation possible)
+<span class="pc bpc" id="L208" title="2 of 4 branches missed.">			return (this.cachedReadAccessor != null &amp;&amp;</span>
+					this.cachedReadAccessor instanceof ReflectivePropertyAccessor.OptimalPropertyAccessor &amp;&amp;
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">					getChild(0) instanceof StringLiteral);</span>
+		}
+<span class="nc" id="L212">		return false;</span>
+	}
+
+	@Override
+	public void generateCode(MethodVisitor mv, CodeFlow cf) {
+<span class="fc" id="L217">		String descriptor = cf.lastDescriptor();</span>
+<span class="fc bfc" id="L218" title="All 2 branches covered.">		if (descriptor == null) {</span>
+			// Stack is empty, should use context object
+<span class="fc" id="L220">			cf.loadTarget(mv);</span>
+		}
+
+<span class="fc bfc" id="L223" title="All 2 branches covered.">		if (this.indexedType == IndexedType.ARRAY) {</span>
+			int insn;
+<span class="fc bfc" id="L225" title="All 2 branches covered.">			if (&quot;D&quot;.equals(this.exitTypeDescriptor)) {</span>
+<span class="fc" id="L226">				mv.visitTypeInsn(CHECKCAST, &quot;[D&quot;);</span>
+<span class="fc" id="L227">				insn = DALOAD;</span>
+			}
+<span class="fc bfc" id="L229" title="All 2 branches covered.">			else if (&quot;F&quot;.equals(this.exitTypeDescriptor)) {</span>
+<span class="fc" id="L230">				mv.visitTypeInsn(CHECKCAST, &quot;[F&quot;);</span>
+<span class="fc" id="L231">				insn = FALOAD;</span>
+			}
+<span class="fc bfc" id="L233" title="All 2 branches covered.">			else if (&quot;J&quot;.equals(this.exitTypeDescriptor)) {</span>
+<span class="fc" id="L234">				mv.visitTypeInsn(CHECKCAST, &quot;[J&quot;);</span>
+<span class="fc" id="L235">				insn = LALOAD;</span>
+			}
+<span class="fc bfc" id="L237" title="All 2 branches covered.">			else if (&quot;I&quot;.equals(this.exitTypeDescriptor)) {</span>
+<span class="fc" id="L238">				mv.visitTypeInsn(CHECKCAST, &quot;[I&quot;);</span>
+<span class="fc" id="L239">				insn = IALOAD;</span>
+			}
+<span class="fc bfc" id="L241" title="All 2 branches covered.">			else if (&quot;S&quot;.equals(this.exitTypeDescriptor)) {</span>
+<span class="fc" id="L242">				mv.visitTypeInsn(CHECKCAST, &quot;[S&quot;);</span>
+<span class="fc" id="L243">				insn = SALOAD;</span>
+			}
+<span class="fc bfc" id="L245" title="All 2 branches covered.">			else if (&quot;B&quot;.equals(this.exitTypeDescriptor)) {</span>
+<span class="fc" id="L246">				mv.visitTypeInsn(CHECKCAST, &quot;[B&quot;);</span>
+<span class="fc" id="L247">				insn = BALOAD;</span>
+			}
+<span class="fc bfc" id="L249" title="All 2 branches covered.">			else if (&quot;C&quot;.equals(this.exitTypeDescriptor)) {</span>
+<span class="fc" id="L250">				mv.visitTypeInsn(CHECKCAST, &quot;[C&quot;);</span>
+<span class="fc" id="L251">				insn = CALOAD;</span>
+			}
+			else {
+<span class="fc" id="L254">				mv.visitTypeInsn(CHECKCAST, &quot;[&quot;+ this.exitTypeDescriptor +</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">						(CodeFlow.isPrimitiveArray(this.exitTypeDescriptor) ? &quot;&quot; : &quot;;&quot;));</span>
+						//depthPlusOne(exitTypeDescriptor)+&quot;Ljava/lang/Object;&quot;);
+<span class="fc" id="L257">				insn = AALOAD;</span>
+			}
+<span class="fc" id="L259">			SpelNodeImpl index = this.children[0];</span>
+<span class="fc" id="L260">			cf.enterCompilationScope();</span>
+<span class="fc" id="L261">			index.generateCode(mv, cf);</span>
+<span class="fc" id="L262">			cf.exitCompilationScope();</span>
+<span class="fc" id="L263">			mv.visitInsn(insn);</span>
+<span class="fc" id="L264">		}</span>
+
+<span class="fc bfc" id="L266" title="All 2 branches covered.">		else if (this.indexedType == IndexedType.LIST) {</span>
+<span class="fc" id="L267">			mv.visitTypeInsn(CHECKCAST, &quot;java/util/List&quot;);</span>
+<span class="fc" id="L268">			cf.enterCompilationScope();</span>
+<span class="fc" id="L269">			this.children[0].generateCode(mv, cf);</span>
+<span class="fc" id="L270">			cf.exitCompilationScope();</span>
+<span class="fc" id="L271">			mv.visitMethodInsn(INVOKEINTERFACE, &quot;java/util/List&quot;, &quot;get&quot;, &quot;(I)Ljava/lang/Object;&quot;, true);</span>
+		}
+
+<span class="fc bfc" id="L274" title="All 2 branches covered.">		else if (this.indexedType == IndexedType.MAP) {</span>
+<span class="fc" id="L275">			mv.visitTypeInsn(CHECKCAST, &quot;java/util/Map&quot;);</span>
+			// Special case when the key is an unquoted string literal that will be parsed as
+			// a property/field reference
+<span class="fc bfc" id="L278" title="All 2 branches covered.">			if ((this.children[0] instanceof PropertyOrFieldReference)) {</span>
+<span class="fc" id="L279">				PropertyOrFieldReference reference = (PropertyOrFieldReference) this.children[0];</span>
+<span class="fc" id="L280">				String mapKeyName = reference.getName();</span>
+<span class="fc" id="L281">				mv.visitLdcInsn(mapKeyName);</span>
+<span class="fc" id="L282">			}</span>
+			else {
+<span class="fc" id="L284">				cf.enterCompilationScope();</span>
+<span class="fc" id="L285">				this.children[0].generateCode(mv, cf);</span>
+<span class="fc" id="L286">				cf.exitCompilationScope();</span>
+			}
+<span class="fc" id="L288">			mv.visitMethodInsn(</span>
+					INVOKEINTERFACE, &quot;java/util/Map&quot;, &quot;get&quot;, &quot;(Ljava/lang/Object;)Ljava/lang/Object;&quot;, true);
+		}
+
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">		else if (this.indexedType == IndexedType.OBJECT) {</span>
+<span class="fc" id="L293">			ReflectivePropertyAccessor.OptimalPropertyAccessor accessor =</span>
+					(ReflectivePropertyAccessor.OptimalPropertyAccessor) this.cachedReadAccessor;
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">			Assert.state(accessor != null, &quot;No cached read accessor&quot;);</span>
+<span class="fc" id="L296">			Member member = accessor.member;</span>
+<span class="fc" id="L297">			boolean isStatic = Modifier.isStatic(member.getModifiers());</span>
+<span class="fc" id="L298">			String classDesc = member.getDeclaringClass().getName().replace('.', '/');</span>
+
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">			if (!isStatic) {</span>
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">				if (descriptor == null) {</span>
+<span class="fc" id="L302">					cf.loadTarget(mv);</span>
+				}
+<span class="pc bpc" id="L304" title="3 of 4 branches missed.">				if (descriptor == null || !classDesc.equals(descriptor.substring(1))) {</span>
+<span class="fc" id="L305">					mv.visitTypeInsn(CHECKCAST, classDesc);</span>
+				}
+			}
+
+<span class="fc bfc" id="L309" title="All 2 branches covered.">			if (member instanceof Method) {</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">				mv.visitMethodInsn((isStatic? INVOKESTATIC : INVOKEVIRTUAL), classDesc, member.getName(),</span>
+<span class="fc" id="L311">						CodeFlow.createSignatureDescriptor((Method) member), false);</span>
+			}
+			else {
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">				mv.visitFieldInsn((isStatic ? GETSTATIC : GETFIELD), classDesc, member.getName(),</span>
+<span class="fc" id="L315">						CodeFlow.toJvmDescriptor(((Field) member).getType()));</span>
+			}
+		}
+
+<span class="fc" id="L319">		cf.pushDescriptor(this.exitTypeDescriptor);</span>
+<span class="fc" id="L320">	}</span>
+
+	@Override
+	public String toStringAST() {
+<span class="nc" id="L324">		StringJoiner sj = new StringJoiner(&quot;,&quot;, &quot;[&quot;, &quot;]&quot;);</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">		for (int i = 0; i &lt; getChildCount(); i++) {</span>
+<span class="nc" id="L326">			sj.add(getChild(i).toStringAST());</span>
+		}
+<span class="nc" id="L328">		return sj.toString();</span>
+	}
+
+
+	private void setArrayElement(TypeConverter converter, Object ctx, int idx, @Nullable Object newValue,
+			Class&lt;?&gt; arrayComponentType) throws EvaluationException {
+
+<span class="fc bfc" id="L335" title="All 2 branches covered.">		if (arrayComponentType == Boolean.TYPE) {</span>
+<span class="fc" id="L336">			boolean[] array = (boolean[]) ctx;</span>
+<span class="fc" id="L337">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L338">			array[idx] = convertValue(converter, newValue, Boolean.class);</span>
+<span class="fc" id="L339">		}</span>
+<span class="fc bfc" id="L340" title="All 2 branches covered.">		else if (arrayComponentType == Byte.TYPE) {</span>
+<span class="fc" id="L341">			byte[] array = (byte[]) ctx;</span>
+<span class="fc" id="L342">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L343">			array[idx] = convertValue(converter, newValue, Byte.class);</span>
+<span class="fc" id="L344">		}</span>
+<span class="fc bfc" id="L345" title="All 2 branches covered.">		else if (arrayComponentType == Character.TYPE) {</span>
+<span class="fc" id="L346">			char[] array = (char[]) ctx;</span>
+<span class="fc" id="L347">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L348">			array[idx] = convertValue(converter, newValue, Character.class);</span>
+<span class="fc" id="L349">		}</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">		else if (arrayComponentType == Double.TYPE) {</span>
+<span class="fc" id="L351">			double[] array = (double[]) ctx;</span>
+<span class="fc" id="L352">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L353">			array[idx] = convertValue(converter, newValue, Double.class);</span>
+<span class="fc" id="L354">		}</span>
+<span class="fc bfc" id="L355" title="All 2 branches covered.">		else if (arrayComponentType == Float.TYPE) {</span>
+<span class="fc" id="L356">			float[] array = (float[]) ctx;</span>
+<span class="fc" id="L357">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L358">			array[idx] = convertValue(converter, newValue, Float.class);</span>
+<span class="fc" id="L359">		}</span>
+<span class="fc bfc" id="L360" title="All 2 branches covered.">		else if (arrayComponentType == Integer.TYPE) {</span>
+<span class="fc" id="L361">			int[] array = (int[]) ctx;</span>
+<span class="fc" id="L362">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L363">			array[idx] = convertValue(converter, newValue, Integer.class);</span>
+<span class="fc" id="L364">		}</span>
+<span class="fc bfc" id="L365" title="All 2 branches covered.">		else if (arrayComponentType == Long.TYPE) {</span>
+<span class="fc" id="L366">			long[] array = (long[]) ctx;</span>
+<span class="fc" id="L367">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L368">			array[idx] = convertValue(converter, newValue, Long.class);</span>
+<span class="fc" id="L369">		}</span>
+<span class="fc bfc" id="L370" title="All 2 branches covered.">		else if (arrayComponentType == Short.TYPE) {</span>
+<span class="fc" id="L371">			short[] array = (short[]) ctx;</span>
+<span class="fc" id="L372">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L373">			array[idx] = convertValue(converter, newValue, Short.class);</span>
+<span class="fc" id="L374">		}</span>
+		else {
+<span class="fc" id="L376">			Object[] array = (Object[]) ctx;</span>
+<span class="fc" id="L377">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L378">			array[idx] = convertValue(converter, newValue, arrayComponentType);</span>
+		}
+<span class="fc" id="L380">	}</span>
+
+	private Object accessArrayElement(Object ctx, int idx) throws SpelEvaluationException {
+<span class="fc" id="L383">		Class&lt;?&gt; arrayComponentType = ctx.getClass().getComponentType();</span>
+<span class="fc bfc" id="L384" title="All 2 branches covered.">		if (arrayComponentType == Boolean.TYPE) {</span>
+<span class="fc" id="L385">			boolean[] array = (boolean[]) ctx;</span>
+<span class="fc" id="L386">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L387">			this.exitTypeDescriptor = &quot;Z&quot;;</span>
+<span class="fc" id="L388">			return array[idx];</span>
+		}
+<span class="fc bfc" id="L390" title="All 2 branches covered.">		else if (arrayComponentType == Byte.TYPE) {</span>
+<span class="fc" id="L391">			byte[] array = (byte[]) ctx;</span>
+<span class="fc" id="L392">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L393">			this.exitTypeDescriptor = &quot;B&quot;;</span>
+<span class="fc" id="L394">			return array[idx];</span>
+		}
+<span class="fc bfc" id="L396" title="All 2 branches covered.">		else if (arrayComponentType == Character.TYPE) {</span>
+<span class="fc" id="L397">			char[] array = (char[]) ctx;</span>
+<span class="fc" id="L398">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L399">			this.exitTypeDescriptor = &quot;C&quot;;</span>
+<span class="fc" id="L400">			return array[idx];</span>
+		}
+<span class="fc bfc" id="L402" title="All 2 branches covered.">		else if (arrayComponentType == Double.TYPE) {</span>
+<span class="fc" id="L403">			double[] array = (double[]) ctx;</span>
+<span class="fc" id="L404">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L405">			this.exitTypeDescriptor = &quot;D&quot;;</span>
+<span class="fc" id="L406">			return array[idx];</span>
+		}
+<span class="fc bfc" id="L408" title="All 2 branches covered.">		else if (arrayComponentType == Float.TYPE) {</span>
+<span class="fc" id="L409">			float[] array = (float[]) ctx;</span>
+<span class="fc" id="L410">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L411">			this.exitTypeDescriptor = &quot;F&quot;;</span>
+<span class="fc" id="L412">			return array[idx];</span>
+		}
+<span class="fc bfc" id="L414" title="All 2 branches covered.">		else if (arrayComponentType == Integer.TYPE) {</span>
+<span class="fc" id="L415">			int[] array = (int[]) ctx;</span>
+<span class="fc" id="L416">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L417">			this.exitTypeDescriptor = &quot;I&quot;;</span>
+<span class="fc" id="L418">			return array[idx];</span>
+		}
+<span class="fc bfc" id="L420" title="All 2 branches covered.">		else if (arrayComponentType == Long.TYPE) {</span>
+<span class="fc" id="L421">			long[] array = (long[]) ctx;</span>
+<span class="fc" id="L422">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L423">			this.exitTypeDescriptor = &quot;J&quot;;</span>
+<span class="fc" id="L424">			return array[idx];</span>
+		}
+<span class="fc bfc" id="L426" title="All 2 branches covered.">		else if (arrayComponentType == Short.TYPE) {</span>
+<span class="fc" id="L427">			short[] array = (short[]) ctx;</span>
+<span class="fc" id="L428">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L429">			this.exitTypeDescriptor = &quot;S&quot;;</span>
+<span class="fc" id="L430">			return array[idx];</span>
+		}
+		else {
+<span class="fc" id="L433">			Object[] array = (Object[]) ctx;</span>
+<span class="fc" id="L434">			checkAccess(array.length, idx);</span>
+<span class="fc" id="L435">			Object retValue = array[idx];</span>
+<span class="fc" id="L436">			this.exitTypeDescriptor = CodeFlow.toDescriptor(arrayComponentType);</span>
+<span class="fc" id="L437">			return retValue;</span>
+		}
+	}
+
+	private void checkAccess(int arrayLength, int index) throws SpelEvaluationException {
+<span class="fc bfc" id="L442" title="All 2 branches covered.">		if (index &gt; arrayLength) {</span>
+<span class="fc" id="L443">			throw new SpelEvaluationException(getStartPosition(), SpelMessage.ARRAY_INDEX_OUT_OF_BOUNDS,</span>
+<span class="fc" id="L444">					arrayLength, index);</span>
+		}
+<span class="fc" id="L446">	}</span>
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private &lt;T&gt; T convertValue(TypeConverter converter, @Nullable Object value, Class&lt;T&gt; targetType) {
+<span class="fc" id="L450">		T result = (T) converter.convertValue(</span>
+<span class="fc" id="L451">				value, TypeDescriptor.forObject(value), TypeDescriptor.valueOf(targetType));</span>
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">		if (result == null) {</span>
+<span class="nc" id="L453">			throw new IllegalStateException(&quot;Null conversion result for index [&quot; + value + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L455">		return result;</span>
+	}
+
+
+	private class ArrayIndexingValueRef implements ValueRef {
+
+		private final TypeConverter typeConverter;
+
+		private final Object array;
+
+		private final int index;
+
+		private final TypeDescriptor typeDescriptor;
+
+<span class="fc" id="L469">		ArrayIndexingValueRef(TypeConverter typeConverter, Object array, int index, TypeDescriptor typeDescriptor) {</span>
+<span class="fc" id="L470">			this.typeConverter = typeConverter;</span>
+<span class="fc" id="L471">			this.array = array;</span>
+<span class="fc" id="L472">			this.index = index;</span>
+<span class="fc" id="L473">			this.typeDescriptor = typeDescriptor;</span>
+<span class="fc" id="L474">		}</span>
+
+		@Override
+		public TypedValue getValue() {
+<span class="fc" id="L478">			Object arrayElement = accessArrayElement(this.array, this.index);</span>
+<span class="fc" id="L479">			return new TypedValue(arrayElement, this.typeDescriptor.elementTypeDescriptor(arrayElement));</span>
+		}
+
+		@Override
+		public void setValue(@Nullable Object newValue) {
+<span class="fc" id="L484">			TypeDescriptor elementType = this.typeDescriptor.getElementTypeDescriptor();</span>
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">			Assert.state(elementType != null, &quot;No element type&quot;);</span>
+<span class="fc" id="L486">			setArrayElement(this.typeConverter, this.array, this.index, newValue, elementType.getType());</span>
+<span class="fc" id="L487">		}</span>
+
+		@Override
+		public boolean isWritable() {
+<span class="fc" id="L491">			return true;</span>
+		}
+	}
+
+
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+	private class MapIndexingValueRef implements ValueRef {
+
+		private final TypeConverter typeConverter;
+
+		private final Map map;
+
+		@Nullable
+		private final Object key;
+
+		private final TypeDescriptor mapEntryDescriptor;
+
+		public MapIndexingValueRef(
+<span class="fc" id="L509">				TypeConverter typeConverter, Map map, @Nullable Object key, TypeDescriptor mapEntryDescriptor) {</span>
+
+<span class="fc" id="L511">			this.typeConverter = typeConverter;</span>
+<span class="fc" id="L512">			this.map = map;</span>
+<span class="fc" id="L513">			this.key = key;</span>
+<span class="fc" id="L514">			this.mapEntryDescriptor = mapEntryDescriptor;</span>
+<span class="fc" id="L515">		}</span>
+
+		@Override
+		public TypedValue getValue() {
+<span class="fc" id="L519">			Object value = this.map.get(this.key);</span>
+<span class="fc" id="L520">			exitTypeDescriptor = CodeFlow.toDescriptor(Object.class);</span>
+<span class="fc" id="L521">			return new TypedValue(value, this.mapEntryDescriptor.getMapValueTypeDescriptor(value));</span>
+		}
+
+		@Override
+		public void setValue(@Nullable Object newValue) {
+<span class="fc bfc" id="L526" title="All 2 branches covered.">			if (this.mapEntryDescriptor.getMapValueTypeDescriptor() != null) {</span>
+<span class="fc" id="L527">				newValue = this.typeConverter.convertValue(newValue, TypeDescriptor.forObject(newValue),</span>
+<span class="fc" id="L528">						this.mapEntryDescriptor.getMapValueTypeDescriptor());</span>
+			}
+<span class="fc" id="L530">			this.map.put(this.key, newValue);</span>
+<span class="fc" id="L531">		}</span>
+
+		@Override
+		public boolean isWritable() {
+<span class="fc" id="L535">			return true;</span>
+		}
+	}
+
+
+	private class PropertyIndexingValueRef implements ValueRef {
+
+		private final Object targetObject;
+
+		private final String name;
+
+		private final EvaluationContext evaluationContext;
+
+		private final TypeDescriptor targetObjectTypeDescriptor;
+
+		public PropertyIndexingValueRef(Object targetObject, String value,
+<span class="fc" id="L551">				EvaluationContext evaluationContext, TypeDescriptor targetObjectTypeDescriptor) {</span>
+
+<span class="fc" id="L553">			this.targetObject = targetObject;</span>
+<span class="fc" id="L554">			this.name = value;</span>
+<span class="fc" id="L555">			this.evaluationContext = evaluationContext;</span>
+<span class="fc" id="L556">			this.targetObjectTypeDescriptor = targetObjectTypeDescriptor;</span>
+<span class="fc" id="L557">		}</span>
+
+		@Override
+		public TypedValue getValue() {
+<span class="fc" id="L561">			Class&lt;?&gt; targetObjectRuntimeClass = getObjectClass(this.targetObject);</span>
+			try {
+<span class="pc bpc" id="L563" title="1 of 4 branches missed.">				if (Indexer.this.cachedReadName != null &amp;&amp; Indexer.this.cachedReadName.equals(this.name) &amp;&amp;</span>
+<span class="pc bpc" id="L564" title="1 of 2 branches missed.">						Indexer.this.cachedReadTargetType != null &amp;&amp;</span>
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">						Indexer.this.cachedReadTargetType.equals(targetObjectRuntimeClass)) {</span>
+					// It is OK to use the cached accessor
+<span class="fc" id="L567">					PropertyAccessor accessor = Indexer.this.cachedReadAccessor;</span>
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">					Assert.state(accessor != null, &quot;No cached read accessor&quot;);</span>
+<span class="fc" id="L569">					return accessor.read(this.evaluationContext, this.targetObject, this.name);</span>
+				}
+<span class="fc" id="L571">				List&lt;PropertyAccessor&gt; accessorsToTry = AstUtils.getPropertyAccessorsToTry(</span>
+<span class="fc" id="L572">						targetObjectRuntimeClass, this.evaluationContext.getPropertyAccessors());</span>
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">				for (PropertyAccessor accessor : accessorsToTry) {</span>
+<span class="pc bpc" id="L574" title="1 of 2 branches missed.">					if (accessor.canRead(this.evaluationContext, this.targetObject, this.name)) {</span>
+<span class="pc bpc" id="L575" title="1 of 2 branches missed.">						if (accessor instanceof ReflectivePropertyAccessor) {</span>
+<span class="fc" id="L576">							accessor = ((ReflectivePropertyAccessor) accessor).createOptimalAccessor(</span>
+									this.evaluationContext, this.targetObject, this.name);
+						}
+<span class="fc" id="L579">						Indexer.this.cachedReadAccessor = accessor;</span>
+<span class="fc" id="L580">						Indexer.this.cachedReadName = this.name;</span>
+<span class="fc" id="L581">						Indexer.this.cachedReadTargetType = targetObjectRuntimeClass;</span>
+<span class="pc bpc" id="L582" title="1 of 2 branches missed.">						if (accessor instanceof ReflectivePropertyAccessor.OptimalPropertyAccessor) {</span>
+<span class="fc" id="L583">							ReflectivePropertyAccessor.OptimalPropertyAccessor optimalAccessor =</span>
+									(ReflectivePropertyAccessor.OptimalPropertyAccessor) accessor;
+<span class="fc" id="L585">							Member member = optimalAccessor.member;</span>
+<span class="fc bfc" id="L586" title="All 2 branches covered.">							Indexer.this.exitTypeDescriptor = CodeFlow.toDescriptor(member instanceof Method ?</span>
+<span class="fc" id="L587">									((Method) member).getReturnType() : ((Field) member).getType());</span>
+						}
+<span class="fc" id="L589">						return accessor.read(this.evaluationContext, this.targetObject, this.name);</span>
+					}
+<span class="nc" id="L591">				}</span>
+			}
+<span class="nc" id="L593">			catch (AccessException ex) {</span>
+<span class="nc" id="L594">				throw new SpelEvaluationException(getStartPosition(), ex,</span>
+<span class="nc" id="L595">						SpelMessage.INDEXING_NOT_SUPPORTED_FOR_TYPE, this.targetObjectTypeDescriptor.toString());</span>
+<span class="nc" id="L596">			}</span>
+<span class="nc" id="L597">			throw new SpelEvaluationException(getStartPosition(),</span>
+<span class="nc" id="L598">					SpelMessage.INDEXING_NOT_SUPPORTED_FOR_TYPE, this.targetObjectTypeDescriptor.toString());</span>
+		}
+
+		@Override
+		public void setValue(@Nullable Object newValue) {
+<span class="fc" id="L603">			Class&lt;?&gt; contextObjectClass = getObjectClass(this.targetObject);</span>
+			try {
+<span class="pc bpc" id="L605" title="1 of 4 branches missed.">				if (Indexer.this.cachedWriteName != null &amp;&amp; Indexer.this.cachedWriteName.equals(this.name) &amp;&amp;</span>
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">						Indexer.this.cachedWriteTargetType != null &amp;&amp;</span>
+<span class="pc bpc" id="L607" title="1 of 2 branches missed.">						Indexer.this.cachedWriteTargetType.equals(contextObjectClass)) {</span>
+					// It is OK to use the cached accessor
+<span class="fc" id="L609">					PropertyAccessor accessor = Indexer.this.cachedWriteAccessor;</span>
+<span class="pc bpc" id="L610" title="1 of 2 branches missed.">					Assert.state(accessor != null, &quot;No cached write accessor&quot;);</span>
+<span class="fc" id="L611">					accessor.write(this.evaluationContext, this.targetObject, this.name, newValue);</span>
+<span class="fc" id="L612">					return;</span>
+				}
+<span class="fc" id="L614">				List&lt;PropertyAccessor&gt; accessorsToTry = AstUtils.getPropertyAccessorsToTry(</span>
+<span class="fc" id="L615">						contextObjectClass, this.evaluationContext.getPropertyAccessors());</span>
+<span class="pc bpc" id="L616" title="1 of 2 branches missed.">				for (PropertyAccessor accessor : accessorsToTry) {</span>
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">					if (accessor.canWrite(this.evaluationContext, this.targetObject, this.name)) {</span>
+<span class="fc" id="L618">						Indexer.this.cachedWriteName = this.name;</span>
+<span class="fc" id="L619">						Indexer.this.cachedWriteTargetType = contextObjectClass;</span>
+<span class="fc" id="L620">						Indexer.this.cachedWriteAccessor = accessor;</span>
+<span class="fc" id="L621">						accessor.write(this.evaluationContext, this.targetObject, this.name, newValue);</span>
+<span class="fc" id="L622">						return;</span>
+					}
+<span class="nc" id="L624">				}</span>
+			}
+<span class="nc" id="L626">			catch (AccessException ex) {</span>
+<span class="nc" id="L627">				throw new SpelEvaluationException(getStartPosition(), ex,</span>
+<span class="nc" id="L628">						SpelMessage.EXCEPTION_DURING_PROPERTY_WRITE, this.name, ex.getMessage());</span>
+<span class="nc" id="L629">			}</span>
+<span class="nc" id="L630">		}</span>
+
+		@Override
+		public boolean isWritable() {
+<span class="nc" id="L634">			return true;</span>
+		}
+	}
+
+
+	@SuppressWarnings({ &quot;rawtypes&quot;, &quot;unchecked&quot; })
+	private class CollectionIndexingValueRef implements ValueRef {
+
+		private final Collection collection;
+
+		private final int index;
+
+		private final TypeDescriptor collectionEntryDescriptor;
+
+		private final TypeConverter typeConverter;
+
+		private final boolean growCollection;
+
+		private final int maximumSize;
+
+		public CollectionIndexingValueRef(Collection collection, int index, TypeDescriptor collectionEntryDescriptor,
+<span class="fc" id="L655">				TypeConverter typeConverter, boolean growCollection, int maximumSize) {</span>
+
+<span class="fc" id="L657">			this.collection = collection;</span>
+<span class="fc" id="L658">			this.index = index;</span>
+<span class="fc" id="L659">			this.collectionEntryDescriptor = collectionEntryDescriptor;</span>
+<span class="fc" id="L660">			this.typeConverter = typeConverter;</span>
+<span class="fc" id="L661">			this.growCollection = growCollection;</span>
+<span class="fc" id="L662">			this.maximumSize = maximumSize;</span>
+<span class="fc" id="L663">		}</span>
+
+		@Override
+		public TypedValue getValue() {
+<span class="fc" id="L667">			growCollectionIfNecessary();</span>
+<span class="pc bpc" id="L668" title="1 of 2 branches missed.">			if (this.collection instanceof List) {</span>
+<span class="fc" id="L669">				Object o = ((List) this.collection).get(this.index);</span>
+<span class="fc" id="L670">				exitTypeDescriptor = CodeFlow.toDescriptor(Object.class);</span>
+<span class="fc" id="L671">				return new TypedValue(o, this.collectionEntryDescriptor.elementTypeDescriptor(o));</span>
+			}
+<span class="nc" id="L673">			int pos = 0;</span>
+<span class="nc bnc" id="L674" title="All 2 branches missed.">			for (Object o : this.collection) {</span>
+<span class="nc bnc" id="L675" title="All 2 branches missed.">				if (pos == this.index) {</span>
+<span class="nc" id="L676">					return new TypedValue(o, this.collectionEntryDescriptor.elementTypeDescriptor(o));</span>
+				}
+<span class="nc" id="L678">				pos++;</span>
+<span class="nc" id="L679">			}</span>
+<span class="nc" id="L680">			throw new IllegalStateException(&quot;Failed to find indexed element &quot; + this.index + &quot;: &quot; + this.collection);</span>
+		}
+
+		@Override
+		public void setValue(@Nullable Object newValue) {
+<span class="fc" id="L685">			growCollectionIfNecessary();</span>
+<span class="pc bpc" id="L686" title="1 of 2 branches missed.">			if (this.collection instanceof List) {</span>
+<span class="fc" id="L687">				List list = (List) this.collection;</span>
+<span class="fc bfc" id="L688" title="All 2 branches covered.">				if (this.collectionEntryDescriptor.getElementTypeDescriptor() != null) {</span>
+<span class="fc" id="L689">					newValue = this.typeConverter.convertValue(newValue, TypeDescriptor.forObject(newValue),</span>
+<span class="fc" id="L690">							this.collectionEntryDescriptor.getElementTypeDescriptor());</span>
+				}
+<span class="fc" id="L692">				list.set(this.index, newValue);</span>
+<span class="fc" id="L693">			}</span>
+			else {
+<span class="nc" id="L695">				throw new SpelEvaluationException(getStartPosition(), SpelMessage.INDEXING_NOT_SUPPORTED_FOR_TYPE,</span>
+<span class="nc" id="L696">						this.collectionEntryDescriptor.toString());</span>
+			}
+<span class="fc" id="L698">		}</span>
+
+		private void growCollectionIfNecessary() {
+<span class="fc bfc" id="L701" title="All 2 branches covered.">			if (this.index &gt;= this.collection.size()) {</span>
+<span class="fc bfc" id="L702" title="All 2 branches covered.">				if (!this.growCollection) {</span>
+<span class="fc" id="L703">					throw new SpelEvaluationException(getStartPosition(), SpelMessage.COLLECTION_INDEX_OUT_OF_BOUNDS,</span>
+<span class="fc" id="L704">							this.collection.size(), this.index);</span>
+				}
+<span class="fc bfc" id="L706" title="All 2 branches covered.">				if (this.index &gt;= this.maximumSize) {</span>
+<span class="fc" id="L707">					throw new SpelEvaluationException(getStartPosition(), SpelMessage.UNABLE_TO_GROW_COLLECTION);</span>
+				}
+<span class="fc bfc" id="L709" title="All 2 branches covered.">				if (this.collectionEntryDescriptor.getElementTypeDescriptor() == null) {</span>
+<span class="fc" id="L710">					throw new SpelEvaluationException(</span>
+<span class="fc" id="L711">							getStartPosition(), SpelMessage.UNABLE_TO_GROW_COLLECTION_UNKNOWN_ELEMENT_TYPE);</span>
+				}
+<span class="fc" id="L713">				TypeDescriptor elementType = this.collectionEntryDescriptor.getElementTypeDescriptor();</span>
+				try {
+<span class="fc" id="L715">					Constructor&lt;?&gt; ctor = ReflectionUtils.accessibleConstructor(elementType.getType());</span>
+<span class="fc" id="L716">					int newElements = this.index - this.collection.size();</span>
+<span class="fc bfc" id="L717" title="All 2 branches covered.">					while (newElements &gt;= 0) {</span>
+<span class="fc" id="L718">						this.collection.add(ctor.newInstance());</span>
+<span class="fc" id="L719">						newElements--;</span>
+					}
+				}
+<span class="nc" id="L722">				catch (Throwable ex) {</span>
+<span class="nc" id="L723">					throw new SpelEvaluationException(getStartPosition(), ex, SpelMessage.UNABLE_TO_GROW_COLLECTION);</span>
+<span class="fc" id="L724">				}</span>
+			}
+<span class="fc" id="L726">		}</span>
+
+		@Override
+		public boolean isWritable() {
+<span class="fc" id="L730">			return true;</span>
+		}
+	}
+
+
+	private class StringIndexingLValue implements ValueRef {
+
+		private final String target;
+
+		private final int index;
+
+		private final TypeDescriptor typeDescriptor;
+
+<span class="fc" id="L743">		public StringIndexingLValue(String target, int index, TypeDescriptor typeDescriptor) {</span>
+<span class="fc" id="L744">			this.target = target;</span>
+<span class="fc" id="L745">			this.index = index;</span>
+<span class="fc" id="L746">			this.typeDescriptor = typeDescriptor;</span>
+<span class="fc" id="L747">		}</span>
+
+		@Override
+		public TypedValue getValue() {
+<span class="pc bpc" id="L751" title="1 of 2 branches missed.">			if (this.index &gt;= this.target.length()) {</span>
+<span class="nc" id="L752">				throw new SpelEvaluationException(getStartPosition(), SpelMessage.STRING_INDEX_OUT_OF_BOUNDS,</span>
+<span class="nc" id="L753">						this.target.length(), this.index);</span>
+			}
+<span class="fc" id="L755">			return new TypedValue(String.valueOf(this.target.charAt(this.index)));</span>
+		}
+
+		@Override
+		public void setValue(@Nullable Object newValue) {
+<span class="fc" id="L760">			throw new SpelEvaluationException(getStartPosition(), SpelMessage.INDEXING_NOT_SUPPORTED_FOR_TYPE,</span>
+<span class="fc" id="L761">					this.typeDescriptor.toString());</span>
+		}
+
+		@Override
+		public boolean isWritable() {
+<span class="nc" id="L766">			return true;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

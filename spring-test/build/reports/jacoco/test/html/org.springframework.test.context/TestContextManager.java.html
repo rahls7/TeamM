@@ -1,0 +1,580 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TestContextManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context</a> &gt; <span class="el_source">TestContextManager.java</span></div><h1>TestContextManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.function.Supplier;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * {@code TestContextManager} is the main entry point into the &lt;em&gt;Spring
+ * TestContext Framework&lt;/em&gt;.
+ *
+ * &lt;p&gt;Specifically, a {@code TestContextManager} is responsible for managing a
+ * single {@link TestContext} and signaling events to each registered
+ * {@link TestExecutionListener} at the following test execution points.
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link #beforeTestClass() before test class execution}: prior to any
+ * &lt;em&gt;before class callbacks&lt;/em&gt; of a particular testing framework (e.g.,
+ * JUnit 4's {@link org.junit.BeforeClass @BeforeClass})&lt;/li&gt;
+ * &lt;li&gt;{@link #prepareTestInstance test instance preparation}:
+ * immediately following instantiation of the test class&lt;/li&gt;
+ * &lt;li&gt;{@link #beforeTestMethod before test setup}:
+ * prior to any &lt;em&gt;before method callbacks&lt;/em&gt; of a particular testing framework
+ * (e.g., JUnit 4's {@link org.junit.Before @Before})&lt;/li&gt;
+ * &lt;li&gt;{@link #beforeTestExecution before test execution}:
+ * immediately before execution of the {@linkplain java.lang.reflect.Method
+ * test method} but after test setup&lt;/li&gt;
+ * &lt;li&gt;{@link #afterTestExecution after test execution}:
+ * immediately after execution of the {@linkplain java.lang.reflect.Method
+ * test method} but before test tear down&lt;/li&gt;
+ * &lt;li&gt;{@link #afterTestMethod(Object, Method, Throwable) after test tear down}:
+ * after any &lt;em&gt;after method callbacks&lt;/em&gt; of a particular testing
+ * framework (e.g., JUnit 4's {@link org.junit.After @After})&lt;/li&gt;
+ * &lt;li&gt;{@link #afterTestClass() after test class execution}: after any
+ * &lt;em&gt;after class callbacks&lt;/em&gt; of a particular testing framework (e.g., JUnit 4's
+ * {@link org.junit.AfterClass @AfterClass})&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Support for loading and accessing
+ * {@linkplain org.springframework.context.ApplicationContext application contexts},
+ * dependency injection of test instances,
+ * {@linkplain org.springframework.transaction.annotation.Transactional transactional}
+ * execution of test methods, etc. is provided by
+ * {@link SmartContextLoader ContextLoaders} and {@code TestExecutionListeners},
+ * which are configured via {@link ContextConfiguration @ContextConfiguration} and
+ * {@link TestExecutionListeners @TestExecutionListeners}, respectively.
+ *
+ * &lt;p&gt;Bootstrapping of the {@code TestContext}, the default {@code ContextLoader},
+ * default {@code TestExecutionListeners}, and their collaborators is performed
+ * by a {@link TestContextBootstrapper}, which is configured via
+ * {@link BootstrapWith @BootstrapWith}.
+ *
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see BootstrapWith
+ * @see BootstrapContext
+ * @see TestContextBootstrapper
+ * @see TestContext
+ * @see TestExecutionListener
+ * @see TestExecutionListeners
+ * @see ContextConfiguration
+ * @see ContextHierarchy
+ */
+public class TestContextManager {
+
+<span class="fc" id="L92">	private static final Log logger = LogFactory.getLog(TestContextManager.class);</span>
+
+	private final TestContext testContext;
+
+<span class="fc" id="L96">	private final ThreadLocal&lt;TestContext&gt; testContextHolder = ThreadLocal.withInitial(</span>
+			// Implemented as an anonymous inner class instead of a lambda expression due to a bug
+			// in Eclipse IDE: &quot;The blank final field testContext may not have been initialized&quot;
+<span class="fc" id="L99">			new Supplier&lt;TestContext&gt;() {</span>
+				@Override
+				public TestContext get() {
+<span class="fc" id="L102">					return copyTestContext(TestContextManager.this.testContext);</span>
+				}
+			});
+
+<span class="fc" id="L106">	private final List&lt;TestExecutionListener&gt; testExecutionListeners = new ArrayList&lt;&gt;();</span>
+
+
+	/**
+	 * Construct a new {@code TestContextManager} for the supplied {@linkplain Class test class}.
+	 * &lt;p&gt;Delegates to {@link #TestContextManager(TestContextBootstrapper)} with
+	 * the {@link TestContextBootstrapper} configured for the test class. If the
+	 * {@link BootstrapWith @BootstrapWith} annotation is present on the test
+	 * class, either directly or as a meta-annotation, then its
+	 * {@link BootstrapWith#value value} will be used as the bootstrapper type;
+	 * otherwise, the {@link org.springframework.test.context.support.DefaultTestContextBootstrapper
+	 * DefaultTestContextBootstrapper} will be used.
+	 * @param testClass the test class to be managed
+	 * @see #TestContextManager(TestContextBootstrapper)
+	 */
+	public TestContextManager(Class&lt;?&gt; testClass) {
+<span class="fc" id="L122">		this(BootstrapUtils.resolveTestContextBootstrapper(BootstrapUtils.createBootstrapContext(testClass)));</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Construct a new {@code TestContextManager} using the supplied {@link TestContextBootstrapper}
+	 * and {@linkplain #registerTestExecutionListeners register} the necessary
+	 * {@link TestExecutionListener TestExecutionListeners}.
+	 * &lt;p&gt;Delegates to the supplied {@code TestContextBootstrapper} for building
+	 * the {@code TestContext} and retrieving the {@code TestExecutionListeners}.
+	 * @param testContextBootstrapper the bootstrapper to use
+	 * @see TestContextBootstrapper#buildTestContext
+	 * @see TestContextBootstrapper#getTestExecutionListeners
+	 * @see #registerTestExecutionListeners
+	 */
+<span class="fc" id="L136">	public TestContextManager(TestContextBootstrapper testContextBootstrapper) {</span>
+<span class="fc" id="L137">		this.testContext = testContextBootstrapper.buildTestContext();</span>
+<span class="fc" id="L138">		registerTestExecutionListeners(testContextBootstrapper.getTestExecutionListeners());</span>
+<span class="fc" id="L139">	}</span>
+
+	/**
+	 * Get the {@link TestContext} managed by this {@code TestContextManager}.
+	 */
+	public final TestContext getTestContext() {
+<span class="fc" id="L145">		return this.testContextHolder.get();</span>
+	}
+
+	/**
+	 * Register the supplied list of {@link TestExecutionListener TestExecutionListeners}
+	 * by appending them to the list of listeners used by this {@code TestContextManager}.
+	 * @see #registerTestExecutionListeners(TestExecutionListener...)
+	 */
+	public void registerTestExecutionListeners(List&lt;TestExecutionListener&gt; testExecutionListeners) {
+<span class="fc" id="L154">		registerTestExecutionListeners(testExecutionListeners.toArray(new TestExecutionListener[0]));</span>
+<span class="fc" id="L155">	}</span>
+
+	/**
+	 * Register the supplied array of {@link TestExecutionListener TestExecutionListeners}
+	 * by appending them to the list of listeners used by this {@code TestContextManager}.
+	 */
+	public void registerTestExecutionListeners(TestExecutionListener... testExecutionListeners) {
+<span class="fc bfc" id="L162" title="All 2 branches covered.">		for (TestExecutionListener listener : testExecutionListeners) {</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L164">				logger.trace(&quot;Registering TestExecutionListener: &quot; + listener);</span>
+			}
+<span class="fc" id="L166">			this.testExecutionListeners.add(listener);</span>
+		}
+<span class="fc" id="L168">	}</span>
+
+	/**
+	 * Get the current {@link TestExecutionListener TestExecutionListeners}
+	 * registered for this {@code TestContextManager}.
+	 * &lt;p&gt;Allows for modifications, e.g. adding a listener to the beginning of the list.
+	 * However, make sure to keep the list stable while actually executing tests.
+	 */
+	public final List&lt;TestExecutionListener&gt; getTestExecutionListeners() {
+<span class="fc" id="L177">		return this.testExecutionListeners;</span>
+	}
+
+	/**
+	 * Get a copy of the {@link TestExecutionListener TestExecutionListeners}
+	 * registered for this {@code TestContextManager} in reverse order.
+	 */
+	private List&lt;TestExecutionListener&gt; getReversedTestExecutionListeners() {
+<span class="fc" id="L185">		List&lt;TestExecutionListener&gt; listenersReversed = new ArrayList&lt;&gt;(getTestExecutionListeners());</span>
+<span class="fc" id="L186">		Collections.reverse(listenersReversed);</span>
+<span class="fc" id="L187">		return listenersReversed;</span>
+	}
+
+	/**
+	 * Hook for pre-processing a test class &lt;em&gt;before&lt;/em&gt; execution of any
+	 * tests within the class. Should be called prior to any framework-specific
+	 * &lt;em&gt;before class methods&lt;/em&gt; (e.g., methods annotated with JUnit 4's
+	 * {@link org.junit.BeforeClass @BeforeClass}).
+	 * &lt;p&gt;An attempt will be made to give each registered
+	 * {@link TestExecutionListener} a chance to pre-process the test class
+	 * execution. If a listener throws an exception, however, the remaining
+	 * registered listeners will &lt;strong&gt;not&lt;/strong&gt; be called.
+	 * @throws Exception if a registered TestExecutionListener throws an
+	 * exception
+	 * @since 3.0
+	 * @see #getTestExecutionListeners()
+	 */
+	public void beforeTestClass() throws Exception {
+<span class="fc" id="L205">		Class&lt;?&gt; testClass = getTestContext().getTestClass();</span>
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L207">			logger.trace(&quot;beforeTestClass(): class [&quot; + testClass.getName() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L209">		getTestContext().updateState(null, null, null);</span>
+
+<span class="fc bfc" id="L211" title="All 2 branches covered.">		for (TestExecutionListener testExecutionListener : getTestExecutionListeners()) {</span>
+			try {
+<span class="fc" id="L213">				testExecutionListener.beforeTestClass(getTestContext());</span>
+			}
+<span class="fc" id="L215">			catch (Throwable ex) {</span>
+<span class="fc" id="L216">				logException(ex, &quot;beforeTestClass&quot;, testExecutionListener, testClass);</span>
+<span class="nc" id="L217">				ReflectionUtils.rethrowException(ex);</span>
+<span class="fc" id="L218">			}</span>
+<span class="fc" id="L219">		}</span>
+<span class="fc" id="L220">	}</span>
+
+	/**
+	 * Hook for preparing a test instance prior to execution of any individual
+	 * test methods, for example for injecting dependencies, etc. Should be
+	 * called immediately after instantiation of the test instance.
+	 * &lt;p&gt;The managed {@link TestContext} will be updated with the supplied
+	 * {@code testInstance}.
+	 * &lt;p&gt;An attempt will be made to give each registered
+	 * {@link TestExecutionListener} a chance to prepare the test instance. If a
+	 * listener throws an exception, however, the remaining registered listeners
+	 * will &lt;strong&gt;not&lt;/strong&gt; be called.
+	 * @param testInstance the test instance to prepare (never {@code null})
+	 * @throws Exception if a registered TestExecutionListener throws an exception
+	 * @see #getTestExecutionListeners()
+	 */
+	public void prepareTestInstance(Object testInstance) throws Exception {
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L238">			logger.trace(&quot;prepareTestInstance(): instance [&quot; + testInstance + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L240">		getTestContext().updateState(testInstance, null, null);</span>
+
+<span class="fc bfc" id="L242" title="All 2 branches covered.">		for (TestExecutionListener testExecutionListener : getTestExecutionListeners()) {</span>
+			try {
+<span class="fc" id="L244">				testExecutionListener.prepareTestInstance(getTestContext());</span>
+			}
+<span class="fc" id="L246">			catch (Throwable ex) {</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">				if (logger.isErrorEnabled()) {</span>
+<span class="fc" id="L248">					logger.error(&quot;Caught exception while allowing TestExecutionListener [&quot; + testExecutionListener +</span>
+							&quot;] to prepare test instance [&quot; + testInstance + &quot;]&quot;, ex);
+				}
+<span class="nc" id="L251">				ReflectionUtils.rethrowException(ex);</span>
+<span class="fc" id="L252">			}</span>
+<span class="fc" id="L253">		}</span>
+<span class="fc" id="L254">	}</span>
+
+	/**
+	 * Hook for pre-processing a test &lt;em&gt;before&lt;/em&gt; execution of &lt;em&gt;before&lt;/em&gt;
+	 * lifecycle callbacks of the underlying test framework &amp;mdash; for example,
+	 * setting up test fixtures, starting a transaction, etc.
+	 * &lt;p&gt;This method &lt;strong&gt;must&lt;/strong&gt; be called immediately prior to
+	 * framework-specific &lt;em&gt;before&lt;/em&gt; lifecycle callbacks (e.g., methods
+	 * annotated with JUnit 4's {@link org.junit.Before @Before}). For historical
+	 * reasons, this method is named {@code beforeTestMethod}. Since the
+	 * introduction of {@link #beforeTestExecution}, a more suitable name for
+	 * this method might be something like {@code beforeTestSetUp} or
+	 * {@code beforeEach}; however, it is unfortunately impossible to rename
+	 * this method due to backward compatibility concerns.
+	 * &lt;p&gt;The managed {@link TestContext} will be updated with the supplied
+	 * {@code testInstance} and {@code testMethod}.
+	 * &lt;p&gt;An attempt will be made to give each registered
+	 * {@link TestExecutionListener} a chance to perform its pre-processing.
+	 * If a listener throws an exception, however, the remaining registered
+	 * listeners will &lt;strong&gt;not&lt;/strong&gt; be called.
+	 * @param testInstance the current test instance (never {@code null})
+	 * @param testMethod the test method which is about to be executed on the
+	 * test instance
+	 * @throws Exception if a registered TestExecutionListener throws an exception
+	 * @see #afterTestMethod
+	 * @see #beforeTestExecution
+	 * @see #afterTestExecution
+	 * @see #getTestExecutionListeners()
+	 */
+	public void beforeTestMethod(Object testInstance, Method testMethod) throws Exception {
+<span class="fc" id="L284">		String callbackName = &quot;beforeTestMethod&quot;;</span>
+<span class="fc" id="L285">		prepareForBeforeCallback(callbackName, testInstance, testMethod);</span>
+
+<span class="fc bfc" id="L287" title="All 2 branches covered.">		for (TestExecutionListener testExecutionListener : getTestExecutionListeners()) {</span>
+			try {
+<span class="fc" id="L289">				testExecutionListener.beforeTestMethod(getTestContext());</span>
+			}
+<span class="fc" id="L291">			catch (Throwable ex) {</span>
+<span class="nc" id="L292">				handleBeforeException(ex, callbackName, testExecutionListener, testInstance, testMethod);</span>
+<span class="fc" id="L293">			}</span>
+<span class="fc" id="L294">		}</span>
+<span class="fc" id="L295">	}</span>
+
+	/**
+	 * Hook for pre-processing a test &lt;em&gt;immediately before&lt;/em&gt; execution of
+	 * the {@linkplain java.lang.reflect.Method test method} in the supplied
+	 * {@linkplain TestContext test context} &amp;mdash; for example, for timing
+	 * or logging purposes.
+	 * &lt;p&gt;This method &lt;strong&gt;must&lt;/strong&gt; be called after framework-specific
+	 * &lt;em&gt;before&lt;/em&gt; lifecycle callbacks (e.g., methods annotated with JUnit 4's
+	 * {@link org.junit.Before @Before}).
+	 * &lt;p&gt;The managed {@link TestContext} will be updated with the supplied
+	 * {@code testInstance} and {@code testMethod}.
+	 * &lt;p&gt;An attempt will be made to give each registered
+	 * {@link TestExecutionListener} a chance to perform its pre-processing.
+	 * If a listener throws an exception, however, the remaining registered
+	 * listeners will &lt;strong&gt;not&lt;/strong&gt; be called.
+	 * @param testInstance the current test instance (never {@code null})
+	 * @param testMethod the test method which is about to be executed on the
+	 * test instance
+	 * @throws Exception if a registered TestExecutionListener throws an exception
+	 * @since 5.0
+	 * @see #beforeTestMethod
+	 * @see #afterTestMethod
+	 * @see #beforeTestExecution
+	 * @see #afterTestExecution
+	 * @see #getTestExecutionListeners()
+	 */
+	public void beforeTestExecution(Object testInstance, Method testMethod) throws Exception {
+<span class="fc" id="L323">		String callbackName = &quot;beforeTestExecution&quot;;</span>
+<span class="fc" id="L324">		prepareForBeforeCallback(callbackName, testInstance, testMethod);</span>
+
+<span class="fc bfc" id="L326" title="All 2 branches covered.">		for (TestExecutionListener testExecutionListener : getTestExecutionListeners()) {</span>
+			try {
+<span class="fc" id="L328">				testExecutionListener.beforeTestExecution(getTestContext());</span>
+			}
+<span class="fc" id="L330">			catch (Throwable ex) {</span>
+<span class="nc" id="L331">				handleBeforeException(ex, callbackName, testExecutionListener, testInstance, testMethod);</span>
+<span class="fc" id="L332">			}</span>
+<span class="fc" id="L333">		}</span>
+<span class="fc" id="L334">	}</span>
+
+	/**
+	 * Hook for post-processing a test &lt;em&gt;immediately after&lt;/em&gt; execution of
+	 * the {@linkplain java.lang.reflect.Method test method} in the supplied
+	 * {@linkplain TestContext test context} &amp;mdash; for example, for timing
+	 * or logging purposes.
+	 * &lt;p&gt;This method &lt;strong&gt;must&lt;/strong&gt; be called before framework-specific
+	 * &lt;em&gt;after&lt;/em&gt; lifecycle callbacks (e.g., methods annotated with JUnit 4's
+	 * {@link org.junit.After @After}).
+	 * &lt;p&gt;The managed {@link TestContext} will be updated with the supplied
+	 * {@code testInstance}, {@code testMethod}, and {@code exception}.
+	 * &lt;p&gt;Each registered {@link TestExecutionListener} will be given a chance
+	 * to perform its post-processing. If a listener throws an exception, the
+	 * remaining registered listeners will still be called. After all listeners
+	 * have executed, the first caught exception will be rethrown with any
+	 * subsequent exceptions {@linkplain Throwable#addSuppressed suppressed} in
+	 * the first exception.
+	 * &lt;p&gt;Note that registered listeners will be executed in the opposite
+	 * order in which they were registered.
+	 * @param testInstance the current test instance (never {@code null})
+	 * @param testMethod the test method which has just been executed on the
+	 * test instance
+	 * @param exception the exception that was thrown during execution of the
+	 * test method or by a TestExecutionListener, or {@code null} if none
+	 * was thrown
+	 * @throws Exception if a registered TestExecutionListener throws an exception
+	 * @since 5.0
+	 * @see #beforeTestMethod
+	 * @see #afterTestMethod
+	 * @see #beforeTestExecution
+	 * @see #getTestExecutionListeners()
+	 * @see Throwable#addSuppressed(Throwable)
+	 */
+	public void afterTestExecution(Object testInstance, Method testMethod, @Nullable Throwable exception)
+			throws Exception {
+
+<span class="fc" id="L371">		String callbackName = &quot;afterTestExecution&quot;;</span>
+<span class="fc" id="L372">		prepareForAfterCallback(callbackName, testInstance, testMethod, exception);</span>
+<span class="fc" id="L373">		Throwable afterTestExecutionException = null;</span>
+
+		// Traverse the TestExecutionListeners in reverse order to ensure proper
+		// &quot;wrapper&quot;-style execution of listeners.
+<span class="fc bfc" id="L377" title="All 2 branches covered.">		for (TestExecutionListener testExecutionListener : getReversedTestExecutionListeners()) {</span>
+			try {
+<span class="fc" id="L379">				testExecutionListener.afterTestExecution(getTestContext());</span>
+			}
+<span class="fc" id="L381">			catch (Throwable ex) {</span>
+<span class="fc" id="L382">				logException(ex, callbackName, testExecutionListener, testInstance, testMethod);</span>
+<span class="fc bfc" id="L383" title="All 2 branches covered.">				if (afterTestExecutionException == null) {</span>
+<span class="fc" id="L384">					afterTestExecutionException = ex;</span>
+				}
+				else {
+<span class="fc" id="L387">					afterTestExecutionException.addSuppressed(ex);</span>
+				}
+<span class="fc" id="L389">			}</span>
+<span class="fc" id="L390">		}</span>
+
+<span class="fc bfc" id="L392" title="All 2 branches covered.">		if (afterTestExecutionException != null) {</span>
+<span class="nc" id="L393">			ReflectionUtils.rethrowException(afterTestExecutionException);</span>
+		}
+<span class="fc" id="L395">	}</span>
+
+	/**
+	 * Hook for post-processing a test &lt;em&gt;after&lt;/em&gt; execution of &lt;em&gt;after&lt;/em&gt;
+	 * lifecycle callbacks of the underlying test framework &amp;mdash; for example,
+	 * tearing down test fixtures, ending a transaction, etc.
+	 * &lt;p&gt;This method &lt;strong&gt;must&lt;/strong&gt; be called immediately after
+	 * framework-specific &lt;em&gt;after&lt;/em&gt; lifecycle callbacks (e.g., methods
+	 * annotated with JUnit 4's {@link org.junit.After @After}). For historical
+	 * reasons, this method is named {@code afterTestMethod}. Since the
+	 * introduction of {@link #afterTestExecution}, a more suitable name for
+	 * this method might be something like {@code afterTestTearDown} or
+	 * {@code afterEach}; however, it is unfortunately impossible to rename
+	 * this method due to backward compatibility concerns.
+	 * &lt;p&gt;The managed {@link TestContext} will be updated with the supplied
+	 * {@code testInstance}, {@code testMethod}, and {@code exception}.
+	 * &lt;p&gt;Each registered {@link TestExecutionListener} will be given a chance
+	 * to perform its post-processing. If a listener throws an exception, the
+	 * remaining registered listeners will still be called. After all listeners
+	 * have executed, the first caught exception will be rethrown with any
+	 * subsequent exceptions {@linkplain Throwable#addSuppressed suppressed} in
+	 * the first exception.
+	 * &lt;p&gt;Note that registered listeners will be executed in the opposite
+	 * @param testInstance the current test instance (never {@code null})
+	 * @param testMethod the test method which has just been executed on the
+	 * test instance
+	 * @param exception the exception that was thrown during execution of the test
+	 * method or by a TestExecutionListener, or {@code null} if none was thrown
+	 * @throws Exception if a registered TestExecutionListener throws an exception
+	 * @see #beforeTestMethod
+	 * @see #beforeTestExecution
+	 * @see #afterTestExecution
+	 * @see #getTestExecutionListeners()
+	 * @see Throwable#addSuppressed(Throwable)
+	 */
+	public void afterTestMethod(Object testInstance, Method testMethod, @Nullable Throwable exception)
+			throws Exception {
+
+<span class="fc" id="L433">		String callbackName = &quot;afterTestMethod&quot;;</span>
+<span class="fc" id="L434">		prepareForAfterCallback(callbackName, testInstance, testMethod, exception);</span>
+<span class="fc" id="L435">		Throwable afterTestMethodException = null;</span>
+
+		// Traverse the TestExecutionListeners in reverse order to ensure proper
+		// &quot;wrapper&quot;-style execution of listeners.
+<span class="fc bfc" id="L439" title="All 2 branches covered.">		for (TestExecutionListener testExecutionListener : getReversedTestExecutionListeners()) {</span>
+			try {
+<span class="fc" id="L441">				testExecutionListener.afterTestMethod(getTestContext());</span>
+			}
+<span class="fc" id="L443">			catch (Throwable ex) {</span>
+<span class="fc" id="L444">				logException(ex, callbackName, testExecutionListener, testInstance, testMethod);</span>
+<span class="fc bfc" id="L445" title="All 2 branches covered.">				if (afterTestMethodException == null) {</span>
+<span class="fc" id="L446">					afterTestMethodException = ex;</span>
+				}
+				else {
+<span class="fc" id="L449">					afterTestMethodException.addSuppressed(ex);</span>
+				}
+<span class="fc" id="L451">			}</span>
+<span class="fc" id="L452">		}</span>
+
+<span class="fc bfc" id="L454" title="All 2 branches covered.">		if (afterTestMethodException != null) {</span>
+<span class="nc" id="L455">			ReflectionUtils.rethrowException(afterTestMethodException);</span>
+		}
+<span class="fc" id="L457">	}</span>
+
+	/**
+	 * Hook for post-processing a test class &lt;em&gt;after&lt;/em&gt; execution of all
+	 * tests within the class. Should be called after any framework-specific
+	 * &lt;em&gt;after class methods&lt;/em&gt; (e.g., methods annotated with JUnit 4's
+	 * {@link org.junit.AfterClass @AfterClass}).
+	 * &lt;p&gt;Each registered {@link TestExecutionListener} will be given a chance
+	 * to perform its post-processing. If a listener throws an exception, the
+	 * remaining registered listeners will still be called. After all listeners
+	 * have executed, the first caught exception will be rethrown with any
+	 * subsequent exceptions {@linkplain Throwable#addSuppressed suppressed} in
+	 * the first exception.
+	 * &lt;p&gt;Note that registered listeners will be executed in the opposite
+	 * @throws Exception if a registered TestExecutionListener throws an exception
+	 * @since 3.0
+	 * @see #getTestExecutionListeners()
+	 * @see Throwable#addSuppressed(Throwable)
+	 */
+	public void afterTestClass() throws Exception {
+<span class="fc" id="L477">		Class&lt;?&gt; testClass = getTestContext().getTestClass();</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L479">			logger.trace(&quot;afterTestClass(): class [&quot; + testClass.getName() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L481">		getTestContext().updateState(null, null, null);</span>
+
+<span class="fc" id="L483">		Throwable afterTestClassException = null;</span>
+		// Traverse the TestExecutionListeners in reverse order to ensure proper
+		// &quot;wrapper&quot;-style execution of listeners.
+<span class="fc bfc" id="L486" title="All 2 branches covered.">		for (TestExecutionListener testExecutionListener : getReversedTestExecutionListeners()) {</span>
+			try {
+<span class="fc" id="L488">				testExecutionListener.afterTestClass(getTestContext());</span>
+			}
+<span class="fc" id="L490">			catch (Throwable ex) {</span>
+<span class="fc" id="L491">				logException(ex, &quot;afterTestClass&quot;, testExecutionListener, testClass);</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">				if (afterTestClassException == null) {</span>
+<span class="fc" id="L493">					afterTestClassException = ex;</span>
+				}
+				else {
+<span class="fc" id="L496">					afterTestClassException.addSuppressed(ex);</span>
+				}
+<span class="fc" id="L498">			}</span>
+<span class="fc" id="L499">		}</span>
+
+<span class="fc" id="L501">		this.testContextHolder.remove();</span>
+
+<span class="fc bfc" id="L503" title="All 2 branches covered.">		if (afterTestClassException != null) {</span>
+<span class="nc" id="L504">			ReflectionUtils.rethrowException(afterTestClassException);</span>
+		}
+<span class="fc" id="L506">	}</span>
+
+	private void prepareForBeforeCallback(String callbackName, Object testInstance, Method testMethod) {
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L510">			logger.trace(String.format(&quot;%s(): instance [%s], method [%s]&quot;, callbackName, testInstance, testMethod));</span>
+		}
+<span class="fc" id="L512">		getTestContext().updateState(testInstance, testMethod, null);</span>
+<span class="fc" id="L513">	}</span>
+
+	private void prepareForAfterCallback(String callbackName, Object testInstance, Method testMethod,
+			@Nullable Throwable exception) {
+
+<span class="pc bpc" id="L518" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L519">			logger.trace(String.format(&quot;%s(): instance [%s], method [%s], exception [%s]&quot;,</span>
+					callbackName, testInstance, testMethod, exception));
+		}
+<span class="fc" id="L522">		getTestContext().updateState(testInstance, testMethod, exception);</span>
+<span class="fc" id="L523">	}</span>
+
+	private void handleBeforeException(Throwable ex, String callbackName, TestExecutionListener testExecutionListener,
+			Object testInstance, Method testMethod) throws Exception {
+
+<span class="fc" id="L528">		logException(ex, callbackName, testExecutionListener, testInstance, testMethod);</span>
+<span class="nc" id="L529">		ReflectionUtils.rethrowException(ex);</span>
+<span class="nc" id="L530">	}</span>
+
+	private void logException(
+			Throwable ex, String callbackName, TestExecutionListener testExecutionListener, Class&lt;?&gt; testClass) {
+
+<span class="pc bpc" id="L535" title="1 of 2 branches missed.">		if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L536">			logger.warn(String.format(&quot;Caught exception while invoking '%s' callback on &quot; +</span>
+					&quot;TestExecutionListener [%s] for test class [%s]&quot;, callbackName, testExecutionListener,
+					testClass), ex);
+		}
+<span class="fc" id="L540">	}</span>
+
+	private void logException(Throwable ex, String callbackName, TestExecutionListener testExecutionListener,
+			Object testInstance, Method testMethod) {
+
+<span class="pc bpc" id="L545" title="1 of 2 branches missed.">		if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L546">			logger.warn(String.format(&quot;Caught exception while invoking '%s' callback on &quot; +</span>
+					&quot;TestExecutionListener [%s] for test method [%s] and test instance [%s]&quot;,
+					callbackName, testExecutionListener, testMethod, testInstance), ex);
+		}
+<span class="fc" id="L550">	}</span>
+
+
+	/**
+	 * Attempt to create a copy of the supplied {@code TestContext} using its
+	 * &lt;em&gt;copy constructor&lt;/em&gt;.
+	 */
+	private static TestContext copyTestContext(TestContext testContext) {
+<span class="fc" id="L558">		Constructor&lt;? extends TestContext&gt; constructor =</span>
+<span class="fc" id="L559">				ClassUtils.getConstructorIfAvailable(testContext.getClass(), testContext.getClass());</span>
+
+<span class="pc bpc" id="L561" title="1 of 2 branches missed.">		if (constructor != null) {</span>
+			try {
+<span class="fc" id="L563">				ReflectionUtils.makeAccessible(constructor);</span>
+<span class="fc" id="L564">				return constructor.newInstance(testContext);</span>
+			}
+<span class="nc" id="L566">			catch (Exception ex) {</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">				if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L568">					logger.info(String.format(&quot;Failed to invoke copy constructor for [%s]; &quot; +</span>
+							&quot;concurrent test execution is therefore likely not supported.&quot;,
+							testContext), ex);
+				}
+			}
+		}
+
+		// Fallback to original instance
+<span class="nc" id="L576">		return testContext;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

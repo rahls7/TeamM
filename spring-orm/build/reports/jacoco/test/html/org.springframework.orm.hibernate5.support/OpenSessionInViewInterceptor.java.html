@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OpenSessionInViewInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.hibernate5.support</a> &gt; <span class="el_source">OpenSessionInViewInterceptor.java</span></div><h1>OpenSessionInViewInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.hibernate5.support;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.hibernate.FlushMode;
+import org.hibernate.HibernateException;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.lang.Nullable;
+import org.springframework.orm.hibernate5.SessionFactoryUtils;
+import org.springframework.orm.hibernate5.SessionHolder;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.ui.ModelMap;
+import org.springframework.util.Assert;
+import org.springframework.web.context.request.AsyncWebRequestInterceptor;
+import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.context.request.async.CallableProcessingInterceptor;
+import org.springframework.web.context.request.async.WebAsyncManager;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+
+/**
+ * Spring web request interceptor that binds a Hibernate {@code Session} to the
+ * thread for the entire processing of the request.
+ *
+ * &lt;p&gt;This class is a concrete expression of the &quot;Open Session in View&quot; pattern, which
+ * is a pattern that allows for the lazy loading of associations in web views despite
+ * the original transactions already being completed.
+ *
+ * &lt;p&gt;This interceptor makes Hibernate Sessions available via the current thread,
+ * which will be autodetected by transaction managers. It is suitable for service layer
+ * transactions via {@link org.springframework.orm.hibernate5.HibernateTransactionManager}
+ * as well as for non-transactional execution (if configured appropriately).
+ *
+ * &lt;p&gt;In contrast to {@link OpenSessionInViewFilter}, this interceptor is configured
+ * in a Spring application context and can thus take advantage of bean wiring.
+ *
+ * &lt;p&gt;&lt;b&gt;WARNING:&lt;/b&gt; Applying this interceptor to existing logic can cause issues
+ * that have not appeared before, through the use of a single Hibernate
+ * {@code Session} for the processing of an entire request. In particular, the
+ * reassociation of persistent objects with a Hibernate {@code Session} has to
+ * occur at the very beginning of request processing, to avoid clashes with already
+ * loaded instances of the same objects.
+ *
+ * @author Juergen Hoeller
+ * @since 4.2
+ * @see OpenSessionInViewFilter
+ * @see OpenSessionInterceptor
+ * @see org.springframework.orm.hibernate5.HibernateTransactionManager
+ * @see TransactionSynchronizationManager
+ * @see SessionFactory#getCurrentSession()
+ */
+<span class="nc" id="L71">public class OpenSessionInViewInterceptor implements AsyncWebRequestInterceptor {</span>
+
+	/**
+	 * Suffix that gets appended to the {@code SessionFactory}
+	 * {@code toString()} representation for the &quot;participate in existing
+	 * session handling&quot; request attribute.
+	 * @see #getParticipateAttributeName
+	 */
+	public static final String PARTICIPATE_SUFFIX = &quot;.PARTICIPATE&quot;;
+
+<span class="nc" id="L81">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private SessionFactory sessionFactory;
+
+
+	/**
+	 * Set the Hibernate SessionFactory that should be used to create Hibernate Sessions.
+	 */
+	public void setSessionFactory(@Nullable SessionFactory sessionFactory) {
+<span class="nc" id="L91">		this.sessionFactory = sessionFactory;</span>
+<span class="nc" id="L92">	}</span>
+
+	/**
+	 * Return the Hibernate SessionFactory that should be used to create Hibernate Sessions.
+	 */
+	@Nullable
+	public SessionFactory getSessionFactory() {
+<span class="nc" id="L99">		return this.sessionFactory;</span>
+	}
+
+	private SessionFactory obtainSessionFactory() {
+<span class="nc" id="L103">		SessionFactory sf = getSessionFactory();</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">		Assert.state(sf != null, &quot;No SessionFactory set&quot;);</span>
+<span class="nc" id="L105">		return sf;</span>
+	}
+
+
+	/**
+	 * Open a new Hibernate {@code Session} according and bind it to the thread via the
+	 * {@link TransactionSynchronizationManager}.
+	 */
+	@Override
+	public void preHandle(WebRequest request) throws DataAccessException {
+<span class="nc" id="L115">		String key = getParticipateAttributeName();</span>
+<span class="nc" id="L116">		WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);</span>
+<span class="nc bnc" id="L117" title="All 4 branches missed.">		if (asyncManager.hasConcurrentResult() &amp;&amp; applySessionBindingInterceptor(asyncManager, key)) {</span>
+<span class="nc" id="L118">			return;</span>
+		}
+
+<span class="nc bnc" id="L121" title="All 2 branches missed.">		if (TransactionSynchronizationManager.hasResource(obtainSessionFactory())) {</span>
+			// Do not modify the Session: just mark the request accordingly.
+<span class="nc" id="L123">			Integer count = (Integer) request.getAttribute(key, WebRequest.SCOPE_REQUEST);</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">			int newCount = (count != null ? count + 1 : 1);</span>
+<span class="nc" id="L125">			request.setAttribute(getParticipateAttributeName(), newCount, WebRequest.SCOPE_REQUEST);</span>
+<span class="nc" id="L126">		}</span>
+		else {
+<span class="nc" id="L128">			logger.debug(&quot;Opening Hibernate Session in OpenSessionInViewInterceptor&quot;);</span>
+<span class="nc" id="L129">			Session session = openSession();</span>
+<span class="nc" id="L130">			SessionHolder sessionHolder = new SessionHolder(session);</span>
+<span class="nc" id="L131">			TransactionSynchronizationManager.bindResource(obtainSessionFactory(), sessionHolder);</span>
+
+<span class="nc" id="L133">			AsyncRequestInterceptor asyncRequestInterceptor =</span>
+<span class="nc" id="L134">					new AsyncRequestInterceptor(obtainSessionFactory(), sessionHolder);</span>
+<span class="nc" id="L135">			asyncManager.registerCallableInterceptor(key, asyncRequestInterceptor);</span>
+<span class="nc" id="L136">			asyncManager.registerDeferredResultInterceptor(key, asyncRequestInterceptor);</span>
+		}
+<span class="nc" id="L138">	}</span>
+
+	@Override
+	public void postHandle(WebRequest request, @Nullable ModelMap model) {
+<span class="nc" id="L142">	}</span>
+
+	/**
+	 * Unbind the Hibernate {@code Session} from the thread and close it).
+	 * @see TransactionSynchronizationManager
+	 */
+	@Override
+	public void afterCompletion(WebRequest request, @Nullable Exception ex) throws DataAccessException {
+<span class="nc bnc" id="L150" title="All 2 branches missed.">		if (!decrementParticipateCount(request)) {</span>
+<span class="nc" id="L151">			SessionHolder sessionHolder =</span>
+<span class="nc" id="L152">					(SessionHolder) TransactionSynchronizationManager.unbindResource(obtainSessionFactory());</span>
+<span class="nc" id="L153">			logger.debug(&quot;Closing Hibernate Session in OpenSessionInViewInterceptor&quot;);</span>
+<span class="nc" id="L154">			SessionFactoryUtils.closeSession(sessionHolder.getSession());</span>
+		}
+<span class="nc" id="L156">	}</span>
+
+	private boolean decrementParticipateCount(WebRequest request) {
+<span class="nc" id="L159">		String participateAttributeName = getParticipateAttributeName();</span>
+<span class="nc" id="L160">		Integer count = (Integer) request.getAttribute(participateAttributeName, WebRequest.SCOPE_REQUEST);</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">		if (count == null) {</span>
+<span class="nc" id="L162">			return false;</span>
+		}
+		// Do not modify the Session: just clear the marker.
+<span class="nc bnc" id="L165" title="All 2 branches missed.">		if (count &gt; 1) {</span>
+<span class="nc" id="L166">			request.setAttribute(participateAttributeName, count - 1, WebRequest.SCOPE_REQUEST);</span>
+		}
+		else {
+<span class="nc" id="L169">			request.removeAttribute(participateAttributeName, WebRequest.SCOPE_REQUEST);</span>
+		}
+<span class="nc" id="L171">		return true;</span>
+	}
+
+	@Override
+	public void afterConcurrentHandlingStarted(WebRequest request) {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">		if (!decrementParticipateCount(request)) {</span>
+<span class="nc" id="L177">			TransactionSynchronizationManager.unbindResource(obtainSessionFactory());</span>
+		}
+<span class="nc" id="L179">	}</span>
+
+	/**
+	 * Open a Session for the SessionFactory that this interceptor uses.
+	 * &lt;p&gt;The default implementation delegates to the {@link SessionFactory#openSession}
+	 * method and sets the {@link Session}'s flush mode to &quot;MANUAL&quot;.
+	 * @return the Session to use
+	 * @throws DataAccessResourceFailureException if the Session could not be created
+	 * @see FlushMode#MANUAL
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	protected Session openSession() throws DataAccessResourceFailureException {
+		try {
+<span class="nc" id="L192">			Session session = obtainSessionFactory().openSession();</span>
+<span class="nc" id="L193">			session.setFlushMode(FlushMode.MANUAL);</span>
+<span class="nc" id="L194">			return session;</span>
+		}
+<span class="nc" id="L196">		catch (HibernateException ex) {</span>
+<span class="nc" id="L197">			throw new DataAccessResourceFailureException(&quot;Could not open Hibernate Session&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Return the name of the request attribute that identifies that a request is
+	 * already intercepted.
+	 * &lt;p&gt;The default implementation takes the {@code toString()} representation
+	 * of the {@code SessionFactory} instance and appends {@link #PARTICIPATE_SUFFIX}.
+	 */
+	protected String getParticipateAttributeName() {
+<span class="nc" id="L208">		return obtainSessionFactory().toString() + PARTICIPATE_SUFFIX;</span>
+	}
+
+	private boolean applySessionBindingInterceptor(WebAsyncManager asyncManager, String key) {
+<span class="nc" id="L212">		CallableProcessingInterceptor cpi = asyncManager.getCallableInterceptor(key);</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">		if (cpi == null) {</span>
+<span class="nc" id="L214">			return false;</span>
+		}
+<span class="nc" id="L216">		((AsyncRequestInterceptor) cpi).bindSession();</span>
+<span class="nc" id="L217">		return true;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

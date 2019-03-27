@@ -1,0 +1,306 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SessionFactoryUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.hibernate5</a> &gt; <span class="el_source">SessionFactoryUtils.java</span></div><h1>SessionFactoryUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.hibernate5;
+
+import java.lang.reflect.Method;
+import java.util.Map;
+import javax.persistence.PersistenceException;
+import javax.sql.DataSource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.hibernate.FlushMode;
+import org.hibernate.HibernateException;
+import org.hibernate.JDBCException;
+import org.hibernate.NonUniqueObjectException;
+import org.hibernate.NonUniqueResultException;
+import org.hibernate.ObjectDeletedException;
+import org.hibernate.PersistentObjectException;
+import org.hibernate.PessimisticLockException;
+import org.hibernate.PropertyValueException;
+import org.hibernate.QueryException;
+import org.hibernate.QueryTimeoutException;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.StaleObjectStateException;
+import org.hibernate.StaleStateException;
+import org.hibernate.TransientObjectException;
+import org.hibernate.UnresolvableObjectException;
+import org.hibernate.WrongClassException;
+import org.hibernate.cfg.Environment;
+import org.hibernate.dialect.lock.OptimisticEntityLockException;
+import org.hibernate.dialect.lock.PessimisticEntityLockException;
+import org.hibernate.engine.jdbc.connections.spi.ConnectionProvider;
+import org.hibernate.engine.spi.SessionFactoryImplementor;
+import org.hibernate.exception.ConstraintViolationException;
+import org.hibernate.exception.DataException;
+import org.hibernate.exception.JDBCConnectionException;
+import org.hibernate.exception.LockAcquisitionException;
+import org.hibernate.exception.SQLGrammarException;
+import org.hibernate.service.UnknownServiceException;
+
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.IncorrectResultSizeDataAccessException;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
+import org.springframework.dao.InvalidDataAccessResourceUsageException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Helper class featuring methods for Hibernate Session handling.
+ * Also provides support for exception translation.
+ *
+ * &lt;p&gt;Used internally by {@link HibernateTransactionManager}.
+ * Can also be used directly in application code.
+ *
+ * @author Juergen Hoeller
+ * @since 4.2
+ * @see HibernateExceptionTranslator
+ * @see HibernateTransactionManager
+ */
+<span class="nc" id="L83">public abstract class SessionFactoryUtils {</span>
+
+	/**
+	 * Order value for TransactionSynchronization objects that clean up Hibernate Sessions.
+	 * Returns {@code DataSourceUtils.CONNECTION_SYNCHRONIZATION_ORDER - 100}
+	 * to execute Session cleanup before JDBC Connection cleanup, if any.
+	 * @see DataSourceUtils#CONNECTION_SYNCHRONIZATION_ORDER
+	 */
+	public static final int SESSION_SYNCHRONIZATION_ORDER =
+			DataSourceUtils.CONNECTION_SYNCHRONIZATION_ORDER - 100;
+
+<span class="fc" id="L94">	static final Log logger = LogFactory.getLog(SessionFactoryUtils.class);</span>
+
+
+	private static Method getFlushMode;
+
+	static {
+		try {
+			// Hibernate 5.2+ getHibernateFlushMode()
+<span class="fc" id="L102">			getFlushMode = Session.class.getMethod(&quot;getHibernateFlushMode&quot;);</span>
+		}
+<span class="nc" id="L104">		catch (NoSuchMethodException ex) {</span>
+			try {
+				// Hibernate 5.0/5.1 getFlushMode() with FlushMode return type
+<span class="nc" id="L107">				getFlushMode = Session.class.getMethod(&quot;getFlushMode&quot;);</span>
+			}
+<span class="nc" id="L109">			catch (NoSuchMethodException ex2) {</span>
+<span class="nc" id="L110">				throw new IllegalStateException(&quot;No compatible Hibernate getFlushMode signature found&quot;, ex2);</span>
+<span class="nc" id="L111">			}</span>
+<span class="fc" id="L112">		}</span>
+		// Check that it is the Hibernate FlushMode type, not JPA's...
+<span class="pc bpc" id="L114" title="1 of 2 branches missed.">		Assert.state(FlushMode.class == getFlushMode.getReturnType(), &quot;Could not find Hibernate getFlushMode method&quot;);</span>
+<span class="fc" id="L115">	}</span>
+
+
+	/**
+	 * Get the native Hibernate FlushMode, adapting between Hibernate 5.0/5.1 and 5.2+.
+	 * @param session the Hibernate Session to get the flush mode from
+	 * @return the FlushMode (never {@code null})
+	 * @since 4.3
+	 */
+	static FlushMode getFlushMode(Session session) {
+<span class="nc" id="L125">		FlushMode flushMode = (FlushMode) ReflectionUtils.invokeMethod(getFlushMode, session);</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">		Assert.state(flushMode != null, &quot;No FlushMode from Session&quot;);</span>
+<span class="nc" id="L127">		return flushMode;</span>
+	}
+
+	/**
+	 * Trigger a flush on the given Hibernate Session, converting regular
+	 * {@link HibernateException} instances as well as Hibernate 5.2's
+	 * {@link PersistenceException} wrappers accordingly.
+	 * @param session the Hibernate Session to flush
+	 * @param synch whether this flush is triggered by transaction synchronization
+	 * @throws DataAccessException in case of flush failures
+	 * @since 4.3.2
+	 */
+	static void flush(Session session, boolean synch) throws DataAccessException {
+<span class="nc bnc" id="L140" title="All 2 branches missed.">		if (synch) {</span>
+<span class="nc" id="L141">			logger.debug(&quot;Flushing Hibernate Session on transaction synchronization&quot;);</span>
+		}
+		else {
+<span class="nc" id="L144">			logger.debug(&quot;Flushing Hibernate Session on explicit request&quot;);</span>
+		}
+		try {
+<span class="nc" id="L147">			session.flush();</span>
+		}
+<span class="nc" id="L149">		catch (HibernateException ex) {</span>
+<span class="nc" id="L150">			throw convertHibernateAccessException(ex);</span>
+		}
+<span class="nc" id="L152">		catch (PersistenceException ex) {</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">			if (ex.getCause() instanceof HibernateException) {</span>
+<span class="nc" id="L154">				throw convertHibernateAccessException((HibernateException) ex.getCause());</span>
+			}
+<span class="nc" id="L156">			throw ex;</span>
+<span class="nc" id="L157">		}</span>
+
+<span class="nc" id="L159">	}</span>
+
+	/**
+	 * Perform actual closing of the Hibernate Session,
+	 * catching and logging any cleanup exceptions thrown.
+	 * @param session the Hibernate Session to close (may be {@code null})
+	 * @see Session#close()
+	 */
+	public static void closeSession(@Nullable Session session) {
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">		if (session != null) {</span>
+			try {
+<span class="fc" id="L170">				session.close();</span>
+			}
+<span class="nc" id="L172">			catch (HibernateException ex) {</span>
+<span class="nc" id="L173">				logger.debug(&quot;Could not close Hibernate Session&quot;, ex);</span>
+			}
+<span class="nc" id="L175">			catch (Throwable ex) {</span>
+<span class="nc" id="L176">				logger.debug(&quot;Unexpected exception on closing Hibernate Session&quot;, ex);</span>
+<span class="pc" id="L177">			}</span>
+		}
+<span class="fc" id="L179">	}</span>
+
+	/**
+	 * Determine the DataSource of the given SessionFactory.
+	 * @param sessionFactory the SessionFactory to check
+	 * @return the DataSource, or {@code null} if none found
+	 * @see ConnectionProvider
+	 */
+	@Nullable
+	public static DataSource getDataSource(SessionFactory sessionFactory) {
+<span class="fc" id="L189">		Method getProperties = ClassUtils.getMethodIfAvailable(sessionFactory.getClass(), &quot;getProperties&quot;);</span>
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">		if (getProperties != null) {</span>
+<span class="fc" id="L191">			Map&lt;?, ?&gt; props = (Map&lt;?, ?&gt;) ReflectionUtils.invokeMethod(getProperties, sessionFactory);</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">			if (props != null) {</span>
+<span class="fc" id="L193">				Object dataSourceValue = props.get(Environment.DATASOURCE);</span>
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">				if (dataSourceValue instanceof DataSource) {</span>
+<span class="fc" id="L195">					return (DataSource) dataSourceValue;</span>
+				}
+			}
+		}
+<span class="nc bnc" id="L199" title="All 2 branches missed.">		if (sessionFactory instanceof SessionFactoryImplementor) {</span>
+<span class="nc" id="L200">			SessionFactoryImplementor sfi = (SessionFactoryImplementor) sessionFactory;</span>
+			try {
+<span class="nc" id="L202">				ConnectionProvider cp = sfi.getServiceRegistry().getService(ConnectionProvider.class);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">				if (cp != null) {</span>
+<span class="nc" id="L204">					return cp.unwrap(DataSource.class);</span>
+				}
+			}
+<span class="nc" id="L207">			catch (UnknownServiceException ex) {</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L209">					logger.debug(&quot;No ConnectionProvider found - cannot determine DataSource for SessionFactory: &quot; + ex);</span>
+				}
+<span class="nc" id="L211">			}</span>
+		}
+<span class="nc" id="L213">		return null;</span>
+	}
+
+	/**
+	 * Convert the given HibernateException to an appropriate exception
+	 * from the {@code org.springframework.dao} hierarchy.
+	 * @param ex the HibernateException that occurred
+	 * @return the corresponding DataAccessException instance
+	 * @see HibernateExceptionTranslator#convertHibernateAccessException
+	 * @see HibernateTransactionManager#convertHibernateAccessException
+	 */
+	public static DataAccessException convertHibernateAccessException(HibernateException ex) {
+<span class="nc bnc" id="L225" title="All 2 branches missed.">		if (ex instanceof JDBCConnectionException) {</span>
+<span class="nc" id="L226">			return new DataAccessResourceFailureException(ex.getMessage(), ex);</span>
+		}
+<span class="nc bnc" id="L228" title="All 2 branches missed.">		if (ex instanceof SQLGrammarException) {</span>
+<span class="nc" id="L229">			SQLGrammarException jdbcEx = (SQLGrammarException) ex;</span>
+<span class="nc" id="L230">			return new InvalidDataAccessResourceUsageException(ex.getMessage() + &quot;; SQL [&quot; + jdbcEx.getSQL() + &quot;]&quot;, ex);</span>
+		}
+<span class="nc bnc" id="L232" title="All 2 branches missed.">		if (ex instanceof QueryTimeoutException) {</span>
+<span class="nc" id="L233">			QueryTimeoutException jdbcEx = (QueryTimeoutException) ex;</span>
+<span class="nc" id="L234">			return new org.springframework.dao.QueryTimeoutException(ex.getMessage() + &quot;; SQL [&quot; + jdbcEx.getSQL() + &quot;]&quot;, ex);</span>
+		}
+<span class="nc bnc" id="L236" title="All 2 branches missed.">		if (ex instanceof LockAcquisitionException) {</span>
+<span class="nc" id="L237">			LockAcquisitionException jdbcEx = (LockAcquisitionException) ex;</span>
+<span class="nc" id="L238">			return new CannotAcquireLockException(ex.getMessage() + &quot;; SQL [&quot; + jdbcEx.getSQL() + &quot;]&quot;, ex);</span>
+		}
+<span class="nc bnc" id="L240" title="All 2 branches missed.">		if (ex instanceof PessimisticLockException) {</span>
+<span class="nc" id="L241">			PessimisticLockException jdbcEx = (PessimisticLockException) ex;</span>
+<span class="nc" id="L242">			return new PessimisticLockingFailureException(ex.getMessage() + &quot;; SQL [&quot; + jdbcEx.getSQL() + &quot;]&quot;, ex);</span>
+		}
+<span class="nc bnc" id="L244" title="All 2 branches missed.">		if (ex instanceof ConstraintViolationException) {</span>
+<span class="nc" id="L245">			ConstraintViolationException jdbcEx = (ConstraintViolationException) ex;</span>
+<span class="nc" id="L246">			return new DataIntegrityViolationException(ex.getMessage()  + &quot;; SQL [&quot; + jdbcEx.getSQL() +</span>
+<span class="nc" id="L247">					&quot;]; constraint [&quot; + jdbcEx.getConstraintName() + &quot;]&quot;, ex);</span>
+		}
+<span class="nc bnc" id="L249" title="All 2 branches missed.">		if (ex instanceof DataException) {</span>
+<span class="nc" id="L250">			DataException jdbcEx = (DataException) ex;</span>
+<span class="nc" id="L251">			return new DataIntegrityViolationException(ex.getMessage() + &quot;; SQL [&quot; + jdbcEx.getSQL() + &quot;]&quot;, ex);</span>
+		}
+<span class="nc bnc" id="L253" title="All 2 branches missed.">		if (ex instanceof JDBCException) {</span>
+<span class="nc" id="L254">			return new HibernateJdbcException((JDBCException) ex);</span>
+		}
+		// end of JDBCException (subclass) handling
+
+<span class="nc bnc" id="L258" title="All 2 branches missed.">		if (ex instanceof QueryException) {</span>
+<span class="nc" id="L259">			return new HibernateQueryException((QueryException) ex);</span>
+		}
+<span class="nc bnc" id="L261" title="All 2 branches missed.">		if (ex instanceof NonUniqueResultException) {</span>
+<span class="nc" id="L262">			return new IncorrectResultSizeDataAccessException(ex.getMessage(), 1, ex);</span>
+		}
+<span class="nc bnc" id="L264" title="All 2 branches missed.">		if (ex instanceof NonUniqueObjectException) {</span>
+<span class="nc" id="L265">			return new DuplicateKeyException(ex.getMessage(), ex);</span>
+		}
+<span class="nc bnc" id="L267" title="All 2 branches missed.">		if (ex instanceof PropertyValueException) {</span>
+<span class="nc" id="L268">			return new DataIntegrityViolationException(ex.getMessage(), ex);</span>
+		}
+<span class="nc bnc" id="L270" title="All 2 branches missed.">		if (ex instanceof PersistentObjectException) {</span>
+<span class="nc" id="L271">			return new InvalidDataAccessApiUsageException(ex.getMessage(), ex);</span>
+		}
+<span class="nc bnc" id="L273" title="All 2 branches missed.">		if (ex instanceof TransientObjectException) {</span>
+<span class="nc" id="L274">			return new InvalidDataAccessApiUsageException(ex.getMessage(), ex);</span>
+		}
+<span class="nc bnc" id="L276" title="All 2 branches missed.">		if (ex instanceof ObjectDeletedException) {</span>
+<span class="nc" id="L277">			return new InvalidDataAccessApiUsageException(ex.getMessage(), ex);</span>
+		}
+<span class="nc bnc" id="L279" title="All 2 branches missed.">		if (ex instanceof UnresolvableObjectException) {</span>
+<span class="nc" id="L280">			return new HibernateObjectRetrievalFailureException((UnresolvableObjectException) ex);</span>
+		}
+<span class="nc bnc" id="L282" title="All 2 branches missed.">		if (ex instanceof WrongClassException) {</span>
+<span class="nc" id="L283">			return new HibernateObjectRetrievalFailureException((WrongClassException) ex);</span>
+		}
+<span class="nc bnc" id="L285" title="All 2 branches missed.">		if (ex instanceof StaleObjectStateException) {</span>
+<span class="nc" id="L286">			return new HibernateOptimisticLockingFailureException((StaleObjectStateException) ex);</span>
+		}
+<span class="nc bnc" id="L288" title="All 2 branches missed.">		if (ex instanceof StaleStateException) {</span>
+<span class="nc" id="L289">			return new HibernateOptimisticLockingFailureException((StaleStateException) ex);</span>
+		}
+<span class="nc bnc" id="L291" title="All 2 branches missed.">		if (ex instanceof OptimisticEntityLockException) {</span>
+<span class="nc" id="L292">			return new HibernateOptimisticLockingFailureException((OptimisticEntityLockException) ex);</span>
+		}
+<span class="nc bnc" id="L294" title="All 2 branches missed.">		if (ex instanceof PessimisticEntityLockException) {</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">			if (ex.getCause() instanceof LockAcquisitionException) {</span>
+<span class="nc" id="L296">				return new CannotAcquireLockException(ex.getMessage(), ex.getCause());</span>
+			}
+<span class="nc" id="L298">			return new PessimisticLockingFailureException(ex.getMessage(), ex);</span>
+		}
+
+		// fallback
+<span class="nc" id="L302">		return new HibernateSystemException(ex);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

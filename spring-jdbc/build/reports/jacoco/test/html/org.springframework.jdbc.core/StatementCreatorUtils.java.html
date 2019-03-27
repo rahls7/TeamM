@@ -1,0 +1,474 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StatementCreatorUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.core</a> &gt; <span class="el_source">StatementCreatorUtils.java</span></div><h1>StatementCreatorUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.core;
+
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.sql.Blob;
+import java.sql.Clob;
+import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.SpringProperties;
+import org.springframework.jdbc.support.SqlValue;
+import org.springframework.lang.Nullable;
+
+/**
+ * Utility methods for PreparedStatementSetter/Creator and CallableStatementCreator
+ * implementations, providing sophisticated parameter management (including support
+ * for LOB values).
+ *
+ * &lt;p&gt;Used by PreparedStatementCreatorFactory and CallableStatementCreatorFactory,
+ * but also available for direct use in custom setter/creator implementations.
+ *
+ * @author Thomas Risberg
+ * @author Juergen Hoeller
+ * @since 1.1
+ * @see PreparedStatementSetter
+ * @see PreparedStatementCreator
+ * @see CallableStatementCreator
+ * @see PreparedStatementCreatorFactory
+ * @see CallableStatementCreatorFactory
+ * @see SqlParameter
+ * @see SqlTypeValue
+ * @see org.springframework.jdbc.core.support.SqlLobValue
+ */
+<span class="nc" id="L62">public abstract class StatementCreatorUtils {</span>
+
+	/**
+	 * System property that instructs Spring to ignore {@link java.sql.ParameterMetaData#getParameterType}
+	 * completely, i.e. to never even attempt to retrieve {@link PreparedStatement#getParameterMetaData()}
+	 * for {@link StatementCreatorUtils#setNull} calls.
+	 * &lt;p&gt;The default is &quot;false&quot;, trying {@code getParameterType} calls first and falling back to
+	 * {@link PreparedStatement#setNull} / {@link PreparedStatement#setObject} calls based on well-known
+	 * behavior of common databases. Spring records JDBC drivers with non-working {@code getParameterType}
+	 * implementations and won't attempt to call that method for that driver again, always falling back.
+	 * &lt;p&gt;Consider switching this flag to &quot;true&quot; if you experience misbehavior at runtime, e.g. with
+	 * a connection pool setting back the {@link PreparedStatement} instance in case of an exception
+	 * thrown from {@code getParameterType} (as reported on JBoss AS 7).
+	 */
+	public static final String IGNORE_GETPARAMETERTYPE_PROPERTY_NAME = &quot;spring.jdbc.getParameterType.ignore&quot;;
+
+
+<span class="fc" id="L79">	static boolean shouldIgnoreGetParameterType = SpringProperties.getFlag(IGNORE_GETPARAMETERTYPE_PROPERTY_NAME);</span>
+
+<span class="fc" id="L81">	private static final Log logger = LogFactory.getLog(StatementCreatorUtils.class);</span>
+
+<span class="fc" id="L83">	private static final Map&lt;Class&lt;?&gt;, Integer&gt; javaTypeToSqlTypeMap = new HashMap&lt;&gt;(32);</span>
+
+	static {
+<span class="fc" id="L86">		javaTypeToSqlTypeMap.put(boolean.class, Types.BOOLEAN);</span>
+<span class="fc" id="L87">		javaTypeToSqlTypeMap.put(Boolean.class, Types.BOOLEAN);</span>
+<span class="fc" id="L88">		javaTypeToSqlTypeMap.put(byte.class, Types.TINYINT);</span>
+<span class="fc" id="L89">		javaTypeToSqlTypeMap.put(Byte.class, Types.TINYINT);</span>
+<span class="fc" id="L90">		javaTypeToSqlTypeMap.put(short.class, Types.SMALLINT);</span>
+<span class="fc" id="L91">		javaTypeToSqlTypeMap.put(Short.class, Types.SMALLINT);</span>
+<span class="fc" id="L92">		javaTypeToSqlTypeMap.put(int.class, Types.INTEGER);</span>
+<span class="fc" id="L93">		javaTypeToSqlTypeMap.put(Integer.class, Types.INTEGER);</span>
+<span class="fc" id="L94">		javaTypeToSqlTypeMap.put(long.class, Types.BIGINT);</span>
+<span class="fc" id="L95">		javaTypeToSqlTypeMap.put(Long.class, Types.BIGINT);</span>
+<span class="fc" id="L96">		javaTypeToSqlTypeMap.put(BigInteger.class, Types.BIGINT);</span>
+<span class="fc" id="L97">		javaTypeToSqlTypeMap.put(float.class, Types.FLOAT);</span>
+<span class="fc" id="L98">		javaTypeToSqlTypeMap.put(Float.class, Types.FLOAT);</span>
+<span class="fc" id="L99">		javaTypeToSqlTypeMap.put(double.class, Types.DOUBLE);</span>
+<span class="fc" id="L100">		javaTypeToSqlTypeMap.put(Double.class, Types.DOUBLE);</span>
+<span class="fc" id="L101">		javaTypeToSqlTypeMap.put(BigDecimal.class, Types.DECIMAL);</span>
+<span class="fc" id="L102">		javaTypeToSqlTypeMap.put(java.sql.Date.class, Types.DATE);</span>
+<span class="fc" id="L103">		javaTypeToSqlTypeMap.put(java.sql.Time.class, Types.TIME);</span>
+<span class="fc" id="L104">		javaTypeToSqlTypeMap.put(java.sql.Timestamp.class, Types.TIMESTAMP);</span>
+<span class="fc" id="L105">		javaTypeToSqlTypeMap.put(Blob.class, Types.BLOB);</span>
+<span class="fc" id="L106">		javaTypeToSqlTypeMap.put(Clob.class, Types.CLOB);</span>
+<span class="fc" id="L107">	}</span>
+
+
+	/**
+	 * Derive a default SQL type from the given Java type.
+	 * @param javaType the Java type to translate
+	 * @return the corresponding SQL type, or {@link SqlTypeValue#TYPE_UNKNOWN} if none found
+	 */
+	public static int javaTypeToSqlParameterType(@Nullable Class&lt;?&gt; javaType) {
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">		if (javaType == null) {</span>
+<span class="nc" id="L117">			return SqlTypeValue.TYPE_UNKNOWN;</span>
+		}
+<span class="fc" id="L119">		Integer sqlType = javaTypeToSqlTypeMap.get(javaType);</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">		if (sqlType != null) {</span>
+<span class="fc" id="L121">			return sqlType;</span>
+		}
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">		if (Number.class.isAssignableFrom(javaType)) {</span>
+<span class="nc" id="L124">			return Types.NUMERIC;</span>
+		}
+<span class="fc bfc" id="L126" title="All 2 branches covered.">		if (isStringValue(javaType)) {</span>
+<span class="fc" id="L127">			return Types.VARCHAR;</span>
+		}
+<span class="pc bpc" id="L129" title="2 of 4 branches missed.">		if (isDateValue(javaType) || Calendar.class.isAssignableFrom(javaType)) {</span>
+<span class="nc" id="L130">			return Types.TIMESTAMP;</span>
+		}
+<span class="fc" id="L132">		return SqlTypeValue.TYPE_UNKNOWN;</span>
+	}
+
+	/**
+	 * Set the value for a parameter. The method used is based on the SQL type
+	 * of the parameter and we can handle complex types like arrays and LOBs.
+	 * @param ps the prepared statement or callable statement
+	 * @param paramIndex index of the parameter we are setting
+	 * @param param the parameter as it is declared including type
+	 * @param inValue the value to set
+	 * @throws SQLException if thrown by PreparedStatement methods
+	 */
+	public static void setParameterValue(PreparedStatement ps, int paramIndex, SqlParameter param,
+			@Nullable Object inValue) throws SQLException {
+
+<span class="fc" id="L147">		setParameterValueInternal(ps, paramIndex, param.getSqlType(), param.getTypeName(), param.getScale(), inValue);</span>
+<span class="fc" id="L148">	}</span>
+
+	/**
+	 * Set the value for a parameter. The method used is based on the SQL type
+	 * of the parameter and we can handle complex types like arrays and LOBs.
+	 * @param ps the prepared statement or callable statement
+	 * @param paramIndex index of the parameter we are setting
+	 * @param sqlType the SQL type of the parameter
+	 * @param inValue the value to set (plain value or a SqlTypeValue)
+	 * @throws SQLException if thrown by PreparedStatement methods
+	 * @see SqlTypeValue
+	 */
+	public static void setParameterValue(PreparedStatement ps, int paramIndex, int sqlType,
+			@Nullable Object inValue) throws SQLException {
+
+<span class="fc" id="L163">		setParameterValueInternal(ps, paramIndex, sqlType, null, null, inValue);</span>
+<span class="fc" id="L164">	}</span>
+
+	/**
+	 * Set the value for a parameter. The method used is based on the SQL type
+	 * of the parameter and we can handle complex types like arrays and LOBs.
+	 * @param ps the prepared statement or callable statement
+	 * @param paramIndex index of the parameter we are setting
+	 * @param sqlType the SQL type of the parameter
+	 * @param typeName the type name of the parameter
+	 * (optional, only used for SQL NULL and SqlTypeValue)
+	 * @param inValue the value to set (plain value or a SqlTypeValue)
+	 * @throws SQLException if thrown by PreparedStatement methods
+	 * @see SqlTypeValue
+	 */
+	public static void setParameterValue(PreparedStatement ps, int paramIndex, int sqlType, String typeName,
+			@Nullable Object inValue) throws SQLException {
+
+<span class="fc" id="L181">		setParameterValueInternal(ps, paramIndex, sqlType, typeName, null, inValue);</span>
+<span class="fc" id="L182">	}</span>
+
+	/**
+	 * Set the value for a parameter. The method used is based on the SQL type
+	 * of the parameter and we can handle complex types like arrays and LOBs.
+	 * @param ps the prepared statement or callable statement
+	 * @param paramIndex index of the parameter we are setting
+	 * @param sqlType the SQL type of the parameter
+	 * @param typeName the type name of the parameter
+	 * (optional, only used for SQL NULL and SqlTypeValue)
+	 * @param scale the number of digits after the decimal point
+	 * (for DECIMAL and NUMERIC types)
+	 * @param inValue the value to set (plain value or a SqlTypeValue)
+	 * @throws SQLException if thrown by PreparedStatement methods
+	 * @see SqlTypeValue
+	 */
+	private static void setParameterValueInternal(PreparedStatement ps, int paramIndex, int sqlType,
+			@Nullable String typeName, @Nullable Integer scale, @Nullable Object inValue) throws SQLException {
+
+<span class="fc" id="L201">		String typeNameToUse = typeName;</span>
+<span class="fc" id="L202">		int sqlTypeToUse = sqlType;</span>
+<span class="fc" id="L203">		Object inValueToUse = inValue;</span>
+
+		// override type info?
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">		if (inValue instanceof SqlParameterValue) {</span>
+<span class="nc" id="L207">			SqlParameterValue parameterValue = (SqlParameterValue) inValue;</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L209">				logger.debug(&quot;Overriding type info with runtime info from SqlParameterValue: column index &quot; + paramIndex +</span>
+<span class="nc" id="L210">						&quot;, SQL type &quot; + parameterValue.getSqlType() + &quot;, type name &quot; + parameterValue.getTypeName());</span>
+			}
+<span class="nc bnc" id="L212" title="All 2 branches missed.">			if (parameterValue.getSqlType() != SqlTypeValue.TYPE_UNKNOWN) {</span>
+<span class="nc" id="L213">				sqlTypeToUse = parameterValue.getSqlType();</span>
+			}
+<span class="nc bnc" id="L215" title="All 2 branches missed.">			if (parameterValue.getTypeName() != null) {</span>
+<span class="nc" id="L216">				typeNameToUse = parameterValue.getTypeName();</span>
+			}
+<span class="nc" id="L218">			inValueToUse = parameterValue.getValue();</span>
+		}
+
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">			logger.trace(&quot;Setting SQL statement parameter value: column index &quot; + paramIndex +</span>
+					&quot;, parameter value [&quot; + inValueToUse +
+<span class="nc bnc" id="L224" title="All 2 branches missed.">					&quot;], value class [&quot; + (inValueToUse != null ? inValueToUse.getClass().getName() : &quot;null&quot;) +</span>
+<span class="nc" id="L225">					&quot;], SQL type &quot; + (sqlTypeToUse == SqlTypeValue.TYPE_UNKNOWN ? &quot;unknown&quot; : Integer.toString(sqlTypeToUse)));</span>
+		}
+
+<span class="fc bfc" id="L228" title="All 2 branches covered.">		if (inValueToUse == null) {</span>
+<span class="fc" id="L229">			setNull(ps, paramIndex, sqlTypeToUse, typeNameToUse);</span>
+		}
+		else {
+<span class="fc" id="L232">			setValue(ps, paramIndex, sqlTypeToUse, typeNameToUse, scale, inValueToUse);</span>
+		}
+<span class="fc" id="L234">	}</span>
+
+	/**
+	 * Set the specified PreparedStatement parameter to null,
+	 * respecting database-specific peculiarities.
+	 */
+	private static void setNull(PreparedStatement ps, int paramIndex, int sqlType, @Nullable String typeName)
+			throws SQLException {
+
+<span class="pc bpc" id="L243" title="1 of 6 branches missed.">		if (sqlType == SqlTypeValue.TYPE_UNKNOWN || (sqlType == Types.OTHER &amp;&amp; typeName == null)) {</span>
+<span class="fc" id="L244">			boolean useSetObject = false;</span>
+<span class="fc" id="L245">			Integer sqlTypeToUse = null;</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">			if (!shouldIgnoreGetParameterType) {</span>
+				try {
+<span class="fc" id="L248">					sqlTypeToUse = ps.getParameterMetaData().getParameterType(paramIndex);</span>
+				}
+<span class="nc" id="L250">				catch (SQLException ex) {</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L252">						logger.debug(&quot;JDBC getParameterType call failed - using fallback method instead: &quot; + ex);</span>
+					}
+<span class="fc" id="L254">				}</span>
+			}
+<span class="fc bfc" id="L256" title="All 2 branches covered.">			if (sqlTypeToUse == null) {</span>
+				// Proceed with database-specific checks
+<span class="fc" id="L258">				sqlTypeToUse = Types.NULL;</span>
+<span class="fc" id="L259">				DatabaseMetaData dbmd = ps.getConnection().getMetaData();</span>
+<span class="fc" id="L260">				String jdbcDriverName = dbmd.getDriverName();</span>
+<span class="fc" id="L261">				String databaseProductName = dbmd.getDatabaseProductName();</span>
+<span class="fc bfc" id="L262" title="All 2 branches covered.">				if (databaseProductName.startsWith(&quot;Informix&quot;) ||</span>
+<span class="pc bpc" id="L263" title="3 of 4 branches missed.">						(jdbcDriverName.startsWith(&quot;Microsoft&quot;) &amp;&amp; jdbcDriverName.contains(&quot;SQL Server&quot;))) {</span>
+						// &quot;Microsoft SQL Server JDBC Driver 3.0&quot; versus &quot;Microsoft JDBC Driver 4.0 for SQL Server&quot;
+<span class="fc" id="L265">					useSetObject = true;</span>
+				}
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">				else if (databaseProductName.startsWith(&quot;DB2&quot;) ||</span>
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">						jdbcDriverName.startsWith(&quot;jConnect&quot;) ||</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">						jdbcDriverName.startsWith(&quot;SQLServer&quot;)||</span>
+<span class="fc bfc" id="L270" title="All 2 branches covered.">						jdbcDriverName.startsWith(&quot;Apache Derby&quot;)) {</span>
+<span class="fc" id="L271">					sqlTypeToUse = Types.VARCHAR;</span>
+				}
+			}
+<span class="fc bfc" id="L274" title="All 2 branches covered.">			if (useSetObject) {</span>
+<span class="fc" id="L275">				ps.setObject(paramIndex, null);</span>
+			}
+			else {
+<span class="fc" id="L278">				ps.setNull(paramIndex, sqlTypeToUse);</span>
+			}
+<span class="fc" id="L280">		}</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">		else if (typeName != null) {</span>
+<span class="fc" id="L282">			ps.setNull(paramIndex, sqlType, typeName);</span>
+		}
+		else {
+<span class="fc" id="L285">			ps.setNull(paramIndex, sqlType);</span>
+		}
+<span class="fc" id="L287">	}</span>
+
+	private static void setValue(PreparedStatement ps, int paramIndex, int sqlType,
+			@Nullable String typeName, @Nullable Integer scale, Object inValue) throws SQLException {
+
+<span class="fc bfc" id="L292" title="All 2 branches covered.">		if (inValue instanceof SqlTypeValue) {</span>
+<span class="fc" id="L293">			((SqlTypeValue) inValue).setTypeValue(ps, paramIndex, sqlType, typeName);</span>
+		}
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">		else if (inValue instanceof SqlValue) {</span>
+<span class="nc" id="L296">			((SqlValue) inValue).setValue(ps, paramIndex);</span>
+		}
+<span class="pc bpc" id="L298" title="1 of 4 branches missed.">		else if (sqlType == Types.VARCHAR || sqlType == Types.LONGVARCHAR ) {</span>
+<span class="fc" id="L299">			ps.setString(paramIndex, inValue.toString());</span>
+		}
+<span class="pc bpc" id="L301" title="2 of 4 branches missed.">		else if (sqlType == Types.NVARCHAR || sqlType == Types.LONGNVARCHAR) {</span>
+<span class="nc" id="L302">			ps.setNString(paramIndex, inValue.toString());</span>
+		}
+<span class="pc bpc" id="L304" title="4 of 6 branches missed.">		else if ((sqlType == Types.CLOB || sqlType == Types.NCLOB) &amp;&amp; isStringValue(inValue.getClass())) {</span>
+<span class="nc" id="L305">			String strVal = inValue.toString();</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">			if (strVal.length() &gt; 4000) {</span>
+				// Necessary for older Oracle drivers, in particular when running against an Oracle 10 database.
+				// Should also work fine against other drivers/databases since it uses standard JDBC 4.0 API.
+<span class="nc bnc" id="L309" title="All 2 branches missed.">				if (sqlType == Types.NCLOB) {</span>
+<span class="nc" id="L310">					ps.setNClob(paramIndex, new StringReader(strVal), strVal.length());</span>
+				}
+				else {
+<span class="nc" id="L313">					ps.setClob(paramIndex, new StringReader(strVal), strVal.length());</span>
+				}
+<span class="nc" id="L315">				return;</span>
+			}
+			else {
+				// Fallback: setString or setNString binding
+<span class="nc bnc" id="L319" title="All 2 branches missed.">				if (sqlType == Types.NCLOB) {</span>
+<span class="nc" id="L320">					ps.setNString(paramIndex, strVal);</span>
+				}
+				else {
+<span class="nc" id="L323">					ps.setString(paramIndex, strVal);</span>
+				}
+			}
+<span class="nc" id="L326">		}</span>
+<span class="fc bfc" id="L327" title="All 4 branches covered.">		else if (sqlType == Types.DECIMAL || sqlType == Types.NUMERIC) {</span>
+<span class="pc bpc" id="L328" title="1 of 2 branches missed.">			if (inValue instanceof BigDecimal) {</span>
+<span class="nc" id="L329">				ps.setBigDecimal(paramIndex, (BigDecimal) inValue);</span>
+			}
+<span class="fc bfc" id="L331" title="All 2 branches covered.">			else if (scale != null) {</span>
+<span class="fc" id="L332">				ps.setObject(paramIndex, inValue, sqlType, scale);</span>
+			}
+			else {
+<span class="fc" id="L335">				ps.setObject(paramIndex, inValue, sqlType);</span>
+			}
+		}
+<span class="fc bfc" id="L338" title="All 2 branches covered.">		else if (sqlType == Types.BOOLEAN) {</span>
+<span class="pc bpc" id="L339" title="1 of 2 branches missed.">			if (inValue instanceof Boolean) {</span>
+<span class="fc" id="L340">				ps.setBoolean(paramIndex, (Boolean) inValue);</span>
+			}
+			else {
+<span class="nc" id="L343">				ps.setObject(paramIndex, inValue, Types.BOOLEAN);</span>
+			}
+		}
+<span class="fc bfc" id="L346" title="All 2 branches covered.">		else if (sqlType == Types.DATE) {</span>
+<span class="fc bfc" id="L347" title="All 2 branches covered.">			if (inValue instanceof java.util.Date) {</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">				if (inValue instanceof java.sql.Date) {</span>
+<span class="fc" id="L349">					ps.setDate(paramIndex, (java.sql.Date) inValue);</span>
+				}
+				else {
+<span class="fc" id="L352">					ps.setDate(paramIndex, new java.sql.Date(((java.util.Date) inValue).getTime()));</span>
+				}
+			}
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">			else if (inValue instanceof Calendar) {</span>
+<span class="fc" id="L356">				Calendar cal = (Calendar) inValue;</span>
+<span class="fc" id="L357">				ps.setDate(paramIndex, new java.sql.Date(cal.getTime().getTime()), cal);</span>
+<span class="fc" id="L358">			}</span>
+			else {
+<span class="nc" id="L360">				ps.setObject(paramIndex, inValue, Types.DATE);</span>
+			}
+		}
+<span class="fc bfc" id="L363" title="All 2 branches covered.">		else if (sqlType == Types.TIME) {</span>
+<span class="fc bfc" id="L364" title="All 2 branches covered.">			if (inValue instanceof java.util.Date) {</span>
+<span class="fc bfc" id="L365" title="All 2 branches covered.">				if (inValue instanceof java.sql.Time) {</span>
+<span class="fc" id="L366">					ps.setTime(paramIndex, (java.sql.Time) inValue);</span>
+				}
+				else {
+<span class="fc" id="L369">					ps.setTime(paramIndex, new java.sql.Time(((java.util.Date) inValue).getTime()));</span>
+				}
+			}
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">			else if (inValue instanceof Calendar) {</span>
+<span class="fc" id="L373">				Calendar cal = (Calendar) inValue;</span>
+<span class="fc" id="L374">				ps.setTime(paramIndex, new java.sql.Time(cal.getTime().getTime()), cal);</span>
+<span class="fc" id="L375">			}</span>
+			else {
+<span class="nc" id="L377">				ps.setObject(paramIndex, inValue, Types.TIME);</span>
+			}
+		}
+<span class="fc bfc" id="L380" title="All 2 branches covered.">		else if (sqlType == Types.TIMESTAMP) {</span>
+<span class="fc bfc" id="L381" title="All 2 branches covered.">			if (inValue instanceof java.util.Date) {</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">				if (inValue instanceof java.sql.Timestamp) {</span>
+<span class="fc" id="L383">					ps.setTimestamp(paramIndex, (java.sql.Timestamp) inValue);</span>
+				}
+				else {
+<span class="fc" id="L386">					ps.setTimestamp(paramIndex, new java.sql.Timestamp(((java.util.Date) inValue).getTime()));</span>
+				}
+			}
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">			else if (inValue instanceof Calendar) {</span>
+<span class="fc" id="L390">				Calendar cal = (Calendar) inValue;</span>
+<span class="fc" id="L391">				ps.setTimestamp(paramIndex, new java.sql.Timestamp(cal.getTime().getTime()), cal);</span>
+<span class="fc" id="L392">			}</span>
+			else {
+<span class="nc" id="L394">				ps.setObject(paramIndex, inValue, Types.TIMESTAMP);</span>
+			}
+		}
+<span class="fc bfc" id="L397" title="All 4 branches covered.">		else if (sqlType == SqlTypeValue.TYPE_UNKNOWN || (sqlType == Types.OTHER &amp;&amp;</span>
+<span class="pc bpc" id="L398" title="1 of 2 branches missed.">				&quot;Oracle&quot;.equals(ps.getConnection().getMetaData().getDatabaseProductName()))) {</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">			if (isStringValue(inValue.getClass())) {</span>
+<span class="fc" id="L400">				ps.setString(paramIndex, inValue.toString());</span>
+			}
+<span class="fc bfc" id="L402" title="All 2 branches covered.">			else if (isDateValue(inValue.getClass())) {</span>
+<span class="fc" id="L403">				ps.setTimestamp(paramIndex, new java.sql.Timestamp(((java.util.Date) inValue).getTime()));</span>
+			}
+<span class="fc bfc" id="L405" title="All 2 branches covered.">			else if (inValue instanceof Calendar) {</span>
+<span class="fc" id="L406">				Calendar cal = (Calendar) inValue;</span>
+<span class="fc" id="L407">				ps.setTimestamp(paramIndex, new java.sql.Timestamp(cal.getTime().getTime()), cal);</span>
+<span class="fc" id="L408">			}</span>
+			else {
+				// Fall back to generic setObject call without SQL type specified.
+<span class="fc" id="L411">				ps.setObject(paramIndex, inValue);</span>
+			}
+		}
+		else {
+			// Fall back to generic setObject call with SQL type specified.
+<span class="fc" id="L416">			ps.setObject(paramIndex, inValue, sqlType);</span>
+		}
+<span class="fc" id="L418">	}</span>
+
+	/**
+	 * Check whether the given value can be treated as a String value.
+	 */
+	private static boolean isStringValue(Class&lt;?&gt; inValueType) {
+		// Consider any CharSequence (including StringBuffer and StringBuilder) as a String.
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		return (CharSequence.class.isAssignableFrom(inValueType) ||</span>
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">				StringWriter.class.isAssignableFrom(inValueType));</span>
+	}
+
+	/**
+	 * Check whether the given value is a {@code java.util.Date}
+	 * (but not one of the JDBC-specific subclasses).
+	 */
+	private static boolean isDateValue(Class&lt;?&gt; inValueType) {
+<span class="fc bfc" id="L434" title="All 2 branches covered.">		return (java.util.Date.class.isAssignableFrom(inValueType) &amp;&amp;</span>
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">				!(java.sql.Date.class.isAssignableFrom(inValueType) ||</span>
+<span class="pc bpc" id="L436" title="1 of 2 branches missed.">						java.sql.Time.class.isAssignableFrom(inValueType) ||</span>
+<span class="pc bpc" id="L437" title="1 of 2 branches missed.">						java.sql.Timestamp.class.isAssignableFrom(inValueType)));</span>
+	}
+
+	/**
+	 * Clean up all resources held by parameter values which were passed to an
+	 * execute method. This is for example important for closing LOB values.
+	 * @param paramValues parameter values supplied. May be {@code null}.
+	 * @see DisposableSqlTypeValue#cleanup()
+	 * @see org.springframework.jdbc.core.support.SqlLobValue#cleanup()
+	 */
+	public static void cleanupParameters(@Nullable Object... paramValues) {
+<span class="fc bfc" id="L448" title="All 2 branches covered.">		if (paramValues != null) {</span>
+<span class="fc" id="L449">			cleanupParameters(Arrays.asList(paramValues));</span>
+		}
+<span class="fc" id="L451">	}</span>
+
+	/**
+	 * Clean up all resources held by parameter values which were passed to an
+	 * execute method. This is for example important for closing LOB values.
+	 * @param paramValues parameter values supplied. May be {@code null}.
+	 * @see DisposableSqlTypeValue#cleanup()
+	 * @see org.springframework.jdbc.core.support.SqlLobValue#cleanup()
+	 */
+	public static void cleanupParameters(@Nullable Collection&lt;?&gt; paramValues) {
+<span class="pc bpc" id="L461" title="1 of 2 branches missed.">		if (paramValues != null) {</span>
+<span class="fc bfc" id="L462" title="All 2 branches covered.">			for (Object inValue : paramValues) {</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">				if (inValue instanceof DisposableSqlTypeValue) {</span>
+<span class="nc" id="L464">					((DisposableSqlTypeValue) inValue).cleanup();</span>
+				}
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">				else if (inValue instanceof SqlValue) {</span>
+<span class="nc" id="L467">					((SqlValue) inValue).cleanup();</span>
+				}
+<span class="fc" id="L469">			}</span>
+		}
+<span class="fc" id="L471">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

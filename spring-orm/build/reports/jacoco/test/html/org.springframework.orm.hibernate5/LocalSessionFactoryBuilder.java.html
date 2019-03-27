@@ -1,0 +1,485 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalSessionFactoryBuilder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.hibernate5</a> &gt; <span class="el_source">LocalSessionFactoryBuilder.java</span></div><h1>LocalSessionFactoryBuilder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.hibernate5;
+
+import java.io.IOException;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.Collections;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import javax.persistence.AttributeConverter;
+import javax.persistence.Converter;
+import javax.persistence.Embeddable;
+import javax.persistence.Entity;
+import javax.persistence.MappedSuperclass;
+import javax.sql.DataSource;
+import javax.transaction.TransactionManager;
+
+import org.hibernate.HibernateException;
+import org.hibernate.MappingException;
+import org.hibernate.SessionFactory;
+import org.hibernate.boot.MetadataSources;
+import org.hibernate.boot.registry.BootstrapServiceRegistryBuilder;
+import org.hibernate.cache.spi.RegionFactory;
+import org.hibernate.cfg.AvailableSettings;
+import org.hibernate.cfg.Configuration;
+import org.hibernate.context.spi.CurrentTenantIdentifierResolver;
+import org.hibernate.engine.jdbc.connections.spi.MultiTenantConnectionProvider;
+import org.hibernate.engine.spi.SessionFactoryImplementor;
+
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.core.InfrastructureProxy;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternUtils;
+import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.core.type.classreading.CachingMetadataReaderFactory;
+import org.springframework.core.type.classreading.MetadataReader;
+import org.springframework.core.type.classreading.MetadataReaderFactory;
+import org.springframework.core.type.filter.AnnotationTypeFilter;
+import org.springframework.core.type.filter.TypeFilter;
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.jta.JtaTransactionManager;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * A Spring-provided extension of the standard Hibernate {@link Configuration} class,
+ * adding {@link SpringSessionContext} as a default and providing convenient ways
+ * to specify a JDBC {@link DataSource} and an application class loader.
+ *
+ * &lt;p&gt;This is designed for programmatic use, e.g. in {@code @Bean} factory methods;
+ * consider using {@link LocalSessionFactoryBean} for XML bean definition files.
+ * Typically combined with {@link HibernateTransactionManager} for declarative
+ * transactions against the {@code SessionFactory} and its JDBC {@code DataSource}.
+ *
+ * &lt;p&gt;Compatible with Hibernate 5.0/5.1 as well as 5.2/5.3, as of Spring 5.1.
+ * Set up with Hibernate 5.2/5.3, this builder is also a convenient way to set up
+ * a JPA {@code EntityManagerFactory} since the Hibernate {@code SessionFactory}
+ * natively exposes the JPA {@code EntityManagerFactory} interface as well now.
+ *
+ * &lt;p&gt;This builder supports Hibernate 5.3 {@code BeanContainer} integration,
+ * {@link MetadataSources} from custom {@link BootstrapServiceRegistryBuilder}
+ * setup, as well as other advanced Hibernate configuration options beyond the
+ * standard JPA bootstrap contract.
+ *
+ * @author Juergen Hoeller
+ * @since 4.2
+ * @see HibernateTransactionManager
+ * @see LocalSessionFactoryBean
+ * @see #setBeanContainer
+ * @see #LocalSessionFactoryBuilder(DataSource, ResourceLoader, MetadataSources)
+ * @see BootstrapServiceRegistryBuilder
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class LocalSessionFactoryBuilder extends Configuration {
+
+	private static final String RESOURCE_PATTERN = &quot;/**/*.class&quot;;
+
+	private static final String PACKAGE_INFO_SUFFIX = &quot;.package-info&quot;;
+
+<span class="fc" id="L103">	private static final TypeFilter[] DEFAULT_ENTITY_TYPE_FILTERS = new TypeFilter[] {</span>
+			new AnnotationTypeFilter(Entity.class, false),
+			new AnnotationTypeFilter(Embeddable.class, false),
+			new AnnotationTypeFilter(MappedSuperclass.class, false)};
+
+<span class="fc" id="L108">	private static final TypeFilter CONVERTER_TYPE_FILTER = new AnnotationTypeFilter(Converter.class, false);</span>
+
+
+	private final ResourcePatternResolver resourcePatternResolver;
+
+<span class="fc" id="L113">	@Nullable</span>
+	private TypeFilter[] entityTypeFilters = DEFAULT_ENTITY_TYPE_FILTERS;
+
+
+	/**
+	 * Create a new LocalSessionFactoryBuilder for the given DataSource.
+	 * @param dataSource the JDBC DataSource that the resulting Hibernate SessionFactory should be using
+	 * (may be {@code null})
+	 */
+	public LocalSessionFactoryBuilder(@Nullable DataSource dataSource) {
+<span class="nc" id="L123">		this(dataSource, new PathMatchingResourcePatternResolver());</span>
+<span class="nc" id="L124">	}</span>
+
+	/**
+	 * Create a new LocalSessionFactoryBuilder for the given DataSource.
+	 * @param dataSource the JDBC DataSource that the resulting Hibernate SessionFactory should be using
+	 * (may be {@code null})
+	 * @param classLoader the ClassLoader to load application classes from
+	 */
+	public LocalSessionFactoryBuilder(@Nullable DataSource dataSource, ClassLoader classLoader) {
+<span class="nc" id="L133">		this(dataSource, new PathMatchingResourcePatternResolver(classLoader));</span>
+<span class="nc" id="L134">	}</span>
+
+	/**
+	 * Create a new LocalSessionFactoryBuilder for the given DataSource.
+	 * @param dataSource the JDBC DataSource that the resulting Hibernate SessionFactory should be using
+	 * (may be {@code null})
+	 * @param resourceLoader the ResourceLoader to load application classes from
+	 */
+	public LocalSessionFactoryBuilder(@Nullable DataSource dataSource, ResourceLoader resourceLoader) {
+<span class="nc" id="L143">		this(dataSource, resourceLoader, new MetadataSources(</span>
+<span class="nc" id="L144">				new BootstrapServiceRegistryBuilder().applyClassLoader(resourceLoader.getClassLoader()).build()));</span>
+<span class="nc" id="L145">	}</span>
+
+	/**
+	 * Create a new LocalSessionFactoryBuilder for the given DataSource.
+	 * @param dataSource the JDBC DataSource that the resulting Hibernate SessionFactory should be using
+	 * (may be {@code null})
+	 * @param resourceLoader the ResourceLoader to load application classes from
+	 * @param metadataSources the Hibernate MetadataSources service to use (e.g. reusing an existing one)
+	 * @since 4.3
+	 */
+	public LocalSessionFactoryBuilder(
+			@Nullable DataSource dataSource, ResourceLoader resourceLoader, MetadataSources metadataSources) {
+
+<span class="fc" id="L158">		super(metadataSources);</span>
+
+<span class="fc" id="L160">		getProperties().put(AvailableSettings.CURRENT_SESSION_CONTEXT_CLASS, SpringSessionContext.class.getName());</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">		if (dataSource != null) {</span>
+<span class="fc" id="L162">			getProperties().put(AvailableSettings.DATASOURCE, dataSource);</span>
+		}
+
+		// Hibernate 5.1/5.2: manually enforce connection release mode ON_CLOSE (the former default)
+		try {
+			// Try Hibernate 5.2
+<span class="fc" id="L168">			AvailableSettings.class.getField(&quot;CONNECTION_HANDLING&quot;);</span>
+<span class="fc" id="L169">			getProperties().put(&quot;hibernate.connection.handling_mode&quot;, &quot;DELAYED_ACQUISITION_AND_HOLD&quot;);</span>
+		}
+<span class="nc" id="L171">		catch (NoSuchFieldException ex) {</span>
+			// Try Hibernate 5.1
+			try {
+<span class="nc" id="L174">				AvailableSettings.class.getField(&quot;ACQUIRE_CONNECTIONS&quot;);</span>
+<span class="nc" id="L175">				getProperties().put(&quot;hibernate.connection.release_mode&quot;, &quot;ON_CLOSE&quot;);</span>
+			}
+<span class="nc" id="L177">			catch (NoSuchFieldException ex2) {</span>
+				// on Hibernate 5.0.x or lower - no need to change the default there
+<span class="nc" id="L179">			}</span>
+<span class="fc" id="L180">		}</span>
+
+<span class="fc" id="L182">		getProperties().put(AvailableSettings.CLASSLOADERS, Collections.singleton(resourceLoader.getClassLoader()));</span>
+<span class="fc" id="L183">		this.resourcePatternResolver = ResourcePatternUtils.getResourcePatternResolver(resourceLoader);</span>
+<span class="fc" id="L184">	}</span>
+
+
+	/**
+	 * Set the Spring {@link JtaTransactionManager} or the JTA {@link TransactionManager}
+	 * to be used with Hibernate, if any. Allows for using a Spring-managed transaction
+	 * manager for Hibernate 5's session and cache synchronization, with the
+	 * &quot;hibernate.transaction.jta.platform&quot; automatically set to it.
+	 * &lt;p&gt;A passed-in Spring {@link JtaTransactionManager} needs to contain a JTA
+	 * {@link TransactionManager} reference to be usable here, except for the WebSphere
+	 * case where we'll automatically set {@code WebSphereExtendedJtaPlatform} accordingly.
+	 * &lt;p&gt;Note: If this is set, the Hibernate settings should not contain a JTA platform
+	 * setting to avoid meaningless double configuration.
+	 */
+	public LocalSessionFactoryBuilder setJtaTransactionManager(Object jtaTransactionManager) {
+<span class="nc" id="L199">		Assert.notNull(jtaTransactionManager, &quot;Transaction manager reference must not be null&quot;);</span>
+
+<span class="nc bnc" id="L201" title="All 2 branches missed.">		if (jtaTransactionManager instanceof JtaTransactionManager) {</span>
+<span class="nc" id="L202">			boolean webspherePresent = ClassUtils.isPresent(&quot;com.ibm.wsspi.uow.UOWManager&quot;, getClass().getClassLoader());</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">			if (webspherePresent) {</span>
+<span class="nc" id="L204">				getProperties().put(AvailableSettings.JTA_PLATFORM,</span>
+						&quot;org.hibernate.engine.transaction.jta.platform.internal.WebSphereExtendedJtaPlatform&quot;);
+			}
+			else {
+<span class="nc" id="L208">				JtaTransactionManager jtaTm = (JtaTransactionManager) jtaTransactionManager;</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">				if (jtaTm.getTransactionManager() == null) {</span>
+<span class="nc" id="L210">					throw new IllegalArgumentException(</span>
+							&quot;Can only apply JtaTransactionManager which has a TransactionManager reference set&quot;);
+				}
+<span class="nc" id="L213">				getProperties().put(AvailableSettings.JTA_PLATFORM,</span>
+<span class="nc" id="L214">						new ConfigurableJtaPlatform(jtaTm.getTransactionManager(), jtaTm.getUserTransaction(),</span>
+<span class="nc" id="L215">								jtaTm.getTransactionSynchronizationRegistry()));</span>
+			}
+<span class="nc" id="L217">		}</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">		else if (jtaTransactionManager instanceof TransactionManager) {</span>
+<span class="nc" id="L219">			getProperties().put(AvailableSettings.JTA_PLATFORM,</span>
+					new ConfigurableJtaPlatform((TransactionManager) jtaTransactionManager, null, null));
+		}
+		else {
+<span class="nc" id="L223">			throw new IllegalArgumentException(</span>
+<span class="nc" id="L224">					&quot;Unknown transaction manager type: &quot; + jtaTransactionManager.getClass().getName());</span>
+		}
+
+		// Hibernate 5.1/5.2: manually enforce connection release mode AFTER_STATEMENT (the JTA default)
+		try {
+			// Try Hibernate 5.2
+<span class="nc" id="L230">			AvailableSettings.class.getField(&quot;CONNECTION_HANDLING&quot;);</span>
+<span class="nc" id="L231">			getProperties().put(&quot;hibernate.connection.handling_mode&quot;, &quot;DELAYED_ACQUISITION_AND_RELEASE_AFTER_STATEMENT&quot;);</span>
+		}
+<span class="nc" id="L233">		catch (NoSuchFieldException ex) {</span>
+			// Try Hibernate 5.1
+			try {
+<span class="nc" id="L236">				AvailableSettings.class.getField(&quot;ACQUIRE_CONNECTIONS&quot;);</span>
+<span class="nc" id="L237">				getProperties().put(&quot;hibernate.connection.release_mode&quot;, &quot;AFTER_STATEMENT&quot;);</span>
+			}
+<span class="nc" id="L239">			catch (NoSuchFieldException ex2) {</span>
+				// on Hibernate 5.0.x or lower - no need to change the default there
+<span class="nc" id="L241">			}</span>
+<span class="nc" id="L242">		}</span>
+
+<span class="nc" id="L244">		return this;</span>
+	}
+
+	/**
+	 * Set a Hibernate {@link org.hibernate.resource.beans.container.spi.BeanContainer}
+	 * for the given Spring {@link ConfigurableListableBeanFactory}.
+	 * &lt;p&gt;Note: Bean container integration requires Hibernate 5.3 or higher.
+	 * It enables autowiring of Hibernate attribute converters and entity listeners.
+	 * @since 5.1
+	 * @see SpringBeanContainer
+	 * @see AvailableSettings#BEAN_CONTAINER
+	 */
+	public LocalSessionFactoryBuilder setBeanContainer(ConfigurableListableBeanFactory beanFactory) {
+<span class="fc" id="L257">		getProperties().put(AvailableSettings.BEAN_CONTAINER, new SpringBeanContainer(beanFactory));</span>
+<span class="fc" id="L258">		return this;</span>
+	}
+
+	/**
+	 * Set the Hibernate {@link RegionFactory} to use for the SessionFactory.
+	 * Allows for using a Spring-managed {@code RegionFactory} instance.
+	 * &lt;p&gt;Note: If this is set, the Hibernate settings should not define a
+	 * cache provider to avoid meaningless double configuration.
+	 * @since 5.1
+	 * @see AvailableSettings#CACHE_REGION_FACTORY
+	 */
+	public LocalSessionFactoryBuilder setCacheRegionFactory(RegionFactory cacheRegionFactory) {
+<span class="nc" id="L270">		getProperties().put(AvailableSettings.CACHE_REGION_FACTORY, cacheRegionFactory);</span>
+<span class="nc" id="L271">		return this;</span>
+	}
+
+	/**
+	 * Set a {@link MultiTenantConnectionProvider} to be passed on to the SessionFactory.
+	 * @since 4.3
+	 * @see AvailableSettings#MULTI_TENANT_CONNECTION_PROVIDER
+	 */
+	public LocalSessionFactoryBuilder setMultiTenantConnectionProvider(MultiTenantConnectionProvider multiTenantConnectionProvider) {
+<span class="nc" id="L280">		getProperties().put(AvailableSettings.MULTI_TENANT_CONNECTION_PROVIDER, multiTenantConnectionProvider);</span>
+<span class="nc" id="L281">		return this;</span>
+	}
+
+	/**
+	 * Overridden to reliably pass a {@link CurrentTenantIdentifierResolver} to the SessionFactory.
+	 * @since 4.3.2
+	 * @see AvailableSettings#MULTI_TENANT_IDENTIFIER_RESOLVER
+	 */
+	@Override
+	public void setCurrentTenantIdentifierResolver(CurrentTenantIdentifierResolver currentTenantIdentifierResolver) {
+<span class="nc" id="L291">		getProperties().put(AvailableSettings.MULTI_TENANT_IDENTIFIER_RESOLVER, currentTenantIdentifierResolver);</span>
+<span class="nc" id="L292">		super.setCurrentTenantIdentifierResolver(currentTenantIdentifierResolver);</span>
+<span class="nc" id="L293">	}</span>
+
+	/**
+	 * Specify custom type filters for Spring-based scanning for entity classes.
+	 * &lt;p&gt;Default is to search all specified packages for classes annotated with
+	 * {@code @javax.persistence.Entity}, {@code @javax.persistence.Embeddable}
+	 * or {@code @javax.persistence.MappedSuperclass}.
+	 * @see #scanPackages
+	 */
+	public LocalSessionFactoryBuilder setEntityTypeFilters(TypeFilter... entityTypeFilters) {
+<span class="nc" id="L303">		this.entityTypeFilters = entityTypeFilters;</span>
+<span class="nc" id="L304">		return this;</span>
+	}
+
+	/**
+	 * Add the given annotated classes in a batch.
+	 * @see #addAnnotatedClass
+	 * @see #scanPackages
+	 */
+	public LocalSessionFactoryBuilder addAnnotatedClasses(Class&lt;?&gt;... annotatedClasses) {
+<span class="fc bfc" id="L313" title="All 2 branches covered.">		for (Class&lt;?&gt; annotatedClass : annotatedClasses) {</span>
+<span class="fc" id="L314">			addAnnotatedClass(annotatedClass);</span>
+		}
+<span class="fc" id="L316">		return this;</span>
+	}
+
+	/**
+	 * Add the given annotated packages in a batch.
+	 * @see #addPackage
+	 * @see #scanPackages
+	 */
+	public LocalSessionFactoryBuilder addPackages(String... annotatedPackages) {
+<span class="nc bnc" id="L325" title="All 2 branches missed.">		for (String annotatedPackage : annotatedPackages) {</span>
+<span class="nc" id="L326">			addPackage(annotatedPackage);</span>
+		}
+<span class="nc" id="L328">		return this;</span>
+	}
+
+	/**
+	 * Perform Spring-based scanning for entity classes, registering them
+	 * as annotated classes with this {@code Configuration}.
+	 * @param packagesToScan one or more Java package names
+	 * @throws HibernateException if scanning fails for any reason
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public LocalSessionFactoryBuilder scanPackages(String... packagesToScan) throws HibernateException {
+<span class="nc" id="L339">		Set&lt;String&gt; entityClassNames = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L340">		Set&lt;String&gt; converterClassNames = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L341">		Set&lt;String&gt; packageNames = new TreeSet&lt;&gt;();</span>
+		try {
+<span class="nc bnc" id="L343" title="All 2 branches missed.">			for (String pkg : packagesToScan) {</span>
+<span class="nc" id="L344">				String pattern = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX +</span>
+<span class="nc" id="L345">						ClassUtils.convertClassNameToResourcePath(pkg) + RESOURCE_PATTERN;</span>
+<span class="nc" id="L346">				Resource[] resources = this.resourcePatternResolver.getResources(pattern);</span>
+<span class="nc" id="L347">				MetadataReaderFactory readerFactory = new CachingMetadataReaderFactory(this.resourcePatternResolver);</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">				for (Resource resource : resources) {</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">					if (resource.isReadable()) {</span>
+<span class="nc" id="L350">						MetadataReader reader = readerFactory.getMetadataReader(resource);</span>
+<span class="nc" id="L351">						String className = reader.getClassMetadata().getClassName();</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">						if (matchesEntityTypeFilter(reader, readerFactory)) {</span>
+<span class="nc" id="L353">							entityClassNames.add(className);</span>
+						}
+<span class="nc bnc" id="L355" title="All 2 branches missed.">						else if (CONVERTER_TYPE_FILTER.match(reader, readerFactory)) {</span>
+<span class="nc" id="L356">							converterClassNames.add(className);</span>
+						}
+<span class="nc bnc" id="L358" title="All 2 branches missed.">						else if (className.endsWith(PACKAGE_INFO_SUFFIX)) {</span>
+<span class="nc" id="L359">							packageNames.add(className.substring(0, className.length() - PACKAGE_INFO_SUFFIX.length()));</span>
+						}
+					}
+				}
+			}
+		}
+<span class="nc" id="L365">		catch (IOException ex) {</span>
+<span class="nc" id="L366">			throw new MappingException(&quot;Failed to scan classpath for unlisted classes&quot;, ex);</span>
+<span class="nc" id="L367">		}</span>
+		try {
+<span class="nc" id="L369">			ClassLoader cl = this.resourcePatternResolver.getClassLoader();</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">			for (String className : entityClassNames) {</span>
+<span class="nc" id="L371">				addAnnotatedClass(ClassUtils.forName(className, cl));</span>
+<span class="nc" id="L372">			}</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">			for (String className : converterClassNames) {</span>
+<span class="nc" id="L374">				addAttributeConverter((Class&lt;? extends AttributeConverter&lt;?, ?&gt;&gt;) ClassUtils.forName(className, cl));</span>
+<span class="nc" id="L375">			}</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">			for (String packageName : packageNames) {</span>
+<span class="nc" id="L377">				addPackage(packageName);</span>
+<span class="nc" id="L378">			}</span>
+		}
+<span class="nc" id="L380">		catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L381">			throw new MappingException(&quot;Failed to load annotated classes from classpath&quot;, ex);</span>
+<span class="nc" id="L382">		}</span>
+<span class="nc" id="L383">		return this;</span>
+	}
+
+	/**
+	 * Check whether any of the configured entity type filters matches
+	 * the current class descriptor contained in the metadata reader.
+	 */
+	private boolean matchesEntityTypeFilter(MetadataReader reader, MetadataReaderFactory readerFactory) throws IOException {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">		if (this.entityTypeFilters != null) {</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">			for (TypeFilter filter : this.entityTypeFilters) {</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">				if (filter.match(reader, readerFactory)) {</span>
+<span class="nc" id="L394">					return true;</span>
+				}
+			}
+		}
+<span class="nc" id="L398">		return false;</span>
+	}
+
+	/**
+	 * Build the Hibernate {@code SessionFactory} through background bootstrapping,
+	 * using the given executor for a parallel initialization phase
+	 * (e.g. a {@link org.springframework.core.task.SimpleAsyncTaskExecutor}).
+	 * &lt;p&gt;{@code SessionFactory} initialization will then switch into background
+	 * bootstrap mode, with a {@code SessionFactory} proxy immediately returned for
+	 * injection purposes instead of waiting for Hibernate's bootstrapping to complete.
+	 * However, note that the first actual call to a {@code SessionFactory} method will
+	 * then block until Hibernate's bootstrapping completed, if not ready by then.
+	 * For maximum benefit, make sure to avoid early {@code SessionFactory} calls
+	 * in init methods of related beans, even for metadata introspection purposes.
+	 * @since 4.3
+	 * @see #buildSessionFactory()
+	 */
+	public SessionFactory buildSessionFactory(AsyncTaskExecutor bootstrapExecutor) {
+<span class="nc" id="L416">		Assert.notNull(bootstrapExecutor, &quot;AsyncTaskExecutor must not be null&quot;);</span>
+<span class="nc" id="L417">		return (SessionFactory) Proxy.newProxyInstance(this.resourcePatternResolver.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {SessionFactoryImplementor.class, InfrastructureProxy.class},
+				new BootstrapSessionFactoryInvocationHandler(bootstrapExecutor));
+	}
+
+
+	/**
+	 * Proxy invocation handler for background bootstrapping, only enforcing
+	 * a fully initialized target {@code SessionFactory} when actually needed.
+	 * @since 4.3
+	 */
+	private class BootstrapSessionFactoryInvocationHandler implements InvocationHandler {
+
+		private final Future&lt;SessionFactory&gt; sessionFactoryFuture;
+
+<span class="nc" id="L432">		public BootstrapSessionFactoryInvocationHandler(AsyncTaskExecutor bootstrapExecutor) {</span>
+<span class="nc" id="L433">			this.sessionFactoryFuture = bootstrapExecutor.submit(</span>
+					(Callable&lt;SessionFactory&gt;) LocalSessionFactoryBuilder.this::buildSessionFactory);
+<span class="nc" id="L435">		}</span>
+
+		@Override
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			try {
+<span class="nc bnc" id="L440" title="All 2 branches missed.">				if (method.getName().equals(&quot;equals&quot;)) {</span>
+					// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L442" title="All 2 branches missed.">					return (proxy == args[0]);</span>
+				}
+<span class="nc bnc" id="L444" title="All 2 branches missed.">				else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+					// Use hashCode of EntityManagerFactory proxy.
+<span class="nc" id="L446">					return System.identityHashCode(proxy);</span>
+				}
+<span class="nc bnc" id="L448" title="All 2 branches missed.">				else if (method.getName().equals(&quot;getProperties&quot;)) {</span>
+<span class="nc" id="L449">					return getProperties();</span>
+				}
+<span class="nc bnc" id="L451" title="All 2 branches missed.">				else if (method.getName().equals(&quot;getWrappedObject&quot;)) {</span>
+					// Call coming in through InfrastructureProxy interface...
+<span class="nc" id="L453">					return getSessionFactory();</span>
+				}
+				// Regular delegation to the target SessionFactory,
+				// enforcing its full initialization...
+<span class="nc" id="L457">				return method.invoke(getSessionFactory(), args);</span>
+			}
+<span class="nc" id="L459">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L460">				throw ex.getTargetException();</span>
+			}
+		}
+
+		private SessionFactory getSessionFactory() {
+			try {
+<span class="nc" id="L466">				return this.sessionFactoryFuture.get();</span>
+			}
+<span class="nc" id="L468">			catch (InterruptedException ex) {</span>
+<span class="nc" id="L469">				Thread.currentThread().interrupt();</span>
+<span class="nc" id="L470">				throw new IllegalStateException(&quot;Interrupted during initialization of Hibernate SessionFactory&quot;, ex);</span>
+			}
+<span class="nc" id="L472">			catch (ExecutionException ex) {</span>
+<span class="nc" id="L473">				Throwable cause = ex.getCause();</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">				if (cause instanceof HibernateException) {</span>
+					// Rethrow a provider configuration exception (possibly with a nested cause) directly
+<span class="nc" id="L476">					throw (HibernateException) cause;</span>
+				}
+<span class="nc" id="L478">				throw new IllegalStateException(&quot;Failed to asynchronously initialize Hibernate SessionFactory: &quot; +</span>
+<span class="nc" id="L479">						ex.getMessage(), cause);</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

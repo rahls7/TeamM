@@ -1,0 +1,1039 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StompBrokerRelayMessageHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.stomp</a> &gt; <span class="el_source">StompBrokerRelayMessageHandler.java</span></div><h1>StompBrokerRelayMessageHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.stomp;
+
+import java.security.Principal;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageDeliveryException;
+import org.springframework.messaging.MessageHandler;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.SubscribableChannel;
+import org.springframework.messaging.simp.SimpLogging;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageType;
+import org.springframework.messaging.simp.broker.AbstractBrokerMessageHandler;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.messaging.support.MessageHeaderInitializer;
+import org.springframework.messaging.tcp.FixedIntervalReconnectStrategy;
+import org.springframework.messaging.tcp.TcpConnection;
+import org.springframework.messaging.tcp.TcpConnectionHandler;
+import org.springframework.messaging.tcp.TcpOperations;
+import org.springframework.messaging.tcp.reactor.ReactorNettyCodec;
+import org.springframework.messaging.tcp.reactor.ReactorNettyTcpClient;
+import org.springframework.util.Assert;
+import org.springframework.util.concurrent.ListenableFuture;
+import org.springframework.util.concurrent.ListenableFutureCallback;
+import org.springframework.util.concurrent.ListenableFutureTask;
+
+/**
+ * A {@link org.springframework.messaging.MessageHandler} that handles messages by
+ * forwarding them to a STOMP broker.
+ *
+ * &lt;p&gt;For each new {@link SimpMessageType#CONNECT CONNECT} message, an independent TCP
+ * connection to the broker is opened and used exclusively for all messages from the
+ * client that originated the CONNECT message. Messages from the same client are
+ * identified through the session id message header. Reversely, when the STOMP broker
+ * sends messages back on the TCP connection, those messages are enriched with the
+ * session id of the client and sent back downstream through the {@link MessageChannel}
+ * provided to the constructor.
+ *
+ * &lt;p&gt;This class also automatically opens a default &quot;system&quot; TCP connection to the
+ * message broker that is used for sending messages that originate from the server
+ * application (as opposed to from a client). Such messages are not associated with
+ * any client and therefore do not have a session id header. The &quot;system&quot; connection
+ * is effectively shared and cannot be used to receive messages. Several properties
+ * are provided to configure the &quot;system&quot; connection including:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link #setSystemLogin}&lt;/li&gt;
+ * &lt;li&gt;{@link #setSystemPasscode}&lt;/li&gt;
+ * &lt;li&gt;{@link #setSystemHeartbeatSendInterval}&lt;/li&gt;
+ * &lt;li&gt;{@link #setSystemHeartbeatReceiveInterval}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Rossen Stoyanchev
+ * @author Andy Wilkinson
+ * @since 4.0
+ */
+public class StompBrokerRelayMessageHandler extends AbstractBrokerMessageHandler {
+
+	/**
+	 * The system session ID.
+	 */
+	public static final String SYSTEM_SESSION_ID = &quot;_system_&quot;;
+
+	/** STOMP recommended error of margin for receiving heartbeats. */
+	private static final long HEARTBEAT_MULTIPLIER = 3;
+
+	/**
+	 * Heartbeat starts once CONNECTED frame with heartbeat settings is received.
+	 * If CONNECTED doesn't arrive within a minute, we'll close the connection.
+	 */
+	private static final int MAX_TIME_TO_CONNECTED_FRAME = 60 * 1000;
+
+<span class="fc" id="L98">	private static final byte[] EMPTY_PAYLOAD = new byte[0];</span>
+
+<span class="fc" id="L100">	private static final ListenableFutureTask&lt;Void&gt; EMPTY_TASK = new ListenableFutureTask&lt;&gt;(new VoidCallable());</span>
+
+	private static final Message&lt;byte[]&gt; HEARTBEAT_MESSAGE;
+
+
+	static {
+<span class="fc" id="L106">		EMPTY_TASK.run();</span>
+<span class="fc" id="L107">		StompHeaderAccessor accessor = StompHeaderAccessor.createForHeartbeat();</span>
+<span class="fc" id="L108">		HEARTBEAT_MESSAGE = MessageBuilder.createMessage(StompDecoder.HEARTBEAT_PAYLOAD, accessor.getMessageHeaders());</span>
+<span class="fc" id="L109">	}</span>
+
+
+<span class="fc" id="L112">	private String relayHost = &quot;127.0.0.1&quot;;</span>
+
+<span class="fc" id="L114">	private int relayPort = 61613;</span>
+
+<span class="fc" id="L116">	private String clientLogin = &quot;guest&quot;;</span>
+
+<span class="fc" id="L118">	private String clientPasscode = &quot;guest&quot;;</span>
+
+<span class="fc" id="L120">	private String systemLogin = &quot;guest&quot;;</span>
+
+<span class="fc" id="L122">	private String systemPasscode = &quot;guest&quot;;</span>
+
+<span class="fc" id="L124">	private long systemHeartbeatSendInterval = 10000;</span>
+
+<span class="fc" id="L126">	private long systemHeartbeatReceiveInterval = 10000;</span>
+
+<span class="fc" id="L128">	private final Map&lt;String, MessageHandler&gt; systemSubscriptions = new HashMap&lt;&gt;(4);</span>
+
+	@Nullable
+	private String virtualHost;
+
+	@Nullable
+	private TcpOperations&lt;byte[]&gt; tcpClient;
+
+	@Nullable
+	private MessageHeaderInitializer headerInitializer;
+
+<span class="fc" id="L139">	private final Stats stats = new Stats();</span>
+
+<span class="fc" id="L141">	private final Map&lt;String, StompConnectionHandler&gt; connectionHandlers = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Create a StompBrokerRelayMessageHandler instance with the given message channels
+	 * and destination prefixes.
+	 * @param inboundChannel the channel for receiving messages from clients (e.g. WebSocket clients)
+	 * @param outboundChannel the channel for sending messages to clients (e.g. WebSocket clients)
+	 * @param brokerChannel the channel for the application to send messages to the broker
+	 * @param destinationPrefixes the broker supported destination prefixes; destinations
+	 * that do not match the given prefix are ignored.
+	 */
+	public StompBrokerRelayMessageHandler(SubscribableChannel inboundChannel, MessageChannel outboundChannel,
+			SubscribableChannel brokerChannel, Collection&lt;String&gt; destinationPrefixes) {
+
+<span class="fc" id="L156">		super(inboundChannel, outboundChannel, brokerChannel, destinationPrefixes);</span>
+<span class="fc" id="L157">	}</span>
+
+
+	/**
+	 * Set the STOMP message broker host.
+	 */
+	public void setRelayHost(String relayHost) {
+<span class="fc" id="L164">		Assert.hasText(relayHost, &quot;relayHost must not be empty&quot;);</span>
+<span class="fc" id="L165">		this.relayHost = relayHost;</span>
+<span class="fc" id="L166">	}</span>
+
+	/**
+	 * Return the STOMP message broker host.
+	 */
+	public String getRelayHost() {
+<span class="nc" id="L172">		return this.relayHost;</span>
+	}
+
+	/**
+	 * Set the STOMP message broker port.
+	 */
+	public void setRelayPort(int relayPort) {
+<span class="fc" id="L179">		this.relayPort = relayPort;</span>
+<span class="fc" id="L180">	}</span>
+
+	/**
+	 * Return the STOMP message broker port.
+	 */
+	public int getRelayPort() {
+<span class="nc" id="L186">		return this.relayPort;</span>
+	}
+	/**
+	 * Set the login to use when creating connections to the STOMP broker on
+	 * behalf of connected clients.
+	 * &lt;p&gt;By default this is set to &quot;guest&quot;.
+	 * @see #setSystemLogin(String)
+	 */
+	public void setClientLogin(String clientLogin) {
+<span class="fc" id="L195">		Assert.hasText(clientLogin, &quot;clientLogin must not be empty&quot;);</span>
+<span class="fc" id="L196">		this.clientLogin = clientLogin;</span>
+<span class="fc" id="L197">	}</span>
+
+	/**
+	 * Return the configured login to use for connections to the STOMP broker
+	 * on behalf of connected clients.
+	 * @see #getSystemLogin()
+	 */
+	public String getClientLogin() {
+<span class="fc" id="L205">		return this.clientLogin;</span>
+	}
+
+	/**
+	 * Set the client passcode to use to create connections to the STOMP broker on
+	 * behalf of connected clients.
+	 * &lt;p&gt;By default this is set to &quot;guest&quot;.
+	 * @see #setSystemPasscode
+	 */
+	public void setClientPasscode(String clientPasscode) {
+<span class="fc" id="L215">		Assert.hasText(clientPasscode, &quot;clientPasscode must not be empty&quot;);</span>
+<span class="fc" id="L216">		this.clientPasscode = clientPasscode;</span>
+<span class="fc" id="L217">	}</span>
+
+	/**
+	 * Return the configured passcode to use for connections to the STOMP broker on
+	 * behalf of connected clients.
+	 * @see #getSystemPasscode()
+	 */
+	public String getClientPasscode() {
+<span class="fc" id="L225">		return this.clientPasscode;</span>
+	}
+
+	/**
+	 * Set the login for the shared &quot;system&quot; connection used to send messages to
+	 * the STOMP broker from within the application, i.e. messages not associated
+	 * with a specific client session (e.g. REST/HTTP request handling method).
+	 * &lt;p&gt;By default this is set to &quot;guest&quot;.
+	 */
+	public void setSystemLogin(String systemLogin) {
+<span class="fc" id="L235">		Assert.hasText(systemLogin, &quot;systemLogin must not be empty&quot;);</span>
+<span class="fc" id="L236">		this.systemLogin = systemLogin;</span>
+<span class="fc" id="L237">	}</span>
+
+	/**
+	 * Return the login used for the shared &quot;system&quot; connection to the STOMP broker.
+	 */
+	public String getSystemLogin() {
+<span class="fc" id="L243">		return this.systemLogin;</span>
+	}
+
+	/**
+	 * Set the passcode for the shared &quot;system&quot; connection used to send messages to
+	 * the STOMP broker from within the application, i.e. messages not associated
+	 * with a specific client session (e.g. REST/HTTP request handling method).
+	 * &lt;p&gt;By default this is set to &quot;guest&quot;.
+	 */
+	public void setSystemPasscode(String systemPasscode) {
+<span class="fc" id="L253">		this.systemPasscode = systemPasscode;</span>
+<span class="fc" id="L254">	}</span>
+
+	/**
+	 * Return the passcode used for the shared &quot;system&quot; connection to the STOMP broker.
+	 */
+	public String getSystemPasscode() {
+<span class="fc" id="L260">		return this.systemPasscode;</span>
+	}
+
+
+	/**
+	 * Set the interval, in milliseconds, at which the &quot;system&quot; connection will, in the
+	 * absence of any other data being sent, send a heartbeat to the STOMP broker. A value
+	 * of zero will prevent heartbeats from being sent to the broker.
+	 * &lt;p&gt;The default value is 10000.
+	 * &lt;p&gt;See class-level documentation for more information on the &quot;system&quot; connection.
+	 */
+	public void setSystemHeartbeatSendInterval(long systemHeartbeatSendInterval) {
+<span class="fc" id="L272">		this.systemHeartbeatSendInterval = systemHeartbeatSendInterval;</span>
+<span class="fc" id="L273">	}</span>
+
+	/**
+	 * Return the interval, in milliseconds, at which the &quot;system&quot; connection will
+	 * send heartbeats to the STOMP broker.
+	 */
+	public long getSystemHeartbeatSendInterval() {
+<span class="fc" id="L280">		return this.systemHeartbeatSendInterval;</span>
+	}
+
+	/**
+	 * Set the maximum interval, in milliseconds, at which the &quot;system&quot; connection
+	 * expects, in the absence of any other data, to receive a heartbeat from the STOMP
+	 * broker. A value of zero will configure the connection to expect not to receive
+	 * heartbeats from the broker.
+	 * &lt;p&gt;The default value is 10000.
+	 * &lt;p&gt;See class-level documentation for more information on the &quot;system&quot; connection.
+	 */
+	public void setSystemHeartbeatReceiveInterval(long heartbeatReceiveInterval) {
+<span class="fc" id="L292">		this.systemHeartbeatReceiveInterval = heartbeatReceiveInterval;</span>
+<span class="fc" id="L293">	}</span>
+
+	/**
+	 * Return the interval, in milliseconds, at which the &quot;system&quot; connection expects
+	 * to receive heartbeats from the STOMP broker.
+	 */
+	public long getSystemHeartbeatReceiveInterval() {
+<span class="fc" id="L300">		return this.systemHeartbeatReceiveInterval;</span>
+	}
+
+	/**
+	 * Configure one more destinations to subscribe to on the shared &quot;system&quot;
+	 * connection along with MessageHandler's to handle received messages.
+	 * &lt;p&gt;This is for internal use in a multi-application server scenario where
+	 * servers forward messages to each other (e.g. unresolved user destinations).
+	 * @param subscriptions the destinations to subscribe to.
+	 */
+	public void setSystemSubscriptions(@Nullable Map&lt;String, MessageHandler&gt; subscriptions) {
+<span class="fc" id="L311">		this.systemSubscriptions.clear();</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">		if (subscriptions != null) {</span>
+<span class="fc" id="L313">			this.systemSubscriptions.putAll(subscriptions);</span>
+		}
+<span class="fc" id="L315">	}</span>
+
+	/**
+	 * Return the configured map with subscriptions on the &quot;system&quot; connection.
+	 */
+	public Map&lt;String, MessageHandler&gt; getSystemSubscriptions() {
+<span class="fc" id="L321">		return this.systemSubscriptions;</span>
+	}
+
+	/**
+	 * Set the value of the &quot;host&quot; header to use in STOMP CONNECT frames. When this
+	 * property is configured, a &quot;host&quot; header will be added to every STOMP frame sent to
+	 * the STOMP broker. This may be useful for example in a cloud environment where the
+	 * actual host to which the TCP connection is established is different from the host
+	 * providing the cloud-based STOMP service.
+	 * &lt;p&gt;By default this property is not set.
+	 */
+	public void setVirtualHost(@Nullable String virtualHost) {
+<span class="fc" id="L333">		this.virtualHost = virtualHost;</span>
+<span class="fc" id="L334">	}</span>
+
+	/**
+	 * Return the configured virtual host value.
+	 */
+	@Nullable
+	public String getVirtualHost() {
+<span class="fc" id="L341">		return this.virtualHost;</span>
+	}
+
+	/**
+	 * Configure a TCP client for managing TCP connections to the STOMP broker.
+	 * &lt;p&gt;By default {@link ReactorNettyTcpClient} is used.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; when this property is used, any
+	 * {@link #setRelayHost(String) host} or {@link #setRelayPort(int) port}
+	 * specified are effectively ignored.
+	 */
+	public void setTcpClient(@Nullable TcpOperations&lt;byte[]&gt; tcpClient) {
+<span class="fc" id="L352">		this.tcpClient = tcpClient;</span>
+<span class="fc" id="L353">	}</span>
+
+	/**
+	 * Get the configured TCP client (never {@code null} unless not configured
+	 * invoked and this method is invoked before the handler is started and
+	 * hence a default implementation initialized).
+	 */
+	@Nullable
+	public TcpOperations&lt;byte[]&gt; getTcpClient() {
+<span class="nc" id="L362">		return this.tcpClient;</span>
+	}
+
+	/**
+	 * Configure a {@link MessageHeaderInitializer} to apply to the headers of all
+	 * messages created through the {@code StompBrokerRelayMessageHandler} that
+	 * are sent to the client outbound message channel.
+	 * &lt;p&gt;By default this property is not set.
+	 */
+	public void setHeaderInitializer(@Nullable MessageHeaderInitializer headerInitializer) {
+<span class="nc" id="L372">		this.headerInitializer = headerInitializer;</span>
+<span class="nc" id="L373">	}</span>
+
+	/**
+	 * Return the configured header initializer.
+	 */
+	@Nullable
+	public MessageHeaderInitializer getHeaderInitializer() {
+<span class="fc" id="L380">		return this.headerInitializer;</span>
+	}
+
+	/**
+	 * Return a String describing internal state and counters.
+	 */
+	public String getStatsInfo() {
+<span class="fc" id="L387">		return this.stats.toString();</span>
+	}
+
+	/**
+	 * Return the current count of TCP connection to the broker.
+	 */
+	public int getConnectionCount() {
+<span class="fc" id="L394">		return this.connectionHandlers.size();</span>
+	}
+
+
+	@Override
+	protected void startInternal() {
+<span class="fc bfc" id="L400" title="All 2 branches covered.">		if (this.tcpClient == null) {</span>
+<span class="fc" id="L401">			this.tcpClient = initTcpClient();</span>
+		}
+
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">		if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L405">			logger.info(&quot;Starting \&quot;system\&quot; session, &quot; + toString());</span>
+		}
+
+<span class="fc" id="L408">		StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.CONNECT);</span>
+<span class="fc" id="L409">		accessor.setAcceptVersion(&quot;1.1,1.2&quot;);</span>
+<span class="fc" id="L410">		accessor.setLogin(this.systemLogin);</span>
+<span class="fc" id="L411">		accessor.setPasscode(this.systemPasscode);</span>
+<span class="fc" id="L412">		accessor.setHeartbeat(this.systemHeartbeatSendInterval, this.systemHeartbeatReceiveInterval);</span>
+<span class="fc" id="L413">		String virtualHost = getVirtualHost();</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">		if (virtualHost != null) {</span>
+<span class="fc" id="L415">			accessor.setHost(virtualHost);</span>
+		}
+<span class="fc" id="L417">		accessor.setSessionId(SYSTEM_SESSION_ID);</span>
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L419">			logger.debug(&quot;Forwarding &quot; + accessor.getShortLogMessage(EMPTY_PAYLOAD));</span>
+		}
+
+<span class="fc" id="L422">		SystemStompConnectionHandler handler = new SystemStompConnectionHandler(accessor);</span>
+<span class="fc" id="L423">		this.connectionHandlers.put(handler.getSessionId(), handler);</span>
+
+<span class="fc" id="L425">		this.stats.incrementConnectCount();</span>
+<span class="fc" id="L426">		this.tcpClient.connect(handler, new FixedIntervalReconnectStrategy(5000));</span>
+<span class="fc" id="L427">	}</span>
+
+	private ReactorNettyTcpClient&lt;byte[]&gt; initTcpClient() {
+<span class="fc" id="L430">		StompDecoder decoder = new StompDecoder();</span>
+<span class="pc bpc" id="L431" title="1 of 2 branches missed.">		if (this.headerInitializer != null) {</span>
+<span class="nc" id="L432">			decoder.setHeaderInitializer(this.headerInitializer);</span>
+		}
+<span class="fc" id="L434">		ReactorNettyCodec&lt;byte[]&gt; codec = new StompReactorNettyCodec(decoder);</span>
+<span class="fc" id="L435">		ReactorNettyTcpClient&lt;byte[]&gt; client = new ReactorNettyTcpClient&lt;&gt;(this.relayHost, this.relayPort, codec);</span>
+<span class="fc" id="L436">		client.setLogger(SimpLogging.forLog(client.getLogger()));</span>
+<span class="fc" id="L437">		return client;</span>
+	}
+
+	@Override
+	protected void stopInternal() {
+<span class="fc" id="L442">		publishBrokerUnavailableEvent();</span>
+<span class="pc bpc" id="L443" title="1 of 2 branches missed.">		if (this.tcpClient != null) {</span>
+			try {
+<span class="fc" id="L445">				this.tcpClient.shutdown().get(5000, TimeUnit.MILLISECONDS);</span>
+			}
+<span class="nc" id="L447">			catch (Throwable ex) {</span>
+<span class="nc" id="L448">				logger.error(&quot;Error in shutdown of TCP client&quot;, ex);</span>
+<span class="fc" id="L449">			}</span>
+		}
+<span class="fc" id="L451">	}</span>
+
+	@Override
+	protected void handleMessageInternal(Message&lt;?&gt; message) {
+<span class="fc" id="L455">		String sessionId = SimpMessageHeaderAccessor.getSessionId(message.getHeaders());</span>
+
+<span class="fc bfc" id="L457" title="All 2 branches covered.">		if (!isBrokerAvailable()) {</span>
+<span class="pc bpc" id="L458" title="1 of 4 branches missed.">			if (sessionId == null || SYSTEM_SESSION_ID.equals(sessionId)) {</span>
+<span class="fc" id="L459">				throw new MessageDeliveryException(&quot;Message broker not active. Consider subscribing to &quot; +</span>
+						&quot;receive BrokerAvailabilityEvent's from an ApplicationListener Spring bean.&quot;);
+			}
+<span class="fc" id="L462">			StompConnectionHandler handler = this.connectionHandlers.get(sessionId);</span>
+<span class="fc bfc" id="L463" title="All 2 branches covered.">			if (handler != null) {</span>
+<span class="fc" id="L464">				handler.sendStompErrorFrameToClient(&quot;Broker not available.&quot;);</span>
+<span class="fc" id="L465">				handler.clearConnection();</span>
+			}
+			else {
+<span class="fc" id="L468">				StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.ERROR);</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">				if (getHeaderInitializer() != null) {</span>
+<span class="nc" id="L470">					getHeaderInitializer().initHeaders(accessor);</span>
+				}
+<span class="fc" id="L472">				accessor.setSessionId(sessionId);</span>
+<span class="fc" id="L473">				Principal user = SimpMessageHeaderAccessor.getUser(message.getHeaders());</span>
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">				if (user != null) {</span>
+<span class="fc" id="L475">					accessor.setUser(user);</span>
+				}
+<span class="fc" id="L477">				accessor.setMessage(&quot;Broker not available.&quot;);</span>
+<span class="fc" id="L478">				MessageHeaders headers = accessor.getMessageHeaders();</span>
+<span class="fc" id="L479">				getClientOutboundChannel().send(MessageBuilder.createMessage(EMPTY_PAYLOAD, headers));</span>
+			}
+<span class="fc" id="L481">			return;</span>
+		}
+
+		StompHeaderAccessor stompAccessor;
+		StompCommand command;
+
+<span class="fc" id="L487">		MessageHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, MessageHeaderAccessor.class);</span>
+<span class="pc bpc" id="L488" title="1 of 2 branches missed.">		if (accessor == null) {</span>
+<span class="nc" id="L489">			throw new IllegalStateException(</span>
+					&quot;No header accessor (not using the SimpMessagingTemplate?): &quot; + message);
+		}
+<span class="fc bfc" id="L492" title="All 2 branches covered.">		else if (accessor instanceof StompHeaderAccessor) {</span>
+<span class="fc" id="L493">			stompAccessor = (StompHeaderAccessor) accessor;</span>
+<span class="fc" id="L494">			command = stompAccessor.getCommand();</span>
+		}
+<span class="pc bpc" id="L496" title="1 of 2 branches missed.">		else if (accessor instanceof SimpMessageHeaderAccessor) {</span>
+<span class="fc" id="L497">			stompAccessor = StompHeaderAccessor.wrap(message);</span>
+<span class="fc" id="L498">			command = stompAccessor.getCommand();</span>
+<span class="pc bpc" id="L499" title="1 of 2 branches missed.">			if (command == null) {</span>
+<span class="fc" id="L500">				command = stompAccessor.updateStompCommandAsClientMessage();</span>
+			}
+		}
+		else {
+<span class="nc" id="L504">			throw new IllegalStateException(</span>
+<span class="nc" id="L505">					&quot;Unexpected header accessor type &quot; + accessor.getClass() + &quot; in &quot; + message);</span>
+		}
+
+<span class="fc bfc" id="L508" title="All 2 branches covered.">		if (sessionId == null) {</span>
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">			if (!SimpMessageType.MESSAGE.equals(stompAccessor.getMessageType())) {</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">				if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L511">					logger.error(&quot;Only STOMP SEND supported from within the server side. Ignoring &quot; + message);</span>
+				}
+<span class="nc" id="L513">				return;</span>
+			}
+<span class="fc" id="L515">			sessionId = SYSTEM_SESSION_ID;</span>
+<span class="fc" id="L516">			stompAccessor.setSessionId(sessionId);</span>
+		}
+
+<span class="fc" id="L519">		String destination = stompAccessor.getDestination();</span>
+<span class="pc bpc" id="L520" title="1 of 6 branches missed.">		if (command != null &amp;&amp; command.requiresDestination() &amp;&amp; !checkDestinationPrefix(destination)) {</span>
+<span class="fc" id="L521">			return;</span>
+		}
+
+<span class="fc bfc" id="L524" title="All 2 branches covered.">		if (StompCommand.CONNECT.equals(command)) {</span>
+<span class="pc bpc" id="L525" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L526">				logger.debug(stompAccessor.getShortLogMessage(EMPTY_PAYLOAD));</span>
+			}
+<span class="pc bpc" id="L528" title="1 of 2 branches missed.">			stompAccessor = (stompAccessor.isMutable() ? stompAccessor : StompHeaderAccessor.wrap(message));</span>
+<span class="fc" id="L529">			stompAccessor.setLogin(this.clientLogin);</span>
+<span class="fc" id="L530">			stompAccessor.setPasscode(this.clientPasscode);</span>
+<span class="fc bfc" id="L531" title="All 2 branches covered.">			if (getVirtualHost() != null) {</span>
+<span class="fc" id="L532">				stompAccessor.setHost(getVirtualHost());</span>
+			}
+<span class="fc" id="L534">			StompConnectionHandler handler = new StompConnectionHandler(sessionId, stompAccessor);</span>
+<span class="fc" id="L535">			this.connectionHandlers.put(sessionId, handler);</span>
+<span class="fc" id="L536">			this.stats.incrementConnectCount();</span>
+<span class="pc bpc" id="L537" title="1 of 2 branches missed.">			Assert.state(this.tcpClient != null, &quot;No TCP client available&quot;);</span>
+<span class="fc" id="L538">			this.tcpClient.connect(handler);</span>
+<span class="fc" id="L539">		}</span>
+<span class="fc bfc" id="L540" title="All 2 branches covered.">		else if (StompCommand.DISCONNECT.equals(command)) {</span>
+<span class="fc" id="L541">			StompConnectionHandler handler = this.connectionHandlers.get(sessionId);</span>
+<span class="pc bpc" id="L542" title="1 of 2 branches missed.">			if (handler == null) {</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L544">					logger.debug(&quot;Ignoring DISCONNECT in session &quot; + sessionId + &quot;. Connection already cleaned up.&quot;);</span>
+				}
+<span class="nc" id="L546">				return;</span>
+			}
+<span class="fc" id="L548">			this.stats.incrementDisconnectCount();</span>
+<span class="fc" id="L549">			handler.forward(message, stompAccessor);</span>
+<span class="fc" id="L550">		}</span>
+		else {
+<span class="fc" id="L552">			StompConnectionHandler handler = this.connectionHandlers.get(sessionId);</span>
+<span class="pc bpc" id="L553" title="1 of 2 branches missed.">			if (handler == null) {</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L555">					logger.debug(&quot;No TCP connection for session &quot; + sessionId + &quot; in &quot; + message);</span>
+				}
+<span class="nc" id="L557">				return;</span>
+			}
+<span class="fc" id="L559">			handler.forward(message, stompAccessor);</span>
+		}
+<span class="fc" id="L561">	}</span>
+
+	@Override
+	public String toString() {
+<span class="fc" id="L565">		return &quot;StompBrokerRelay[&quot; + getTcpClientInfo() + &quot;]&quot;;</span>
+	}
+
+	private String getTcpClientInfo() {
+<span class="pc bpc" id="L569" title="1 of 2 branches missed.">		return this.tcpClient != null ? this.tcpClient.toString() : this.relayHost + &quot;:&quot; + this.relayPort;</span>
+	}
+
+
+	private class StompConnectionHandler implements TcpConnectionHandler&lt;byte[]&gt; {
+
+		private final String sessionId;
+
+		private final boolean isRemoteClientSession;
+
+		private final StompHeaderAccessor connectHeaders;
+
+		private final MessageChannel outboundChannel;
+
+		@Nullable
+		private volatile TcpConnection&lt;byte[]&gt; tcpConnection;
+
+		private volatile boolean isStompConnected;
+
+
+		protected StompConnectionHandler(String sessionId, StompHeaderAccessor connectHeaders) {
+<span class="fc" id="L590">			this(sessionId, connectHeaders, true);</span>
+<span class="fc" id="L591">		}</span>
+
+<span class="fc" id="L593">		private StompConnectionHandler(String sessionId, StompHeaderAccessor connectHeaders, boolean isClientSession) {</span>
+<span class="fc" id="L594">			Assert.notNull(sessionId, &quot;'sessionId' must not be null&quot;);</span>
+<span class="fc" id="L595">			Assert.notNull(connectHeaders, &quot;'connectHeaders' must not be null&quot;);</span>
+<span class="fc" id="L596">			this.sessionId = sessionId;</span>
+<span class="fc" id="L597">			this.connectHeaders = connectHeaders;</span>
+<span class="fc" id="L598">			this.isRemoteClientSession = isClientSession;</span>
+<span class="fc" id="L599">			this.outboundChannel = getClientOutboundChannelForSession(sessionId);</span>
+<span class="fc" id="L600">		}</span>
+
+		public String getSessionId() {
+<span class="fc" id="L603">			return this.sessionId;</span>
+		}
+
+		@Nullable
+		protected TcpConnection&lt;byte[]&gt; getTcpConnection() {
+<span class="fc" id="L608">			return this.tcpConnection;</span>
+		}
+
+		@Override
+		public void afterConnected(TcpConnection&lt;byte[]&gt; connection) {
+<span class="pc bpc" id="L613" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L614">				logger.debug(&quot;TCP connection opened in session=&quot; + getSessionId());</span>
+			}
+<span class="fc" id="L616">			this.tcpConnection = connection;</span>
+<span class="fc" id="L617">			connection.onReadInactivity(() -&gt; {</span>
+<span class="nc bnc" id="L618" title="All 4 branches missed.">				if (this.tcpConnection != null &amp;&amp; !this.isStompConnected) {</span>
+<span class="nc" id="L619">					handleTcpConnectionFailure(&quot;No CONNECTED frame received in &quot; +</span>
+							MAX_TIME_TO_CONNECTED_FRAME + &quot; ms.&quot;, null);
+				}
+<span class="nc" id="L622">			}, MAX_TIME_TO_CONNECTED_FRAME);</span>
+<span class="fc" id="L623">			connection.send(MessageBuilder.createMessage(EMPTY_PAYLOAD, this.connectHeaders.getMessageHeaders()));</span>
+<span class="fc" id="L624">		}</span>
+
+		@Override
+		public void afterConnectFailure(Throwable ex) {
+<span class="fc" id="L628">			handleTcpConnectionFailure(&quot;Failed to connect: &quot; + ex.getMessage(), ex);</span>
+<span class="fc" id="L629">		}</span>
+
+		/**
+		 * Invoked when any TCP connectivity issue is detected, i.e. failure to establish
+		 * the TCP connection, failure to send a message, missed heartbeat, etc.
+		 */
+		protected void handleTcpConnectionFailure(String error, @Nullable Throwable ex) {
+<span class="pc bpc" id="L636" title="1 of 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L637">				logger.info(&quot;TCP connection failure in session &quot; + this.sessionId + &quot;: &quot; + error, ex);</span>
+			}
+			try {
+<span class="fc" id="L640">				sendStompErrorFrameToClient(error);</span>
+			}
+			finally {
+				try {
+<span class="fc" id="L644">					clearConnection();</span>
+				}
+<span class="nc" id="L646">				catch (Throwable ex2) {</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L648">						logger.debug(&quot;Failure while clearing TCP connection state in session &quot; + this.sessionId, ex2);</span>
+					}
+<span class="fc" id="L650">				}</span>
+			}
+<span class="fc" id="L652">		}</span>
+
+		private void sendStompErrorFrameToClient(String errorText) {
+<span class="fc bfc" id="L655" title="All 2 branches covered.">			if (this.isRemoteClientSession) {</span>
+<span class="fc" id="L656">				StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.ERROR);</span>
+<span class="pc bpc" id="L657" title="1 of 2 branches missed.">				if (getHeaderInitializer() != null) {</span>
+<span class="nc" id="L658">					getHeaderInitializer().initHeaders(accessor);</span>
+				}
+<span class="fc" id="L660">				accessor.setSessionId(this.sessionId);</span>
+<span class="fc" id="L661">				Principal user = this.connectHeaders.getUser();</span>
+<span class="fc bfc" id="L662" title="All 2 branches covered.">				if (user != null) {</span>
+<span class="fc" id="L663">					accessor.setUser(user);</span>
+				}
+<span class="fc" id="L665">				accessor.setMessage(errorText);</span>
+<span class="fc" id="L666">				accessor.setLeaveMutable(true);</span>
+<span class="fc" id="L667">				Message&lt;?&gt; errorMessage = MessageBuilder.createMessage(EMPTY_PAYLOAD, accessor.getMessageHeaders());</span>
+<span class="fc" id="L668">				handleInboundMessage(errorMessage);</span>
+			}
+<span class="fc" id="L670">		}</span>
+
+		protected void handleInboundMessage(Message&lt;?&gt; message) {
+<span class="pc bpc" id="L673" title="1 of 2 branches missed.">			if (this.isRemoteClientSession) {</span>
+<span class="fc" id="L674">				this.outboundChannel.send(message);</span>
+			}
+<span class="fc" id="L676">		}</span>
+
+		@Override
+		public void handleMessage(Message&lt;byte[]&gt; message) {
+<span class="fc" id="L680">			StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="pc bpc" id="L681" title="1 of 2 branches missed.">			Assert.state(accessor != null, &quot;No StompHeaderAccessor&quot;);</span>
+<span class="fc" id="L682">			accessor.setSessionId(this.sessionId);</span>
+<span class="fc" id="L683">			Principal user = this.connectHeaders.getUser();</span>
+<span class="fc bfc" id="L684" title="All 2 branches covered.">			if (user != null) {</span>
+<span class="fc" id="L685">				accessor.setUser(user);</span>
+			}
+
+<span class="fc" id="L688">			StompCommand command = accessor.getCommand();</span>
+<span class="fc bfc" id="L689" title="All 2 branches covered.">			if (StompCommand.CONNECTED.equals(command)) {</span>
+<span class="pc bpc" id="L690" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L691">					logger.debug(&quot;Received &quot; + accessor.getShortLogMessage(EMPTY_PAYLOAD));</span>
+				}
+<span class="fc" id="L693">				afterStompConnected(accessor);</span>
+			}
+<span class="pc bpc" id="L695" title="2 of 4 branches missed.">			else if (logger.isErrorEnabled() &amp;&amp; StompCommand.ERROR.equals(command)) {</span>
+<span class="nc" id="L696">				logger.error(&quot;Received &quot; + accessor.getShortLogMessage(message.getPayload()));</span>
+			}
+<span class="pc bpc" id="L698" title="1 of 2 branches missed.">			else if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L699">				logger.trace(&quot;Received &quot; + accessor.getDetailedLogMessage(message.getPayload()));</span>
+			}
+
+<span class="fc" id="L702">			handleInboundMessage(message);</span>
+<span class="fc" id="L703">		}</span>
+
+		/**
+		 * Invoked after the STOMP CONNECTED frame is received. At this point the
+		 * connection is ready for sending STOMP messages to the broker.
+		 */
+		protected void afterStompConnected(StompHeaderAccessor connectedHeaders) {
+<span class="fc" id="L710">			this.isStompConnected = true;</span>
+<span class="fc" id="L711">			stats.incrementConnectedCount();</span>
+<span class="fc" id="L712">			initHeartbeats(connectedHeaders);</span>
+<span class="fc" id="L713">		}</span>
+
+		private void initHeartbeats(StompHeaderAccessor connectedHeaders) {
+<span class="fc bfc" id="L716" title="All 2 branches covered.">			if (this.isRemoteClientSession) {</span>
+<span class="fc" id="L717">				return;</span>
+			}
+
+<span class="fc" id="L720">			TcpConnection&lt;byte[]&gt; con = this.tcpConnection;</span>
+<span class="pc bpc" id="L721" title="1 of 2 branches missed.">			Assert.state(con != null, &quot;No TcpConnection available&quot;);</span>
+
+<span class="fc" id="L723">			long clientSendInterval = this.connectHeaders.getHeartbeat()[0];</span>
+<span class="fc" id="L724">			long clientReceiveInterval = this.connectHeaders.getHeartbeat()[1];</span>
+<span class="fc" id="L725">			long serverSendInterval = connectedHeaders.getHeartbeat()[0];</span>
+<span class="fc" id="L726">			long serverReceiveInterval = connectedHeaders.getHeartbeat()[1];</span>
+
+<span class="pc bpc" id="L728" title="1 of 4 branches missed.">			if (clientSendInterval &gt; 0 &amp;&amp; serverReceiveInterval &gt; 0) {</span>
+<span class="nc" id="L729">				long interval = Math.max(clientSendInterval, serverReceiveInterval);</span>
+<span class="nc" id="L730">				con.onWriteInactivity(() -&gt;</span>
+<span class="nc" id="L731">						con.send(HEARTBEAT_MESSAGE).addCallback(</span>
+<span class="nc" id="L732">								result -&gt; {},</span>
+<span class="nc" id="L733">								ex -&gt; handleTcpConnectionFailure(</span>
+<span class="nc" id="L734">										&quot;Failed to forward heartbeat: &quot; + ex.getMessage(), ex)), interval);</span>
+			}
+<span class="pc bpc" id="L736" title="1 of 4 branches missed.">			if (clientReceiveInterval &gt; 0 &amp;&amp; serverSendInterval &gt; 0) {</span>
+<span class="nc" id="L737">				final long interval = Math.max(clientReceiveInterval, serverSendInterval) * HEARTBEAT_MULTIPLIER;</span>
+<span class="nc" id="L738">				con.onReadInactivity(</span>
+<span class="nc" id="L739">						() -&gt; handleTcpConnectionFailure(&quot;No messages received in &quot; + interval + &quot; ms.&quot;, null), interval);</span>
+			}
+<span class="fc" id="L741">		}</span>
+
+		@Override
+		public void handleFailure(Throwable ex) {
+<span class="nc bnc" id="L745" title="All 2 branches missed.">			if (this.tcpConnection != null) {</span>
+<span class="nc" id="L746">				handleTcpConnectionFailure(&quot;Transport failure: &quot; + ex.getMessage(), ex);</span>
+			}
+<span class="nc bnc" id="L748" title="All 2 branches missed.">			else if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L749">				logger.error(&quot;Transport failure: &quot; + ex);</span>
+			}
+<span class="nc" id="L751">		}</span>
+
+		@Override
+		public void afterConnectionClosed() {
+<span class="pc bpc" id="L755" title="1 of 2 branches missed.">			if (this.tcpConnection == null) {</span>
+<span class="nc" id="L756">				return;</span>
+			}
+			try {
+<span class="pc bpc" id="L759" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L760">					logger.debug(&quot;TCP connection to broker closed in session &quot; + this.sessionId);</span>
+				}
+<span class="fc" id="L762">				sendStompErrorFrameToClient(&quot;Connection to broker closed.&quot;);</span>
+			}
+			finally {
+				try {
+					// Prevent clearConnection() from trying to close
+<span class="fc" id="L767">					this.tcpConnection = null;</span>
+<span class="fc" id="L768">					clearConnection();</span>
+				}
+<span class="nc" id="L770">				catch (Throwable ex) {</span>
+					// Shouldn't happen with connection reset beforehand
+<span class="fc" id="L772">				}</span>
+			}
+<span class="fc" id="L774">		}</span>
+
+		/**
+		 * Forward the given message to the STOMP broker.
+		 * &lt;p&gt;The method checks whether we have an active TCP connection and have
+		 * received the STOMP CONNECTED frame. For client messages this should be
+		 * false only if we lose the TCP connection around the same time when a
+		 * client message is being forwarded, so we simply log the ignored message
+		 * at debug level. For messages from within the application being sent on
+		 * the &quot;system&quot; connection an exception is raised so that components sending
+		 * the message have a chance to handle it -- by default the broker message
+		 * channel is synchronous.
+		 * &lt;p&gt;Note that if messages arrive concurrently around the same time a TCP
+		 * connection is lost, there is a brief period of time before the connection
+		 * is reset when one or more messages may sneak through and an attempt made
+		 * to forward them. Rather than synchronizing to guard against that, this
+		 * method simply lets them try and fail. For client sessions that may
+		 * result in an additional STOMP ERROR frame(s) being sent downstream but
+		 * code handling that downstream should be idempotent in such cases.
+		 * @param message the message to send (never {@code null})
+		 * @return a future to wait for the result
+		 */
+		@SuppressWarnings(&quot;unchecked&quot;)
+		public ListenableFuture&lt;Void&gt; forward(final Message&lt;?&gt; message, final StompHeaderAccessor accessor) {
+<span class="fc" id="L798">			TcpConnection&lt;byte[]&gt; conn = this.tcpConnection;</span>
+
+<span class="pc bpc" id="L800" title="2 of 4 branches missed.">			if (!this.isStompConnected || conn == null) {</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">				if (this.isRemoteClientSession) {</span>
+<span class="nc bnc" id="L802" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L803">						logger.debug(&quot;TCP connection closed already, ignoring &quot; +</span>
+<span class="nc" id="L804">								accessor.getShortLogMessage(message.getPayload()));</span>
+					}
+<span class="nc" id="L806">					return EMPTY_TASK;</span>
+				}
+				else {
+<span class="nc bnc" id="L809" title="All 2 branches missed.">					throw new IllegalStateException(&quot;Cannot forward messages &quot; +</span>
+							(conn != null ? &quot;before STOMP CONNECTED. &quot; : &quot;while inactive. &quot;) +
+							&quot;Consider subscribing to receive BrokerAvailabilityEvent's from &quot; +
+							&quot;an ApplicationListener Spring bean. Dropped &quot; +
+<span class="nc" id="L813">							accessor.getShortLogMessage(message.getPayload()));</span>
+				}
+			}
+
+<span class="pc bpc" id="L817" title="1 of 4 branches missed.">			final Message&lt;?&gt; messageToSend = (accessor.isMutable() &amp;&amp; accessor.isModified()) ?</span>
+<span class="fc" id="L818">					MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders()) : message;</span>
+
+<span class="fc" id="L820">			StompCommand command = accessor.getCommand();</span>
+<span class="pc bpc" id="L821" title="5 of 6 branches missed.">			if (logger.isDebugEnabled() &amp;&amp; (StompCommand.SEND.equals(command) || StompCommand.SUBSCRIBE.equals(command) ||</span>
+<span class="nc bnc" id="L822" title="All 4 branches missed.">					StompCommand.UNSUBSCRIBE.equals(command) || StompCommand.DISCONNECT.equals(command))) {</span>
+<span class="nc" id="L823">				logger.debug(&quot;Forwarding &quot; + accessor.getShortLogMessage(message.getPayload()));</span>
+			}
+<span class="pc bpc" id="L825" title="1 of 2 branches missed.">			else if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L826">				logger.trace(&quot;Forwarding &quot; + accessor.getDetailedLogMessage(message.getPayload()));</span>
+			}
+
+<span class="fc" id="L829">			ListenableFuture&lt;Void&gt; future = conn.send((Message&lt;byte[]&gt;) messageToSend);</span>
+<span class="fc" id="L830">			future.addCallback(new ListenableFutureCallback&lt;Void&gt;() {</span>
+				@Override
+				public void onSuccess(@Nullable Void result) {
+<span class="fc bfc" id="L833" title="All 2 branches covered.">					if (accessor.getCommand() == StompCommand.DISCONNECT) {</span>
+<span class="fc" id="L834">						afterDisconnectSent(accessor);</span>
+					}
+<span class="fc" id="L836">				}</span>
+				@Override
+				public void onFailure(Throwable ex) {
+<span class="nc bnc" id="L839" title="All 2 branches missed.">					if (tcpConnection != null) {</span>
+<span class="nc" id="L840">						handleTcpConnectionFailure(&quot;failed to forward &quot; +</span>
+<span class="nc" id="L841">								accessor.getShortLogMessage(message.getPayload()), ex);</span>
+					}
+<span class="nc bnc" id="L843" title="All 2 branches missed.">					else if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L844">						logger.error(&quot;Failed to forward &quot; + accessor.getShortLogMessage(message.getPayload()));</span>
+					}
+<span class="nc" id="L846">				}</span>
+			});
+<span class="fc" id="L848">			return future;</span>
+		}
+
+		/**
+		 * After a DISCONNECT there should be no more client frames so we can
+		 * close the connection pro-actively. However, if the DISCONNECT has a
+		 * receipt header we leave the connection open and expect the server will
+		 * respond with a RECEIPT and then close the connection.
+		 * @see &lt;a href=&quot;https://stomp.github.io/stomp-specification-1.2.html#DISCONNECT&quot;&gt;
+		 *     STOMP Specification 1.2 DISCONNECT&lt;/a&gt;
+		 */
+		private void afterDisconnectSent(StompHeaderAccessor accessor) {
+<span class="pc bpc" id="L860" title="1 of 2 branches missed.">			if (accessor.getReceipt() == null) {</span>
+				try {
+<span class="nc" id="L862">					clearConnection();</span>
+				}
+<span class="nc" id="L864">				catch (Throwable ex) {</span>
+<span class="nc bnc" id="L865" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L866">						logger.debug(&quot;Failure while clearing TCP connection state in session &quot; + this.sessionId, ex);</span>
+					}
+<span class="nc" id="L868">				}</span>
+			}
+<span class="fc" id="L870">		}</span>
+
+		/**
+		 * Clean up state associated with the connection and close it.
+		 * Any exception arising from closing the connection are propagated.
+		 */
+		public void clearConnection() {
+<span class="pc bpc" id="L877" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L878">				logger.debug(&quot;Cleaning up connection state for session &quot; + this.sessionId);</span>
+			}
+
+<span class="fc bfc" id="L881" title="All 2 branches covered.">			if (this.isRemoteClientSession) {</span>
+<span class="fc" id="L882">				StompBrokerRelayMessageHandler.this.connectionHandlers.remove(this.sessionId);</span>
+			}
+
+<span class="fc" id="L885">			this.isStompConnected = false;</span>
+
+<span class="fc" id="L887">			TcpConnection&lt;byte[]&gt; conn = this.tcpConnection;</span>
+<span class="fc" id="L888">			this.tcpConnection = null;</span>
+<span class="fc bfc" id="L889" title="All 2 branches covered.">			if (conn != null) {</span>
+<span class="pc bpc" id="L890" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L891">					logger.debug(&quot;Closing TCP connection in session &quot; + this.sessionId);</span>
+				}
+<span class="fc" id="L893">				conn.close();</span>
+			}
+<span class="fc" id="L895">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L899">			return &quot;StompConnectionHandler[sessionId=&quot; + this.sessionId + &quot;]&quot;;</span>
+		}
+	}
+
+
+	private class SystemStompConnectionHandler extends StompConnectionHandler {
+
+<span class="fc" id="L906">		public SystemStompConnectionHandler(StompHeaderAccessor connectHeaders) {</span>
+<span class="fc" id="L907">			super(SYSTEM_SESSION_ID, connectHeaders, false);</span>
+<span class="fc" id="L908">		}</span>
+
+		@Override
+		protected void afterStompConnected(StompHeaderAccessor connectedHeaders) {
+<span class="pc bpc" id="L912" title="1 of 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L913">				logger.info(&quot;\&quot;System\&quot; session connected.&quot;);</span>
+			}
+<span class="fc" id="L915">			super.afterStompConnected(connectedHeaders);</span>
+<span class="fc" id="L916">			publishBrokerAvailableEvent();</span>
+<span class="fc" id="L917">			sendSystemSubscriptions();</span>
+<span class="fc" id="L918">		}</span>
+
+		private void sendSystemSubscriptions() {
+<span class="fc" id="L921">			int i = 0;</span>
+<span class="fc bfc" id="L922" title="All 2 branches covered.">			for (String destination : getSystemSubscriptions().keySet()) {</span>
+<span class="fc" id="L923">				StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.SUBSCRIBE);</span>
+<span class="fc" id="L924">				accessor.setSubscriptionId(String.valueOf(i++));</span>
+<span class="fc" id="L925">				accessor.setDestination(destination);</span>
+<span class="pc bpc" id="L926" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L927">					logger.debug(&quot;Subscribing to &quot; + destination + &quot; on \&quot;system\&quot; connection.&quot;);</span>
+				}
+<span class="fc" id="L929">				TcpConnection&lt;byte[]&gt; conn = getTcpConnection();</span>
+<span class="pc bpc" id="L930" title="1 of 2 branches missed.">				if (conn != null) {</span>
+<span class="fc" id="L931">					MessageHeaders headers = accessor.getMessageHeaders();</span>
+<span class="fc" id="L932">					conn.send(MessageBuilder.createMessage(EMPTY_PAYLOAD, headers)).addCallback(</span>
+<span class="fc" id="L933">							result -&gt; {},</span>
+							ex -&gt; {
+<span class="nc" id="L935">								String error = &quot;Failed to subscribe in \&quot;system\&quot; session.&quot;;</span>
+<span class="nc" id="L936">								handleTcpConnectionFailure(error, ex);</span>
+<span class="nc" id="L937">							});</span>
+				}
+<span class="fc" id="L939">			}</span>
+<span class="fc" id="L940">		}</span>
+
+		@Override
+		protected void handleInboundMessage(Message&lt;?&gt; message) {
+<span class="fc" id="L944">			StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="pc bpc" id="L945" title="1 of 4 branches missed.">			if (accessor != null &amp;&amp; StompCommand.MESSAGE.equals(accessor.getCommand())) {</span>
+<span class="fc" id="L946">				String destination = accessor.getDestination();</span>
+<span class="pc bpc" id="L947" title="1 of 2 branches missed.">				if (destination == null) {</span>
+<span class="nc bnc" id="L948" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L949">						logger.debug(&quot;Got message on \&quot;system\&quot; connection, with no destination: &quot; +</span>
+<span class="nc" id="L950">								accessor.getDetailedLogMessage(message.getPayload()));</span>
+					}
+<span class="nc" id="L952">					return;</span>
+				}
+<span class="pc bpc" id="L954" title="1 of 2 branches missed.">				if (!getSystemSubscriptions().containsKey(destination)) {</span>
+<span class="nc bnc" id="L955" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L956">						logger.debug(&quot;Got message on \&quot;system\&quot; connection with no handler: &quot; +</span>
+<span class="nc" id="L957">								accessor.getDetailedLogMessage(message.getPayload()));</span>
+					}
+<span class="nc" id="L959">					return;</span>
+				}
+				try {
+<span class="fc" id="L962">					MessageHandler handler = getSystemSubscriptions().get(destination);</span>
+<span class="fc" id="L963">					handler.handleMessage(message);</span>
+				}
+<span class="nc" id="L965">				catch (Throwable ex) {</span>
+<span class="nc bnc" id="L966" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L967">						logger.debug(&quot;Error while handling message on \&quot;system\&quot; connection.&quot;, ex);</span>
+					}
+<span class="fc" id="L969">				}</span>
+			}
+<span class="fc" id="L971">		}</span>
+
+		@Override
+		protected void handleTcpConnectionFailure(String errorMessage, @Nullable Throwable ex) {
+<span class="fc" id="L975">			super.handleTcpConnectionFailure(errorMessage, ex);</span>
+<span class="fc" id="L976">			publishBrokerUnavailableEvent();</span>
+<span class="fc" id="L977">		}</span>
+
+		@Override
+		public void afterConnectionClosed() {
+<span class="fc" id="L981">			super.afterConnectionClosed();</span>
+<span class="fc" id="L982">			publishBrokerUnavailableEvent();</span>
+<span class="fc" id="L983">		}</span>
+
+		@Override
+		public ListenableFuture&lt;Void&gt; forward(Message&lt;?&gt; message, StompHeaderAccessor accessor) {
+			try {
+<span class="fc" id="L988">				ListenableFuture&lt;Void&gt; future = super.forward(message, accessor);</span>
+<span class="pc bpc" id="L989" title="1 of 2 branches missed.">				if (message.getHeaders().get(SimpMessageHeaderAccessor.IGNORE_ERROR) == null) {</span>
+<span class="fc" id="L990">					future.get();</span>
+				}
+<span class="fc" id="L992">				return future;</span>
+			}
+<span class="nc" id="L994">			catch (Throwable ex) {</span>
+<span class="nc" id="L995">				throw new MessageDeliveryException(message, ex);</span>
+			}
+		}
+	}
+
+
+	private static class VoidCallable implements Callable&lt;Void&gt; {
+
+		@Override
+		public Void call() {
+<span class="fc" id="L1005">			return null;</span>
+		}
+	}
+
+
+<span class="fc" id="L1010">	private class Stats {</span>
+
+<span class="fc" id="L1012">		private final AtomicInteger connect = new AtomicInteger();</span>
+
+<span class="fc" id="L1014">		private final AtomicInteger connected = new AtomicInteger();</span>
+
+<span class="fc" id="L1016">		private final AtomicInteger disconnect = new AtomicInteger();</span>
+
+		public void incrementConnectCount() {
+<span class="fc" id="L1019">			this.connect.incrementAndGet();</span>
+<span class="fc" id="L1020">		}</span>
+
+		public void incrementConnectedCount() {
+<span class="fc" id="L1023">			this.connected.incrementAndGet();</span>
+<span class="fc" id="L1024">		}</span>
+
+		public void incrementDisconnectCount() {
+<span class="fc" id="L1027">			this.disconnect.incrementAndGet();</span>
+<span class="fc" id="L1028">		}</span>
+
+		public String toString() {
+<span class="fc" id="L1031">			return (connectionHandlers.size() + &quot; sessions, &quot; + getTcpClientInfo() +</span>
+<span class="fc bfc" id="L1032" title="All 2 branches covered.">					(isBrokerAvailable() ? &quot; (available)&quot; : &quot; (not available)&quot;) +</span>
+<span class="fc" id="L1033">					&quot;, processed CONNECT(&quot; + this.connect.get() + &quot;)-CONNECTED(&quot; +</span>
+<span class="fc" id="L1034">					this.connected.get() + &quot;)-DISCONNECT(&quot; + this.disconnect.get() + &quot;)&quot;);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

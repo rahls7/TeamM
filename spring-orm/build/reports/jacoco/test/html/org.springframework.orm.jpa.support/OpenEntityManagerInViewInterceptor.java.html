@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OpenEntityManagerInViewInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.jpa.support</a> &gt; <span class="el_source">OpenEntityManagerInViewInterceptor.java</span></div><h1>OpenEntityManagerInViewInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.jpa.support;
+
+import javax.persistence.EntityManager;
+import javax.persistence.EntityManagerFactory;
+import javax.persistence.PersistenceException;
+
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.lang.Nullable;
+import org.springframework.orm.jpa.EntityManagerFactoryAccessor;
+import org.springframework.orm.jpa.EntityManagerFactoryUtils;
+import org.springframework.orm.jpa.EntityManagerHolder;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.ui.ModelMap;
+import org.springframework.web.context.request.AsyncWebRequestInterceptor;
+import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.context.request.async.CallableProcessingInterceptor;
+import org.springframework.web.context.request.async.WebAsyncManager;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+
+/**
+ * Spring web request interceptor that binds a JPA EntityManager to the
+ * thread for the entire processing of the request. Intended for the &quot;Open
+ * EntityManager in View&quot; pattern, i.e. to allow for lazy loading in
+ * web views despite the original transactions already being completed.
+ *
+ * &lt;p&gt;This interceptor makes JPA EntityManagers available via the current thread,
+ * which will be autodetected by transaction managers. It is suitable for service
+ * layer transactions via {@link org.springframework.orm.jpa.JpaTransactionManager}
+ * or {@link org.springframework.transaction.jta.JtaTransactionManager} as well
+ * as for non-transactional read-only execution.
+ *
+ * &lt;p&gt;In contrast to {@link OpenEntityManagerInViewFilter}, this interceptor is set
+ * up in a Spring application context and can thus take advantage of bean wiring.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see OpenEntityManagerInViewFilter
+ * @see org.springframework.orm.jpa.JpaTransactionManager
+ * @see org.springframework.orm.jpa.SharedEntityManagerCreator
+ * @see org.springframework.transaction.support.TransactionSynchronizationManager
+ */
+<span class="fc" id="L59">public class OpenEntityManagerInViewInterceptor extends EntityManagerFactoryAccessor implements AsyncWebRequestInterceptor {</span>
+
+	/**
+	 * Suffix that gets appended to the EntityManagerFactory toString
+	 * representation for the &quot;participate in existing entity manager
+	 * handling&quot; request attribute.
+	 * @see #getParticipateAttributeName
+	 */
+	public static final String PARTICIPATE_SUFFIX = &quot;.PARTICIPATE&quot;;
+
+
+	@Override
+	public void preHandle(WebRequest request) throws DataAccessException {
+<span class="fc" id="L72">		String key = getParticipateAttributeName();</span>
+<span class="fc" id="L73">		WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);</span>
+<span class="pc bpc" id="L74" title="1 of 4 branches missed.">		if (asyncManager.hasConcurrentResult() &amp;&amp; applyEntityManagerBindingInterceptor(asyncManager, key)) {</span>
+<span class="fc" id="L75">			return;</span>
+		}
+
+<span class="fc" id="L78">		EntityManagerFactory emf = obtainEntityManagerFactory();</span>
+<span class="fc bfc" id="L79" title="All 2 branches covered.">		if (TransactionSynchronizationManager.hasResource(emf)) {</span>
+			// Do not modify the EntityManager: just mark the request accordingly.
+<span class="fc" id="L81">			Integer count = (Integer) request.getAttribute(key, WebRequest.SCOPE_REQUEST);</span>
+<span class="fc bfc" id="L82" title="All 2 branches covered.">			int newCount = (count != null ? count + 1 : 1);</span>
+<span class="fc" id="L83">			request.setAttribute(getParticipateAttributeName(), newCount, WebRequest.SCOPE_REQUEST);</span>
+<span class="fc" id="L84">		}</span>
+		else {
+<span class="fc" id="L86">			logger.debug(&quot;Opening JPA EntityManager in OpenEntityManagerInViewInterceptor&quot;);</span>
+			try {
+<span class="fc" id="L88">				EntityManager em = createEntityManager();</span>
+<span class="fc" id="L89">				EntityManagerHolder emHolder = new EntityManagerHolder(em);</span>
+<span class="fc" id="L90">				TransactionSynchronizationManager.bindResource(emf, emHolder);</span>
+
+<span class="fc" id="L92">				AsyncRequestInterceptor interceptor = new AsyncRequestInterceptor(emf, emHolder);</span>
+<span class="fc" id="L93">				asyncManager.registerCallableInterceptor(key, interceptor);</span>
+<span class="fc" id="L94">				asyncManager.registerDeferredResultInterceptor(key, interceptor);</span>
+			}
+<span class="nc" id="L96">			catch (PersistenceException ex) {</span>
+<span class="nc" id="L97">				throw new DataAccessResourceFailureException(&quot;Could not create JPA EntityManager&quot;, ex);</span>
+<span class="fc" id="L98">			}</span>
+		}
+<span class="fc" id="L100">	}</span>
+
+	@Override
+	public void postHandle(WebRequest request, @Nullable ModelMap model) {
+<span class="fc" id="L104">	}</span>
+
+	@Override
+	public void afterCompletion(WebRequest request, @Nullable Exception ex) throws DataAccessException {
+<span class="fc bfc" id="L108" title="All 2 branches covered.">		if (!decrementParticipateCount(request)) {</span>
+<span class="fc" id="L109">			EntityManagerHolder emHolder = (EntityManagerHolder)</span>
+<span class="fc" id="L110">					TransactionSynchronizationManager.unbindResource(obtainEntityManagerFactory());</span>
+<span class="fc" id="L111">			logger.debug(&quot;Closing JPA EntityManager in OpenEntityManagerInViewInterceptor&quot;);</span>
+<span class="fc" id="L112">			EntityManagerFactoryUtils.closeEntityManager(emHolder.getEntityManager());</span>
+		}
+<span class="fc" id="L114">	}</span>
+
+	private boolean decrementParticipateCount(WebRequest request) {
+<span class="fc" id="L117">		String participateAttributeName = getParticipateAttributeName();</span>
+<span class="fc" id="L118">		Integer count = (Integer) request.getAttribute(participateAttributeName, WebRequest.SCOPE_REQUEST);</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">		if (count == null) {</span>
+<span class="fc" id="L120">			return false;</span>
+		}
+		// Do not modify the Session: just clear the marker.
+<span class="fc bfc" id="L123" title="All 2 branches covered.">		if (count &gt; 1) {</span>
+<span class="fc" id="L124">			request.setAttribute(participateAttributeName, count - 1, WebRequest.SCOPE_REQUEST);</span>
+		}
+		else {
+<span class="fc" id="L127">			request.removeAttribute(participateAttributeName, WebRequest.SCOPE_REQUEST);</span>
+		}
+<span class="fc" id="L129">		return true;</span>
+	}
+
+	@Override
+	public void afterConcurrentHandlingStarted(WebRequest request) {
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">		if (!decrementParticipateCount(request)) {</span>
+<span class="fc" id="L135">			TransactionSynchronizationManager.unbindResource(obtainEntityManagerFactory());</span>
+		}
+<span class="fc" id="L137">	}</span>
+
+	/**
+	 * Return the name of the request attribute that identifies that a request is
+	 * already filtered. Default implementation takes the toString representation
+	 * of the EntityManagerFactory instance and appends &quot;.FILTERED&quot;.
+	 * @see #PARTICIPATE_SUFFIX
+	 */
+	protected String getParticipateAttributeName() {
+<span class="fc" id="L146">		return obtainEntityManagerFactory().toString() + PARTICIPATE_SUFFIX;</span>
+	}
+
+
+	private boolean applyEntityManagerBindingInterceptor(WebAsyncManager asyncManager, String key) {
+<span class="fc" id="L151">		CallableProcessingInterceptor cpi = asyncManager.getCallableInterceptor(key);</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">		if (cpi == null) {</span>
+<span class="nc" id="L153">			return false;</span>
+		}
+<span class="fc" id="L155">		((AsyncRequestInterceptor) cpi).bindEntityManager();</span>
+<span class="fc" id="L156">		return true;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,591 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractAutoProxyCreator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.framework.autoproxy</a> &gt; <span class="el_source">AbstractAutoProxyCreator.java</span></div><h1>AbstractAutoProxyCreator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.framework.autoproxy;
+
+import java.lang.reflect.Constructor;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.aopalliance.aop.Advice;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aop.Advisor;
+import org.springframework.aop.Pointcut;
+import org.springframework.aop.TargetSource;
+import org.springframework.aop.framework.AopInfrastructureBean;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.aop.framework.ProxyProcessorSupport;
+import org.springframework.aop.framework.adapter.AdvisorAdapterRegistry;
+import org.springframework.aop.framework.adapter.GlobalAdvisorAdapterRegistry;
+import org.springframework.aop.target.SingletonTargetSource;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.PropertyValues;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.config.SmartInstantiationAwareBeanPostProcessor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link org.springframework.beans.factory.config.BeanPostProcessor} implementation
+ * that wraps each eligible bean with an AOP proxy, delegating to specified interceptors
+ * before invoking the bean itself.
+ *
+ * &lt;p&gt;This class distinguishes between &quot;common&quot; interceptors: shared for all proxies it
+ * creates, and &quot;specific&quot; interceptors: unique per bean instance. There need not be any
+ * common interceptors. If there are, they are set using the interceptorNames property.
+ * As with {@link org.springframework.aop.framework.ProxyFactoryBean}, interceptors names
+ * in the current factory are used rather than bean references to allow correct handling
+ * of prototype advisors and interceptors: for example, to support stateful mixins.
+ * Any advice type is supported for {@link #setInterceptorNames &quot;interceptorNames&quot;} entries.
+ *
+ * &lt;p&gt;Such auto-proxying is particularly useful if there's a large number of beans that
+ * need to be wrapped with similar proxies, i.e. delegating to the same interceptors.
+ * Instead of x repetitive proxy definitions for x target beans, you can register
+ * one single such post processor with the bean factory to achieve the same effect.
+ *
+ * &lt;p&gt;Subclasses can apply any strategy to decide if a bean is to be proxied, e.g. by type,
+ * by name, by definition details, etc. They can also return additional interceptors that
+ * should just be applied to the specific bean instance. A simple concrete implementation is
+ * {@link BeanNameAutoProxyCreator}, identifying the beans to be proxied via given names.
+ *
+ * &lt;p&gt;Any number of {@link TargetSourceCreator} implementations can be used to create
+ * a custom target source: for example, to pool prototype objects. Auto-proxying will
+ * occur even if there is no advice, as long as a TargetSourceCreator specifies a custom
+ * {@link org.springframework.aop.TargetSource}. If there are no TargetSourceCreators set,
+ * or if none matches, a {@link org.springframework.aop.target.SingletonTargetSource}
+ * will be used by default to wrap the target bean instance.
+ *
+ * @author Juergen Hoeller
+ * @author Rod Johnson
+ * @author Rob Harrop
+ * @since 13.10.2003
+ * @see #setInterceptorNames
+ * @see #getAdvicesAndAdvisorsForBean
+ * @see BeanNameAutoProxyCreator
+ * @see DefaultAdvisorAutoProxyCreator
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="nc" id="L93">public abstract class AbstractAutoProxyCreator extends ProxyProcessorSupport</span>
+		implements SmartInstantiationAwareBeanPostProcessor, BeanFactoryAware {
+
+	/**
+	 * Convenience constant for subclasses: Return value for &quot;do not proxy&quot;.
+	 * @see #getAdvicesAndAdvisorsForBean
+	 */
+	@Nullable
+<span class="nc" id="L101">	protected static final Object[] DO_NOT_PROXY = null;</span>
+
+	/**
+	 * Convenience constant for subclasses: Return value for
+	 * &quot;proxy without additional interceptors, just the common ones&quot;.
+	 * @see #getAdvicesAndAdvisorsForBean
+	 */
+<span class="nc" id="L108">	protected static final Object[] PROXY_WITHOUT_ADDITIONAL_INTERCEPTORS = new Object[0];</span>
+
+
+	/** Logger available to subclasses. */
+<span class="nc" id="L112">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	/** Default is global AdvisorAdapterRegistry. */
+<span class="nc" id="L115">	private AdvisorAdapterRegistry advisorAdapterRegistry = GlobalAdvisorAdapterRegistry.getInstance();</span>
+
+	/**
+	 * Indicates whether or not the proxy should be frozen. Overridden from super
+	 * to prevent the configuration from becoming frozen too early.
+	 */
+<span class="nc" id="L121">	private boolean freezeProxy = false;</span>
+
+	/** Default is no common interceptors. */
+<span class="nc" id="L124">	private String[] interceptorNames = new String[0];</span>
+
+<span class="nc" id="L126">	private boolean applyCommonInterceptorsFirst = true;</span>
+
+	@Nullable
+	private TargetSourceCreator[] customTargetSourceCreators;
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+<span class="nc" id="L134">	private final Set&lt;String&gt; targetSourcedBeans = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(16));</span>
+
+<span class="nc" id="L136">	private final Map&lt;Object, Object&gt; earlyProxyReferences = new ConcurrentHashMap&lt;&gt;(16);</span>
+
+<span class="nc" id="L138">	private final Map&lt;Object, Class&lt;?&gt;&gt; proxyTypes = new ConcurrentHashMap&lt;&gt;(16);</span>
+
+<span class="nc" id="L140">	private final Map&lt;Object, Boolean&gt; advisedBeans = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+
+	/**
+	 * Set whether or not the proxy should be frozen, preventing advice
+	 * from being added to it once it is created.
+	 * &lt;p&gt;Overridden from the super class to prevent the proxy configuration
+	 * from being frozen before the proxy is created.
+	 */
+	@Override
+	public void setFrozen(boolean frozen) {
+<span class="nc" id="L151">		this.freezeProxy = frozen;</span>
+<span class="nc" id="L152">	}</span>
+
+	@Override
+	public boolean isFrozen() {
+<span class="nc" id="L156">		return this.freezeProxy;</span>
+	}
+
+	/**
+	 * Specify the {@link AdvisorAdapterRegistry} to use.
+	 * &lt;p&gt;Default is the global {@link AdvisorAdapterRegistry}.
+	 * @see org.springframework.aop.framework.adapter.GlobalAdvisorAdapterRegistry
+	 */
+	public void setAdvisorAdapterRegistry(AdvisorAdapterRegistry advisorAdapterRegistry) {
+<span class="nc" id="L165">		this.advisorAdapterRegistry = advisorAdapterRegistry;</span>
+<span class="nc" id="L166">	}</span>
+
+	/**
+	 * Set custom {@code TargetSourceCreators} to be applied in this order.
+	 * If the list is empty, or they all return null, a {@link SingletonTargetSource}
+	 * will be created for each bean.
+	 * &lt;p&gt;Note that TargetSourceCreators will kick in even for target beans
+	 * where no advices or advisors have been found. If a {@code TargetSourceCreator}
+	 * returns a {@link TargetSource} for a specific bean, that bean will be proxied
+	 * in any case.
+	 * &lt;p&gt;{@code TargetSourceCreators} can only be invoked if this post processor is used
+	 * in a {@link BeanFactory} and its {@link BeanFactoryAware} callback is triggered.
+	 * @param targetSourceCreators the list of {@code TargetSourceCreators}.
+	 * Ordering is significant: The {@code TargetSource} returned from the first matching
+	 * {@code TargetSourceCreator} (that is, the first that returns non-null) will be used.
+	 */
+	public void setCustomTargetSourceCreators(TargetSourceCreator... targetSourceCreators) {
+<span class="nc" id="L183">		this.customTargetSourceCreators = targetSourceCreators;</span>
+<span class="nc" id="L184">	}</span>
+
+	/**
+	 * Set the common interceptors. These must be bean names in the current factory.
+	 * They can be of any advice or advisor type Spring supports.
+	 * &lt;p&gt;If this property isn't set, there will be zero common interceptors.
+	 * This is perfectly valid, if &quot;specific&quot; interceptors such as matching
+	 * Advisors are all we want.
+	 */
+	public void setInterceptorNames(String... interceptorNames) {
+<span class="nc" id="L194">		this.interceptorNames = interceptorNames;</span>
+<span class="nc" id="L195">	}</span>
+
+	/**
+	 * Set whether the common interceptors should be applied before bean-specific ones.
+	 * Default is &quot;true&quot;; else, bean-specific interceptors will get applied first.
+	 */
+	public void setApplyCommonInterceptorsFirst(boolean applyCommonInterceptorsFirst) {
+<span class="nc" id="L202">		this.applyCommonInterceptorsFirst = applyCommonInterceptorsFirst;</span>
+<span class="nc" id="L203">	}</span>
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="nc" id="L207">		this.beanFactory = beanFactory;</span>
+<span class="nc" id="L208">	}</span>
+
+	/**
+	 * Return the owning {@link BeanFactory}.
+	 * May be {@code null}, as this post-processor doesn't need to belong to a bean factory.
+	 */
+	@Nullable
+	protected BeanFactory getBeanFactory() {
+<span class="nc" id="L216">		return this.beanFactory;</span>
+	}
+
+
+	@Override
+	@Nullable
+	public Class&lt;?&gt; predictBeanType(Class&lt;?&gt; beanClass, String beanName) {
+<span class="nc bnc" id="L223" title="All 2 branches missed.">		if (this.proxyTypes.isEmpty()) {</span>
+<span class="nc" id="L224">			return null;</span>
+		}
+<span class="nc" id="L226">		Object cacheKey = getCacheKey(beanClass, beanName);</span>
+<span class="nc" id="L227">		return this.proxyTypes.get(cacheKey);</span>
+	}
+
+	@Override
+	@Nullable
+	public Constructor&lt;?&gt;[] determineCandidateConstructors(Class&lt;?&gt; beanClass, String beanName) {
+<span class="nc" id="L233">		return null;</span>
+	}
+
+	@Override
+	public Object getEarlyBeanReference(Object bean, String beanName) {
+<span class="nc" id="L238">		Object cacheKey = getCacheKey(bean.getClass(), beanName);</span>
+<span class="nc" id="L239">		this.earlyProxyReferences.put(cacheKey, bean);</span>
+<span class="nc" id="L240">		return wrapIfNecessary(bean, beanName, cacheKey);</span>
+	}
+
+	@Override
+	public Object postProcessBeforeInstantiation(Class&lt;?&gt; beanClass, String beanName) {
+<span class="nc" id="L245">		Object cacheKey = getCacheKey(beanClass, beanName);</span>
+
+<span class="nc bnc" id="L247" title="All 4 branches missed.">		if (!StringUtils.hasLength(beanName) || !this.targetSourcedBeans.contains(beanName)) {</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">			if (this.advisedBeans.containsKey(cacheKey)) {</span>
+<span class="nc" id="L249">				return null;</span>
+			}
+<span class="nc bnc" id="L251" title="All 4 branches missed.">			if (isInfrastructureClass(beanClass) || shouldSkip(beanClass, beanName)) {</span>
+<span class="nc" id="L252">				this.advisedBeans.put(cacheKey, Boolean.FALSE);</span>
+<span class="nc" id="L253">				return null;</span>
+			}
+		}
+
+		// Create proxy here if we have a custom TargetSource.
+		// Suppresses unnecessary default instantiation of the target bean:
+		// The TargetSource will handle target instances in a custom fashion.
+<span class="nc" id="L260">		TargetSource targetSource = getCustomTargetSource(beanClass, beanName);</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">		if (targetSource != null) {</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">			if (StringUtils.hasLength(beanName)) {</span>
+<span class="nc" id="L263">				this.targetSourcedBeans.add(beanName);</span>
+			}
+<span class="nc" id="L265">			Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(beanClass, beanName, targetSource);</span>
+<span class="nc" id="L266">			Object proxy = createProxy(beanClass, beanName, specificInterceptors, targetSource);</span>
+<span class="nc" id="L267">			this.proxyTypes.put(cacheKey, proxy.getClass());</span>
+<span class="nc" id="L268">			return proxy;</span>
+		}
+
+<span class="nc" id="L271">		return null;</span>
+	}
+
+	@Override
+	public boolean postProcessAfterInstantiation(Object bean, String beanName) {
+<span class="nc" id="L276">		return true;</span>
+	}
+
+	@Override
+	public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) {
+<span class="nc" id="L281">		return pvs;</span>
+	}
+
+	@Override
+	public Object postProcessBeforeInitialization(Object bean, String beanName) {
+<span class="nc" id="L286">		return bean;</span>
+	}
+
+	/**
+	 * Create a proxy with the configured interceptors if the bean is
+	 * identified as one to proxy by the subclass.
+	 * @see #getAdvicesAndAdvisorsForBean
+	 */
+	@Override
+	public Object postProcessAfterInitialization(@Nullable Object bean, String beanName) {
+<span class="nc bnc" id="L296" title="All 2 branches missed.">		if (bean != null) {</span>
+<span class="nc" id="L297">			Object cacheKey = getCacheKey(bean.getClass(), beanName);</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">			if (this.earlyProxyReferences.remove(cacheKey) != bean) {</span>
+<span class="nc" id="L299">				return wrapIfNecessary(bean, beanName, cacheKey);</span>
+			}
+		}
+<span class="nc" id="L302">		return bean;</span>
+	}
+
+
+	/**
+	 * Build a cache key for the given bean class and bean name.
+	 * &lt;p&gt;Note: As of 4.2.3, this implementation does not return a concatenated
+	 * class/name String anymore but rather the most efficient cache key possible:
+	 * a plain bean name, prepended with {@link BeanFactory#FACTORY_BEAN_PREFIX}
+	 * in case of a {@code FactoryBean}; or if no bean name specified, then the
+	 * given bean {@code Class} as-is.
+	 * @param beanClass the bean class
+	 * @param beanName the bean name
+	 * @return the cache key for the given class and name
+	 */
+	protected Object getCacheKey(Class&lt;?&gt; beanClass, @Nullable String beanName) {
+<span class="nc bnc" id="L318" title="All 2 branches missed.">		if (StringUtils.hasLength(beanName)) {</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">			return (FactoryBean.class.isAssignableFrom(beanClass) ?</span>
+					BeanFactory.FACTORY_BEAN_PREFIX + beanName : beanName);
+		}
+		else {
+<span class="nc" id="L323">			return beanClass;</span>
+		}
+	}
+
+	/**
+	 * Wrap the given bean if necessary, i.e. if it is eligible for being proxied.
+	 * @param bean the raw bean instance
+	 * @param beanName the name of the bean
+	 * @param cacheKey the cache key for metadata access
+	 * @return a proxy wrapping the bean, or the raw bean instance as-is
+	 */
+	protected Object wrapIfNecessary(Object bean, String beanName, Object cacheKey) {
+<span class="nc bnc" id="L335" title="All 4 branches missed.">		if (StringUtils.hasLength(beanName) &amp;&amp; this.targetSourcedBeans.contains(beanName)) {</span>
+<span class="nc" id="L336">			return bean;</span>
+		}
+<span class="nc bnc" id="L338" title="All 2 branches missed.">		if (Boolean.FALSE.equals(this.advisedBeans.get(cacheKey))) {</span>
+<span class="nc" id="L339">			return bean;</span>
+		}
+<span class="nc bnc" id="L341" title="All 4 branches missed.">		if (isInfrastructureClass(bean.getClass()) || shouldSkip(bean.getClass(), beanName)) {</span>
+<span class="nc" id="L342">			this.advisedBeans.put(cacheKey, Boolean.FALSE);</span>
+<span class="nc" id="L343">			return bean;</span>
+		}
+
+		// Create proxy if we have advice.
+<span class="nc" id="L347">		Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, null);</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">		if (specificInterceptors != DO_NOT_PROXY) {</span>
+<span class="nc" id="L349">			this.advisedBeans.put(cacheKey, Boolean.TRUE);</span>
+<span class="nc" id="L350">			Object proxy = createProxy(</span>
+<span class="nc" id="L351">					bean.getClass(), beanName, specificInterceptors, new SingletonTargetSource(bean));</span>
+<span class="nc" id="L352">			this.proxyTypes.put(cacheKey, proxy.getClass());</span>
+<span class="nc" id="L353">			return proxy;</span>
+		}
+
+<span class="nc" id="L356">		this.advisedBeans.put(cacheKey, Boolean.FALSE);</span>
+<span class="nc" id="L357">		return bean;</span>
+	}
+
+	/**
+	 * Return whether the given bean class represents an infrastructure class
+	 * that should never be proxied.
+	 * &lt;p&gt;The default implementation considers Advices, Advisors and
+	 * AopInfrastructureBeans as infrastructure classes.
+	 * @param beanClass the class of the bean
+	 * @return whether the bean represents an infrastructure class
+	 * @see org.aopalliance.aop.Advice
+	 * @see org.springframework.aop.Advisor
+	 * @see org.springframework.aop.framework.AopInfrastructureBean
+	 * @see #shouldSkip
+	 */
+	protected boolean isInfrastructureClass(Class&lt;?&gt; beanClass) {
+<span class="nc bnc" id="L373" title="All 2 branches missed.">		boolean retVal = Advice.class.isAssignableFrom(beanClass) ||</span>
+<span class="nc bnc" id="L374" title="All 2 branches missed.">				Pointcut.class.isAssignableFrom(beanClass) ||</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">				Advisor.class.isAssignableFrom(beanClass) ||</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">				AopInfrastructureBean.class.isAssignableFrom(beanClass);</span>
+<span class="nc bnc" id="L377" title="All 4 branches missed.">		if (retVal &amp;&amp; logger.isTraceEnabled()) {</span>
+<span class="nc" id="L378">			logger.trace(&quot;Did not attempt to auto-proxy infrastructure class [&quot; + beanClass.getName() + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L380">		return retVal;</span>
+	}
+
+	/**
+	 * Subclasses should override this method to return {@code true} if the
+	 * given bean should not be considered for auto-proxying by this post-processor.
+	 * &lt;p&gt;Sometimes we need to be able to avoid this happening, e.g. if it will lead to
+	 * a circular reference or if the existing target instance needs to be preserved.
+	 * This implementation returns {@code false} unless the bean name indicates an
+	 * &quot;original instance&quot; according to {@code AutowireCapableBeanFactory} conventions.
+	 * @param beanClass the class of the bean
+	 * @param beanName the name of the bean
+	 * @return whether to skip the given bean
+	 * @see org.springframework.beans.factory.config.AutowireCapableBeanFactory#ORIGINAL_INSTANCE_SUFFIX
+	 */
+	protected boolean shouldSkip(Class&lt;?&gt; beanClass, String beanName) {
+<span class="nc" id="L396">		return AutoProxyUtils.isOriginalInstance(beanName, beanClass);</span>
+	}
+
+	/**
+	 * Create a target source for bean instances. Uses any TargetSourceCreators if set.
+	 * Returns {@code null} if no custom TargetSource should be used.
+	 * &lt;p&gt;This implementation uses the &quot;customTargetSourceCreators&quot; property.
+	 * Subclasses can override this method to use a different mechanism.
+	 * @param beanClass the class of the bean to create a TargetSource for
+	 * @param beanName the name of the bean
+	 * @return a TargetSource for this bean
+	 * @see #setCustomTargetSourceCreators
+	 */
+	@Nullable
+	protected TargetSource getCustomTargetSource(Class&lt;?&gt; beanClass, String beanName) {
+		// We can't create fancy target sources for directly registered singletons.
+<span class="nc bnc" id="L412" title="All 4 branches missed.">		if (this.customTargetSourceCreators != null &amp;&amp;</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">				this.beanFactory != null &amp;&amp; this.beanFactory.containsBean(beanName)) {</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">			for (TargetSourceCreator tsc : this.customTargetSourceCreators) {</span>
+<span class="nc" id="L415">				TargetSource ts = tsc.getTargetSource(beanClass, beanName);</span>
+<span class="nc bnc" id="L416" title="All 2 branches missed.">				if (ts != null) {</span>
+					// Found a matching TargetSource.
+<span class="nc bnc" id="L418" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L419">						logger.trace(&quot;TargetSourceCreator [&quot; + tsc +</span>
+								&quot;] found custom TargetSource for bean with name '&quot; + beanName + &quot;'&quot;);
+					}
+<span class="nc" id="L422">					return ts;</span>
+				}
+			}
+		}
+
+		// No custom TargetSource found.
+<span class="nc" id="L428">		return null;</span>
+	}
+
+	/**
+	 * Create an AOP proxy for the given bean.
+	 * @param beanClass the class of the bean
+	 * @param beanName the name of the bean
+	 * @param specificInterceptors the set of interceptors that is
+	 * specific to this bean (may be empty, but not null)
+	 * @param targetSource the TargetSource for the proxy,
+	 * already pre-configured to access the bean
+	 * @return the AOP proxy for the bean
+	 * @see #buildAdvisors
+	 */
+	protected Object createProxy(Class&lt;?&gt; beanClass, @Nullable String beanName,
+			@Nullable Object[] specificInterceptors, TargetSource targetSource) {
+
+<span class="nc bnc" id="L445" title="All 2 branches missed.">		if (this.beanFactory instanceof ConfigurableListableBeanFactory) {</span>
+<span class="nc" id="L446">			AutoProxyUtils.exposeTargetClass((ConfigurableListableBeanFactory) this.beanFactory, beanName, beanClass);</span>
+		}
+
+<span class="nc" id="L449">		ProxyFactory proxyFactory = new ProxyFactory();</span>
+<span class="nc" id="L450">		proxyFactory.copyFrom(this);</span>
+
+<span class="nc bnc" id="L452" title="All 2 branches missed.">		if (!proxyFactory.isProxyTargetClass()) {</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">			if (shouldProxyTargetClass(beanClass, beanName)) {</span>
+<span class="nc" id="L454">				proxyFactory.setProxyTargetClass(true);</span>
+			}
+			else {
+<span class="nc" id="L457">				evaluateProxyInterfaces(beanClass, proxyFactory);</span>
+			}
+		}
+
+<span class="nc" id="L461">		Advisor[] advisors = buildAdvisors(beanName, specificInterceptors);</span>
+<span class="nc" id="L462">		proxyFactory.addAdvisors(advisors);</span>
+<span class="nc" id="L463">		proxyFactory.setTargetSource(targetSource);</span>
+<span class="nc" id="L464">		customizeProxyFactory(proxyFactory);</span>
+
+<span class="nc" id="L466">		proxyFactory.setFrozen(this.freezeProxy);</span>
+<span class="nc bnc" id="L467" title="All 2 branches missed.">		if (advisorsPreFiltered()) {</span>
+<span class="nc" id="L468">			proxyFactory.setPreFiltered(true);</span>
+		}
+
+<span class="nc" id="L471">		return proxyFactory.getProxy(getProxyClassLoader());</span>
+	}
+
+	/**
+	 * Determine whether the given bean should be proxied with its target class rather than its interfaces.
+	 * &lt;p&gt;Checks the {@link AutoProxyUtils#PRESERVE_TARGET_CLASS_ATTRIBUTE &quot;preserveTargetClass&quot; attribute}
+	 * of the corresponding bean definition.
+	 * @param beanClass the class of the bean
+	 * @param beanName the name of the bean
+	 * @return whether the given bean should be proxied with its target class
+	 * @see AutoProxyUtils#shouldProxyTargetClass
+	 */
+	protected boolean shouldProxyTargetClass(Class&lt;?&gt; beanClass, @Nullable String beanName) {
+<span class="nc bnc" id="L484" title="All 2 branches missed.">		return (this.beanFactory instanceof ConfigurableListableBeanFactory &amp;&amp;</span>
+<span class="nc bnc" id="L485" title="All 2 branches missed.">				AutoProxyUtils.shouldProxyTargetClass((ConfigurableListableBeanFactory) this.beanFactory, beanName));</span>
+	}
+
+	/**
+	 * Return whether the Advisors returned by the subclass are pre-filtered
+	 * to match the bean's target class already, allowing the ClassFilter check
+	 * to be skipped when building advisors chains for AOP invocations.
+	 * &lt;p&gt;Default is {@code false}. Subclasses may override this if they
+	 * will always return pre-filtered Advisors.
+	 * @return whether the Advisors are pre-filtered
+	 * @see #getAdvicesAndAdvisorsForBean
+	 * @see org.springframework.aop.framework.Advised#setPreFiltered
+	 */
+	protected boolean advisorsPreFiltered() {
+<span class="nc" id="L499">		return false;</span>
+	}
+
+	/**
+	 * Determine the advisors for the given bean, including the specific interceptors
+	 * as well as the common interceptor, all adapted to the Advisor interface.
+	 * @param beanName the name of the bean
+	 * @param specificInterceptors the set of interceptors that is
+	 * specific to this bean (may be empty, but not null)
+	 * @return the list of Advisors for the given bean
+	 */
+	protected Advisor[] buildAdvisors(@Nullable String beanName, @Nullable Object[] specificInterceptors) {
+		// Handle prototypes correctly...
+<span class="nc" id="L512">		Advisor[] commonInterceptors = resolveInterceptorNames();</span>
+
+<span class="nc" id="L514">		List&lt;Object&gt; allInterceptors = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">		if (specificInterceptors != null) {</span>
+<span class="nc" id="L516">			allInterceptors.addAll(Arrays.asList(specificInterceptors));</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">			if (commonInterceptors.length &gt; 0) {</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">				if (this.applyCommonInterceptorsFirst) {</span>
+<span class="nc" id="L519">					allInterceptors.addAll(0, Arrays.asList(commonInterceptors));</span>
+				}
+				else {
+<span class="nc" id="L522">					allInterceptors.addAll(Arrays.asList(commonInterceptors));</span>
+				}
+			}
+		}
+<span class="nc bnc" id="L526" title="All 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L527">			int nrOfCommonInterceptors = commonInterceptors.length;</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">			int nrOfSpecificInterceptors = (specificInterceptors != null ? specificInterceptors.length : 0);</span>
+<span class="nc" id="L529">			logger.trace(&quot;Creating implicit proxy for bean '&quot; + beanName + &quot;' with &quot; + nrOfCommonInterceptors +</span>
+					&quot; common interceptors and &quot; + nrOfSpecificInterceptors + &quot; specific interceptors&quot;);
+		}
+
+<span class="nc" id="L533">		Advisor[] advisors = new Advisor[allInterceptors.size()];</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">		for (int i = 0; i &lt; allInterceptors.size(); i++) {</span>
+<span class="nc" id="L535">			advisors[i] = this.advisorAdapterRegistry.wrap(allInterceptors.get(i));</span>
+		}
+<span class="nc" id="L537">		return advisors;</span>
+	}
+
+	/**
+	 * Resolves the specified interceptor names to Advisor objects.
+	 * @see #setInterceptorNames
+	 */
+	private Advisor[] resolveInterceptorNames() {
+<span class="nc" id="L545">		BeanFactory bf = this.beanFactory;</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">		ConfigurableBeanFactory cbf = (bf instanceof ConfigurableBeanFactory ? (ConfigurableBeanFactory) bf : null);</span>
+<span class="nc" id="L547">		List&lt;Advisor&gt; advisors = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">		for (String beanName : this.interceptorNames) {</span>
+<span class="nc bnc" id="L549" title="All 4 branches missed.">			if (cbf == null || !cbf.isCurrentlyInCreation(beanName)) {</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">				Assert.state(bf != null, &quot;BeanFactory required for resolving interceptor names&quot;);</span>
+<span class="nc" id="L551">				Object next = bf.getBean(beanName);</span>
+<span class="nc" id="L552">				advisors.add(this.advisorAdapterRegistry.wrap(next));</span>
+			}
+		}
+<span class="nc" id="L555">		return advisors.toArray(new Advisor[0]);</span>
+	}
+
+	/**
+	 * Subclasses may choose to implement this: for example,
+	 * to change the interfaces exposed.
+	 * &lt;p&gt;The default implementation is empty.
+	 * @param proxyFactory a ProxyFactory that is already configured with
+	 * TargetSource and interfaces and will be used to create the proxy
+	 * immediately after this method returns
+	 */
+	protected void customizeProxyFactory(ProxyFactory proxyFactory) {
+<span class="nc" id="L567">	}</span>
+
+
+	/**
+	 * Return whether the given bean is to be proxied, what additional
+	 * advices (e.g. AOP Alliance interceptors) and advisors to apply.
+	 * @param beanClass the class of the bean to advise
+	 * @param beanName the name of the bean
+	 * @param customTargetSource the TargetSource returned by the
+	 * {@link #getCustomTargetSource} method: may be ignored.
+	 * Will be {@code null} if no custom target source is in use.
+	 * @return an array of additional interceptors for the particular bean;
+	 * or an empty array if no additional interceptors but just the common ones;
+	 * or {@code null} if no proxy at all, not even with the common interceptors.
+	 * See constants DO_NOT_PROXY and PROXY_WITHOUT_ADDITIONAL_INTERCEPTORS.
+	 * @throws BeansException in case of errors
+	 * @see #DO_NOT_PROXY
+	 * @see #PROXY_WITHOUT_ADDITIONAL_INTERCEPTORS
+	 */
+	@Nullable
+	protected abstract Object[] getAdvicesAndAdvisorsForBean(Class&lt;?&gt; beanClass, String beanName,
+			@Nullable TargetSource customTargetSource) throws BeansException;
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

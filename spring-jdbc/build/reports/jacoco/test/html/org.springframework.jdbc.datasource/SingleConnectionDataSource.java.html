@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleConnectionDataSource.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.datasource</a> &gt; <span class="el_source">SingleConnectionDataSource.java</span></div><h1>SingleConnectionDataSource.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.datasource;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.SQLException;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * Implementation of {@link SmartDataSource} that wraps a single JDBC Connection
+ * which is not closed after use. Obviously, this is not multi-threading capable.
+ *
+ * &lt;p&gt;Note that at shutdown, someone should close the underlying Connection
+ * via the {@code close()} method. Client code will never call close
+ * on the Connection handle if it is SmartDataSource-aware (e.g. uses
+ * {@code DataSourceUtils.releaseConnection}).
+ *
+ * &lt;p&gt;If client code will call {@code close()} in the assumption of a pooled
+ * Connection, like when using persistence tools, set &quot;suppressClose&quot; to &quot;true&quot;.
+ * This will return a close-suppressing proxy instead of the physical Connection.
+ *
+ * &lt;p&gt;This is primarily intended for testing. For example, it enables easy testing
+ * outside an application server, for code that expects to work on a DataSource.
+ * In contrast to {@link DriverManagerDataSource}, it reuses the same Connection
+ * all the time, avoiding excessive creation of physical Connections.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @see #getConnection()
+ * @see java.sql.Connection#close()
+ * @see DataSourceUtils#releaseConnection
+ */
+public class SingleConnectionDataSource extends DriverManagerDataSource implements SmartDataSource, DisposableBean {
+
+	/** Create a close-suppressing proxy?. */
+	private boolean suppressClose;
+
+	/** Override auto-commit state?. */
+	@Nullable
+	private Boolean autoCommit;
+
+	/** Wrapped Connection. */
+	@Nullable
+	private Connection target;
+
+	/** Proxy Connection. */
+	@Nullable
+	private Connection connection;
+
+	/** Synchronization monitor for the shared Connection. */
+<span class="pc" id="L73">	private final Object connectionMonitor = new Object();</span>
+
+
+	/**
+	 * Constructor for bean-style configuration.
+	 */
+<span class="nc" id="L79">	public SingleConnectionDataSource() {</span>
+<span class="nc" id="L80">	}</span>
+
+	/**
+	 * Create a new SingleConnectionDataSource with the given standard
+	 * DriverManager parameters.
+	 * @param url the JDBC URL to use for accessing the DriverManager
+	 * @param username the JDBC username to use for accessing the DriverManager
+	 * @param password the JDBC password to use for accessing the DriverManager
+	 * @param suppressClose if the returned Connection should be a
+	 * close-suppressing proxy or the physical Connection
+	 * @see java.sql.DriverManager#getConnection(String, String, String)
+	 */
+	public SingleConnectionDataSource(String url, String username, String password, boolean suppressClose) {
+<span class="nc" id="L93">		super(url, username, password);</span>
+<span class="nc" id="L94">		this.suppressClose = suppressClose;</span>
+<span class="nc" id="L95">	}</span>
+
+	/**
+	 * Create a new SingleConnectionDataSource with the given standard
+	 * DriverManager parameters.
+	 * @param url the JDBC URL to use for accessing the DriverManager
+	 * @param suppressClose if the returned Connection should be a
+	 * close-suppressing proxy or the physical Connection
+	 * @see java.sql.DriverManager#getConnection(String, String, String)
+	 */
+	public SingleConnectionDataSource(String url, boolean suppressClose) {
+<span class="nc" id="L106">		super(url);</span>
+<span class="nc" id="L107">		this.suppressClose = suppressClose;</span>
+<span class="nc" id="L108">	}</span>
+
+	/**
+	 * Create a new SingleConnectionDataSource with a given Connection.
+	 * @param target underlying target Connection
+	 * @param suppressClose if the Connection should be wrapped with a Connection that
+	 * suppresses {@code close()} calls (to allow for normal {@code close()}
+	 * usage in applications that expect a pooled Connection but do not know our
+	 * SmartDataSource interface)
+	 */
+<span class="fc" id="L118">	public SingleConnectionDataSource(Connection target, boolean suppressClose) {</span>
+<span class="fc" id="L119">		Assert.notNull(target, &quot;Connection must not be null&quot;);</span>
+<span class="fc" id="L120">		this.target = target;</span>
+<span class="fc" id="L121">		this.suppressClose = suppressClose;</span>
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">		this.connection = (suppressClose ? getCloseSuppressingConnectionProxy(target) : target);</span>
+<span class="fc" id="L123">	}</span>
+
+
+	/**
+	 * Set whether the returned Connection should be a close-suppressing proxy
+	 * or the physical Connection.
+	 */
+	public void setSuppressClose(boolean suppressClose) {
+<span class="nc" id="L131">		this.suppressClose = suppressClose;</span>
+<span class="nc" id="L132">	}</span>
+
+	/**
+	 * Return whether the returned Connection will be a close-suppressing proxy
+	 * or the physical Connection.
+	 */
+	protected boolean isSuppressClose() {
+<span class="nc" id="L139">		return this.suppressClose;</span>
+	}
+
+	/**
+	 * Set whether the returned Connection's &quot;autoCommit&quot; setting should be overridden.
+	 */
+	public void setAutoCommit(boolean autoCommit) {
+<span class="nc" id="L146">		this.autoCommit = (autoCommit);</span>
+<span class="nc" id="L147">	}</span>
+
+	/**
+	 * Return whether the returned Connection's &quot;autoCommit&quot; setting should be overridden.
+	 * @return the &quot;autoCommit&quot; value, or {@code null} if none to be applied
+	 */
+	@Nullable
+	protected Boolean getAutoCommitValue() {
+<span class="nc" id="L155">		return this.autoCommit;</span>
+	}
+
+
+	@Override
+	public Connection getConnection() throws SQLException {
+<span class="fc" id="L161">		synchronized (this.connectionMonitor) {</span>
+<span class="pc bpc" id="L162" title="1 of 2 branches missed.">			if (this.connection == null) {</span>
+				// No underlying Connection -&gt; lazy init via DriverManager.
+<span class="nc" id="L164">				initConnection();</span>
+			}
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">			if (this.connection.isClosed()) {</span>
+<span class="nc" id="L167">				throw new SQLException(</span>
+						&quot;Connection was closed in SingleConnectionDataSource. Check that user code checks &quot; +
+						&quot;shouldClose() before closing Connections, or set 'suppressClose' to 'true'&quot;);
+			}
+<span class="fc" id="L171">			return this.connection;</span>
+		}
+	}
+
+	/**
+	 * Specifying a custom username and password doesn't make sense
+	 * with a single Connection. Returns the single Connection if given
+	 * the same username and password; throws a SQLException else.
+	 */
+	@Override
+	public Connection getConnection(String username, String password) throws SQLException {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">		if (ObjectUtils.nullSafeEquals(username, getUsername()) &amp;&amp;</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">				ObjectUtils.nullSafeEquals(password, getPassword())) {</span>
+<span class="nc" id="L184">			return getConnection();</span>
+		}
+		else {
+<span class="nc" id="L187">			throw new SQLException(&quot;SingleConnectionDataSource does not support custom username and password&quot;);</span>
+		}
+	}
+
+	/**
+	 * This is a single Connection: Do not close it when returning to the &quot;pool&quot;.
+	 */
+	@Override
+	public boolean shouldClose(Connection con) {
+<span class="fc" id="L196">		synchronized (this.connectionMonitor) {</span>
+<span class="pc bpc" id="L197" title="3 of 4 branches missed.">			return (con != this.connection &amp;&amp; con != this.target);</span>
+		}
+	}
+
+	/**
+	 * Close the underlying Connection.
+	 * The provider of this DataSource needs to care for proper shutdown.
+	 * &lt;p&gt;As this bean implements DisposableBean, a bean factory will
+	 * automatically invoke this on destruction of its cached singletons.
+	 */
+	@Override
+	public void destroy() {
+<span class="nc" id="L209">		synchronized (this.connectionMonitor) {</span>
+<span class="nc" id="L210">			closeConnection();</span>
+<span class="nc" id="L211">		}</span>
+<span class="nc" id="L212">	}</span>
+
+
+	/**
+	 * Initialize the underlying Connection via the DriverManager.
+	 */
+	public void initConnection() throws SQLException {
+<span class="nc bnc" id="L219" title="All 2 branches missed.">		if (getUrl() == null) {</span>
+<span class="nc" id="L220">			throw new IllegalStateException(&quot;'url' property is required for lazily initializing a Connection&quot;);</span>
+		}
+<span class="nc" id="L222">		synchronized (this.connectionMonitor) {</span>
+<span class="nc" id="L223">			closeConnection();</span>
+<span class="nc" id="L224">			this.target = getConnectionFromDriver(getUsername(), getPassword());</span>
+<span class="nc" id="L225">			prepareConnection(this.target);</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L227">				logger.debug(&quot;Established shared JDBC Connection: &quot; + this.target);</span>
+			}
+<span class="nc bnc" id="L229" title="All 2 branches missed.">			this.connection = (isSuppressClose() ? getCloseSuppressingConnectionProxy(this.target) : this.target);</span>
+<span class="nc" id="L230">		}</span>
+<span class="nc" id="L231">	}</span>
+
+	/**
+	 * Reset the underlying shared Connection, to be reinitialized on next access.
+	 */
+	public void resetConnection() {
+<span class="nc" id="L237">		synchronized (this.connectionMonitor) {</span>
+<span class="nc" id="L238">			closeConnection();</span>
+<span class="nc" id="L239">			this.target = null;</span>
+<span class="nc" id="L240">			this.connection = null;</span>
+<span class="nc" id="L241">		}</span>
+<span class="nc" id="L242">	}</span>
+
+	/**
+	 * Prepare the given Connection before it is exposed.
+	 * &lt;p&gt;The default implementation applies the auto-commit flag, if necessary.
+	 * Can be overridden in subclasses.
+	 * @param con the Connection to prepare
+	 * @see #setAutoCommit
+	 */
+	protected void prepareConnection(Connection con) throws SQLException {
+<span class="nc" id="L252">		Boolean autoCommit = getAutoCommitValue();</span>
+<span class="nc bnc" id="L253" title="All 4 branches missed.">		if (autoCommit != null &amp;&amp; con.getAutoCommit() != autoCommit) {</span>
+<span class="nc" id="L254">			con.setAutoCommit(autoCommit);</span>
+		}
+<span class="nc" id="L256">	}</span>
+
+	/**
+	 * Close the underlying shared Connection.
+	 */
+	private void closeConnection() {
+<span class="nc bnc" id="L262" title="All 2 branches missed.">		if (this.target != null) {</span>
+			try {
+<span class="nc" id="L264">				this.target.close();</span>
+			}
+<span class="nc" id="L266">			catch (Throwable ex) {</span>
+<span class="nc" id="L267">				logger.info(&quot;Could not close shared JDBC Connection&quot;, ex);</span>
+<span class="nc" id="L268">			}</span>
+		}
+<span class="nc" id="L270">	}</span>
+
+	/**
+	 * Wrap the given Connection with a proxy that delegates every method call to it
+	 * but suppresses close calls.
+	 * @param target the original Connection to wrap
+	 * @return the wrapped Connection
+	 */
+	protected Connection getCloseSuppressingConnectionProxy(Connection target) {
+<span class="nc" id="L279">		return (Connection) Proxy.newProxyInstance(</span>
+<span class="nc" id="L280">				ConnectionProxy.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {ConnectionProxy.class},
+				new CloseSuppressingInvocationHandler(target));
+	}
+
+
+	/**
+	 * Invocation handler that suppresses close calls on JDBC Connections.
+	 */
+	private static class CloseSuppressingInvocationHandler implements InvocationHandler {
+
+		private final Connection target;
+
+<span class="nc" id="L293">		public CloseSuppressingInvocationHandler(Connection target) {</span>
+<span class="nc" id="L294">			this.target = target;</span>
+<span class="nc" id="L295">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on ConnectionProxy interface coming in...
+
+<span class="nc bnc" id="L302" title="All 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L304" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="nc bnc" id="L306" title="All 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L308">				return System.identityHashCode(proxy);</span>
+			}
+<span class="nc bnc" id="L310" title="All 2 branches missed.">			else if (method.getName().equals(&quot;unwrap&quot;)) {</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">				if (((Class&lt;?&gt;) args[0]).isInstance(proxy)) {</span>
+<span class="nc" id="L312">					return proxy;</span>
+				}
+			}
+<span class="nc bnc" id="L315" title="All 2 branches missed.">			else if (method.getName().equals(&quot;isWrapperFor&quot;)) {</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">				if (((Class&lt;?&gt;) args[0]).isInstance(proxy)) {</span>
+<span class="nc" id="L317">					return true;</span>
+				}
+			}
+<span class="nc bnc" id="L320" title="All 2 branches missed.">			else if (method.getName().equals(&quot;close&quot;)) {</span>
+				// Handle close method: don't pass the call on.
+<span class="nc" id="L322">				return null;</span>
+			}
+<span class="nc bnc" id="L324" title="All 2 branches missed.">			else if (method.getName().equals(&quot;isClosed&quot;)) {</span>
+<span class="nc" id="L325">				return false;</span>
+			}
+<span class="nc bnc" id="L327" title="All 2 branches missed.">			else if (method.getName().equals(&quot;getTargetConnection&quot;)) {</span>
+				// Handle getTargetConnection method: return underlying Connection.
+<span class="nc" id="L329">				return this.target;</span>
+			}
+
+			// Invoke method on target Connection.
+			try {
+<span class="nc" id="L334">				return method.invoke(this.target, args);</span>
+			}
+<span class="nc" id="L336">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L337">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

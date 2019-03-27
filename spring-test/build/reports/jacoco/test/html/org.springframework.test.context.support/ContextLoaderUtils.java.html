@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ContextLoaderUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.support</a> &gt; <span class="el_source">ContextLoaderUtils.java</span></div><h1>ContextLoaderUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.support;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.ContextConfigurationAttributes;
+import org.springframework.test.context.ContextHierarchy;
+import org.springframework.test.context.SmartContextLoader;
+import org.springframework.test.util.MetaAnnotationUtils.AnnotationDescriptor;
+import org.springframework.test.util.MetaAnnotationUtils.UntypedAnnotationDescriptor;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+import static org.springframework.core.annotation.AnnotationUtils.getAnnotation;
+import static org.springframework.core.annotation.AnnotationUtils.isAnnotationDeclaredLocally;
+import static org.springframework.test.util.MetaAnnotationUtils.findAnnotationDescriptor;
+import static org.springframework.test.util.MetaAnnotationUtils.findAnnotationDescriptorForTypes;
+
+/**
+ * Utility methods for resolving {@link ContextConfigurationAttributes} from the
+ * {@link ContextConfiguration @ContextConfiguration} and
+ * {@link ContextHierarchy @ContextHierarchy} annotations for use with
+ * {@link SmartContextLoader SmartContextLoaders}.
+ *
+ * @author Sam Brannen
+ * @since 3.1
+ * @see SmartContextLoader
+ * @see ContextConfigurationAttributes
+ * @see ContextConfiguration
+ * @see ContextHierarchy
+ */
+<span class="nc" id="L57">abstract class ContextLoaderUtils {</span>
+
+	static final String GENERATED_CONTEXT_HIERARCHY_LEVEL_PREFIX = &quot;ContextHierarchyLevel#&quot;;
+
+<span class="fc" id="L61">	private static final Log logger = LogFactory.getLog(ContextLoaderUtils.class);</span>
+
+
+	/**
+	 * Resolve the list of lists of {@linkplain ContextConfigurationAttributes context
+	 * configuration attributes} for the supplied {@linkplain Class test class} and its
+	 * superclasses, taking into account context hierarchies declared via
+	 * {@link ContextHierarchy @ContextHierarchy} and
+	 * {@link ContextConfiguration @ContextConfiguration}.
+	 * &lt;p&gt;The outer list represents a top-down ordering of context configuration
+	 * attributes, where each element in the list represents the context configuration
+	 * declared on a given test class in the class hierarchy. Each nested list
+	 * contains the context configuration attributes declared either via a single
+	 * instance of {@code @ContextConfiguration} on the particular class or via
+	 * multiple instances of {@code @ContextConfiguration} declared within a
+	 * single {@code @ContextHierarchy} instance on the particular class.
+	 * Furthermore, each nested list maintains the order in which
+	 * {@code @ContextConfiguration} instances are declared.
+	 * &lt;p&gt;Note that the {@link ContextConfiguration#inheritLocations inheritLocations} and
+	 * {@link ContextConfiguration#inheritInitializers() inheritInitializers} flags of
+	 * {@link ContextConfiguration @ContextConfiguration} will &lt;strong&gt;not&lt;/strong&gt;
+	 * be taken into consideration. If these flags need to be honored, that must be
+	 * handled manually when traversing the nested lists returned by this method.
+	 * @param testClass the class for which to resolve the context hierarchy attributes
+	 * (must not be {@code null})
+	 * @return the list of lists of configuration attributes for the specified class;
+	 * never {@code null}
+	 * @throws IllegalArgumentException if the supplied class is {@code null}; or if
+	 * neither {@code @ContextConfiguration} nor {@code @ContextHierarchy} is
+	 * &lt;em&gt;present&lt;/em&gt; on the supplied class
+	 * @throws IllegalStateException if a test class or composed annotation
+	 * in the class hierarchy declares both {@code @ContextConfiguration} and
+	 * {@code @ContextHierarchy} as top-level annotations.
+	 * @since 3.2.2
+	 * @see #buildContextHierarchyMap(Class)
+	 * @see #resolveContextConfigurationAttributes(Class)
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	static List&lt;List&lt;ContextConfigurationAttributes&gt;&gt; resolveContextHierarchyAttributes(Class&lt;?&gt; testClass) {
+<span class="fc" id="L100">		Assert.notNull(testClass, &quot;Class must not be null&quot;);</span>
+
+<span class="fc" id="L102">		Class&lt;ContextConfiguration&gt; contextConfigType = ContextConfiguration.class;</span>
+<span class="fc" id="L103">		Class&lt;ContextHierarchy&gt; contextHierarchyType = ContextHierarchy.class;</span>
+<span class="fc" id="L104">		List&lt;List&lt;ContextConfigurationAttributes&gt;&gt; hierarchyAttributes = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L106">		UntypedAnnotationDescriptor desc =</span>
+<span class="fc" id="L107">				findAnnotationDescriptorForTypes(testClass, contextConfigType, contextHierarchyType);</span>
+<span class="pc" id="L108">		Assert.notNull(desc, () -&gt; String.format(</span>
+					&quot;Could not find an 'annotation declaring class' for annotation type [%s] or [%s] and test class [%s]&quot;,
+<span class="nc" id="L110">					contextConfigType.getName(), contextHierarchyType.getName(), testClass.getName()));</span>
+
+<span class="fc bfc" id="L112" title="All 2 branches covered.">		while (desc != null) {</span>
+<span class="fc" id="L113">			Class&lt;?&gt; rootDeclaringClass = desc.getRootDeclaringClass();</span>
+<span class="fc" id="L114">			Class&lt;?&gt; declaringClass = desc.getDeclaringClass();</span>
+
+<span class="fc" id="L116">			boolean contextConfigDeclaredLocally = isAnnotationDeclaredLocally(contextConfigType, declaringClass);</span>
+<span class="fc" id="L117">			boolean contextHierarchyDeclaredLocally = isAnnotationDeclaredLocally(contextHierarchyType, declaringClass);</span>
+
+<span class="fc bfc" id="L119" title="All 4 branches covered.">			if (contextConfigDeclaredLocally &amp;&amp; contextHierarchyDeclaredLocally) {</span>
+<span class="fc" id="L120">				String msg = String.format(&quot;Class [%s] has been configured with both @ContextConfiguration &quot; +</span>
+						&quot;and @ContextHierarchy. Only one of these annotations may be declared on a test class &quot; +
+<span class="fc" id="L122">						&quot;or composed annotation.&quot;, declaringClass.getName());</span>
+<span class="fc" id="L123">				logger.error(msg);</span>
+<span class="fc" id="L124">				throw new IllegalStateException(msg);</span>
+			}
+
+<span class="fc" id="L127">			List&lt;ContextConfigurationAttributes&gt; configAttributesList = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L129" title="All 2 branches covered.">			if (contextConfigDeclaredLocally) {</span>
+<span class="fc" id="L130">				ContextConfiguration contextConfiguration = AnnotationUtils.synthesizeAnnotation(</span>
+<span class="fc" id="L131">						desc.getAnnotationAttributes(), ContextConfiguration.class, desc.getRootDeclaringClass());</span>
+<span class="fc" id="L132">				convertContextConfigToConfigAttributesAndAddToList(</span>
+						contextConfiguration, rootDeclaringClass, configAttributesList);
+<span class="fc" id="L134">			}</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">			else if (contextHierarchyDeclaredLocally) {</span>
+<span class="fc" id="L136">				ContextHierarchy contextHierarchy = getAnnotation(declaringClass, contextHierarchyType);</span>
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">				if (contextHierarchy != null) {</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">					for (ContextConfiguration contextConfiguration : contextHierarchy.value()) {</span>
+<span class="fc" id="L139">						convertContextConfigToConfigAttributesAndAddToList(</span>
+								contextConfiguration, rootDeclaringClass, configAttributesList);
+					}
+				}
+<span class="fc" id="L143">			}</span>
+			else {
+				// This should theoretically never happen...
+<span class="nc" id="L146">				String msg = String.format(&quot;Test class [%s] has been configured with neither @ContextConfiguration &quot; +</span>
+<span class="nc" id="L147">						&quot;nor @ContextHierarchy as a class-level annotation.&quot;, rootDeclaringClass.getName());</span>
+<span class="nc" id="L148">				logger.error(msg);</span>
+<span class="nc" id="L149">				throw new IllegalStateException(msg);</span>
+			}
+
+<span class="fc" id="L152">			hierarchyAttributes.add(0, configAttributesList);</span>
+<span class="fc" id="L153">			desc = findAnnotationDescriptorForTypes(</span>
+<span class="fc" id="L154">					rootDeclaringClass.getSuperclass(), contextConfigType, contextHierarchyType);</span>
+<span class="fc" id="L155">		}</span>
+
+<span class="fc" id="L157">		return hierarchyAttributes;</span>
+	}
+
+	/**
+	 * Build a &lt;em&gt;context hierarchy map&lt;/em&gt; for the supplied {@linkplain Class
+	 * test class} and its superclasses, taking into account context hierarchies
+	 * declared via {@link ContextHierarchy @ContextHierarchy} and
+	 * {@link ContextConfiguration @ContextConfiguration}.
+	 * &lt;p&gt;Each value in the map represents the consolidated list of {@linkplain
+	 * ContextConfigurationAttributes context configuration attributes} for a
+	 * given level in the context hierarchy (potentially across the test class
+	 * hierarchy), keyed by the {@link ContextConfiguration#name() name} of the
+	 * context hierarchy level.
+	 * &lt;p&gt;If a given level in the context hierarchy does not have an explicit
+	 * name (i.e., configured via {@link ContextConfiguration#name}), a name will
+	 * be generated for that hierarchy level by appending the numerical level to
+	 * the {@link #GENERATED_CONTEXT_HIERARCHY_LEVEL_PREFIX}.
+	 * @param testClass the class for which to resolve the context hierarchy map
+	 * (must not be {@code null})
+	 * @return a map of context configuration attributes for the context hierarchy,
+	 * keyed by context hierarchy level name; never {@code null}
+	 * @throws IllegalArgumentException if the lists of context configuration
+	 * attributes for each level in the {@code @ContextHierarchy} do not define
+	 * unique context configuration within the overall hierarchy.
+	 * @since 3.2.2
+	 * @see #resolveContextHierarchyAttributes(Class)
+	 */
+	static Map&lt;String, List&lt;ContextConfigurationAttributes&gt;&gt; buildContextHierarchyMap(Class&lt;?&gt; testClass) {
+<span class="fc" id="L185">		final Map&lt;String, List&lt;ContextConfigurationAttributes&gt;&gt; map = new LinkedHashMap&lt;&gt;();</span>
+<span class="fc" id="L186">		int hierarchyLevel = 1;</span>
+
+<span class="fc bfc" id="L188" title="All 2 branches covered.">		for (List&lt;ContextConfigurationAttributes&gt; configAttributesList : resolveContextHierarchyAttributes(testClass)) {</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">			for (ContextConfigurationAttributes configAttributes : configAttributesList) {</span>
+<span class="fc" id="L190">				String name = configAttributes.getName();</span>
+
+				// Assign a generated name?
+<span class="fc bfc" id="L193" title="All 2 branches covered.">				if (!StringUtils.hasText(name)) {</span>
+<span class="fc" id="L194">					name = GENERATED_CONTEXT_HIERARCHY_LEVEL_PREFIX + hierarchyLevel;</span>
+				}
+
+				// Encountered a new context hierarchy level?
+<span class="fc bfc" id="L198" title="All 2 branches covered.">				if (!map.containsKey(name)) {</span>
+<span class="fc" id="L199">					hierarchyLevel++;</span>
+<span class="fc" id="L200">					map.put(name, new ArrayList&lt;&gt;());</span>
+				}
+
+<span class="fc" id="L203">				map.get(name).add(configAttributes);</span>
+<span class="fc" id="L204">			}</span>
+<span class="fc" id="L205">		}</span>
+
+		// Check for uniqueness
+<span class="fc" id="L208">		Set&lt;List&lt;ContextConfigurationAttributes&gt;&gt; set = new HashSet&lt;&gt;(map.values());</span>
+<span class="fc bfc" id="L209" title="All 2 branches covered.">		if (set.size() != map.size()) {</span>
+<span class="fc" id="L210">			String msg = String.format(&quot;The @ContextConfiguration elements configured via @ContextHierarchy in &quot; +</span>
+					&quot;test class [%s] and its superclasses must define unique contexts per hierarchy level.&quot;,
+<span class="fc" id="L212">					testClass.getName());</span>
+<span class="fc" id="L213">			logger.error(msg);</span>
+<span class="fc" id="L214">			throw new IllegalStateException(msg);</span>
+		}
+
+<span class="fc" id="L217">		return map;</span>
+	}
+
+	/**
+	 * Resolve the list of {@linkplain ContextConfigurationAttributes context
+	 * configuration attributes} for the supplied {@linkplain Class test class} and its
+	 * superclasses.
+	 * &lt;p&gt;Note that the {@link ContextConfiguration#inheritLocations inheritLocations} and
+	 * {@link ContextConfiguration#inheritInitializers() inheritInitializers} flags of
+	 * {@link ContextConfiguration @ContextConfiguration} will &lt;strong&gt;not&lt;/strong&gt;
+	 * be taken into consideration. If these flags need to be honored, that must be
+	 * handled manually when traversing the list returned by this method.
+	 * @param testClass the class for which to resolve the configuration attributes
+	 * (must not be {@code null})
+	 * @return the list of configuration attributes for the specified class, ordered
+	 * &lt;em&gt;bottom-up&lt;/em&gt; (i.e., as if we were traversing up the class hierarchy);
+	 * never {@code null}
+	 * @throws IllegalArgumentException if the supplied class is {@code null} or if
+	 * {@code @ContextConfiguration} is not &lt;em&gt;present&lt;/em&gt; on the supplied class
+	 */
+	static List&lt;ContextConfigurationAttributes&gt; resolveContextConfigurationAttributes(Class&lt;?&gt; testClass) {
+<span class="fc" id="L238">		Assert.notNull(testClass, &quot;Class must not be null&quot;);</span>
+
+<span class="fc" id="L240">		List&lt;ContextConfigurationAttributes&gt; attributesList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L241">		Class&lt;ContextConfiguration&gt; annotationType = ContextConfiguration.class;</span>
+
+<span class="fc" id="L243">		AnnotationDescriptor&lt;ContextConfiguration&gt; descriptor = findAnnotationDescriptor(testClass, annotationType);</span>
+<span class="pc" id="L244">		Assert.notNull(descriptor, () -&gt; String.format(</span>
+					&quot;Could not find an 'annotation declaring class' for annotation type [%s] and class [%s]&quot;,
+<span class="nc" id="L246">					annotationType.getName(), testClass.getName()));</span>
+
+<span class="fc bfc" id="L248" title="All 2 branches covered.">		while (descriptor != null) {</span>
+<span class="fc" id="L249">			convertContextConfigToConfigAttributesAndAddToList(descriptor.synthesizeAnnotation(),</span>
+<span class="fc" id="L250">					descriptor.getRootDeclaringClass(), attributesList);</span>
+<span class="fc" id="L251">			descriptor = findAnnotationDescriptor(descriptor.getRootDeclaringClass().getSuperclass(), annotationType);</span>
+		}
+
+<span class="fc" id="L254">		return attributesList;</span>
+	}
+
+	/**
+	 * Convenience method for creating a {@link ContextConfigurationAttributes}
+	 * instance from the supplied {@link ContextConfiguration} annotation and
+	 * declaring class and then adding the attributes to the supplied list.
+	 */
+	private static void convertContextConfigToConfigAttributesAndAddToList(ContextConfiguration contextConfiguration,
+			Class&lt;?&gt; declaringClass, final List&lt;ContextConfigurationAttributes&gt; attributesList) {
+
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L266">			logger.trace(String.format(&quot;Retrieved @ContextConfiguration [%s] for declaring class [%s].&quot;,</span>
+<span class="nc" id="L267">					contextConfiguration, declaringClass.getName()));</span>
+		}
+<span class="fc" id="L269">		ContextConfigurationAttributes attributes =</span>
+				new ContextConfigurationAttributes(declaringClass, contextConfiguration);
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L272">			logger.trace(&quot;Resolved context configuration attributes: &quot; + attributes);</span>
+		}
+<span class="fc" id="L274">		attributesList.add(attributes);</span>
+<span class="fc" id="L275">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

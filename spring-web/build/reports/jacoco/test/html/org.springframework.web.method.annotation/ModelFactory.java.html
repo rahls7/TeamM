@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ModelFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.method.annotation</a> &gt; <span class="el_source">ModelFactory.java</span></div><h1>ModelFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.method.annotation;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.core.Conventions;
+import org.springframework.core.GenericTypeResolver;
+import org.springframework.core.MethodParameter;
+import org.springframework.lang.Nullable;
+import org.springframework.ui.Model;
+import org.springframework.ui.ModelMap;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.validation.BindingResult;
+import org.springframework.web.HttpSessionRequiredException;
+import org.springframework.web.bind.WebDataBinder;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.bind.support.WebDataBinderFactory;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.method.support.InvocableHandlerMethod;
+import org.springframework.web.method.support.ModelAndViewContainer;
+
+/**
+ * Assist with initialization of the {@link Model} before controller method
+ * invocation and with updates to it after the invocation.
+ *
+ * &lt;p&gt;On initialization the model is populated with attributes temporarily stored
+ * in the session and through the invocation of {@code @ModelAttribute} methods.
+ *
+ * &lt;p&gt;On update model attributes are synchronized with the session and also
+ * {@link BindingResult} attributes are added if missing.
+ *
+ * @author Rossen Stoyanchev
+ * @since 3.1
+ */
+public final class ModelFactory {
+
+<span class="fc" id="L64">	private static final Log logger = LogFactory.getLog(ModelFactory.class);</span>
+
+<span class="fc" id="L66">	private final List&lt;ModelMethod&gt; modelMethods = new ArrayList&lt;&gt;();</span>
+
+	private final WebDataBinderFactory dataBinderFactory;
+
+	private final SessionAttributesHandler sessionAttributesHandler;
+
+
+	/**
+	 * Create a new instance with the given {@code @ModelAttribute} methods.
+	 * @param handlerMethods the {@code @ModelAttribute} methods to invoke
+	 * @param binderFactory for preparation of {@link BindingResult} attributes
+	 * @param attributeHandler for access to session attributes
+	 */
+	public ModelFactory(@Nullable List&lt;InvocableHandlerMethod&gt; handlerMethods,
+<span class="fc" id="L80">			WebDataBinderFactory binderFactory, SessionAttributesHandler attributeHandler) {</span>
+
+<span class="fc bfc" id="L82" title="All 2 branches covered.">		if (handlerMethods != null) {</span>
+<span class="fc bfc" id="L83" title="All 2 branches covered.">			for (InvocableHandlerMethod handlerMethod : handlerMethods) {</span>
+<span class="fc" id="L84">				this.modelMethods.add(new ModelMethod(handlerMethod));</span>
+<span class="fc" id="L85">			}</span>
+		}
+<span class="fc" id="L87">		this.dataBinderFactory = binderFactory;</span>
+<span class="fc" id="L88">		this.sessionAttributesHandler = attributeHandler;</span>
+<span class="fc" id="L89">	}</span>
+
+
+	/**
+	 * Populate the model in the following order:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;Retrieve &quot;known&quot; session attributes listed as {@code @SessionAttributes}.
+	 * &lt;li&gt;Invoke {@code @ModelAttribute} methods
+	 * &lt;li&gt;Find {@code @ModelAttribute} method arguments also listed as
+	 * {@code @SessionAttributes} and ensure they're present in the model raising
+	 * an exception if necessary.
+	 * &lt;/ol&gt;
+	 * @param request the current request
+	 * @param container a container with the model to be initialized
+	 * @param handlerMethod the method for which the model is initialized
+	 * @throws Exception may arise from {@code @ModelAttribute} methods
+	 */
+	public void initModel(NativeWebRequest request, ModelAndViewContainer container, HandlerMethod handlerMethod)
+			throws Exception {
+
+<span class="fc" id="L109">		Map&lt;String, ?&gt; sessionAttributes = this.sessionAttributesHandler.retrieveAttributes(request);</span>
+<span class="fc" id="L110">		container.mergeAttributes(sessionAttributes);</span>
+<span class="fc" id="L111">		invokeModelAttributeMethods(request, container);</span>
+
+<span class="fc bfc" id="L113" title="All 2 branches covered.">		for (String name : findSessionAttributeArguments(handlerMethod)) {</span>
+<span class="fc bfc" id="L114" title="All 2 branches covered.">			if (!container.containsAttribute(name)) {</span>
+<span class="fc" id="L115">				Object value = this.sessionAttributesHandler.retrieveAttribute(request, name);</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">				if (value == null) {</span>
+<span class="fc" id="L117">					throw new HttpSessionRequiredException(&quot;Expected session attribute '&quot; + name + &quot;'&quot;, name);</span>
+				}
+<span class="nc" id="L119">				container.addAttribute(name, value);</span>
+			}
+<span class="fc" id="L121">		}</span>
+<span class="fc" id="L122">	}</span>
+
+	/**
+	 * Invoke model attribute methods to populate the model.
+	 * Attributes are added only if not already present in the model.
+	 */
+	private void invokeModelAttributeMethods(NativeWebRequest request, ModelAndViewContainer container)
+			throws Exception {
+
+<span class="fc bfc" id="L131" title="All 2 branches covered.">		while (!this.modelMethods.isEmpty()) {</span>
+<span class="fc" id="L132">			InvocableHandlerMethod modelMethod = getNextModelMethod(container).getHandlerMethod();</span>
+<span class="fc" id="L133">			ModelAttribute ann = modelMethod.getMethodAnnotation(ModelAttribute.class);</span>
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">			Assert.state(ann != null, &quot;No ModelAttribute annotation&quot;);</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">			if (container.containsAttribute(ann.name())) {</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">				if (!ann.binding()) {</span>
+<span class="fc" id="L137">					container.setBindingDisabled(ann.name());</span>
+				}
+				continue;
+			}
+
+<span class="fc" id="L142">			Object returnValue = modelMethod.invokeForRequest(request, container);</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">			if (!modelMethod.isVoid()){</span>
+<span class="fc" id="L144">				String returnValueName = getNameForReturnValue(returnValue, modelMethod.getReturnType());</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">				if (!ann.binding()) {</span>
+<span class="fc" id="L146">					container.setBindingDisabled(returnValueName);</span>
+				}
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">				if (!container.containsAttribute(returnValueName)) {</span>
+<span class="fc" id="L149">					container.addAttribute(returnValueName, returnValue);</span>
+				}
+			}
+<span class="fc" id="L152">		}</span>
+<span class="fc" id="L153">	}</span>
+
+	private ModelMethod getNextModelMethod(ModelAndViewContainer container) {
+<span class="fc bfc" id="L156" title="All 2 branches covered.">		for (ModelMethod modelMethod : this.modelMethods) {</span>
+<span class="fc bfc" id="L157" title="All 2 branches covered.">			if (modelMethod.checkDependencies(container)) {</span>
+<span class="fc" id="L158">				this.modelMethods.remove(modelMethod);</span>
+<span class="fc" id="L159">				return modelMethod;</span>
+			}
+<span class="fc" id="L161">		}</span>
+<span class="fc" id="L162">		ModelMethod modelMethod = this.modelMethods.get(0);</span>
+<span class="fc" id="L163">		this.modelMethods.remove(modelMethod);</span>
+<span class="fc" id="L164">		return modelMethod;</span>
+	}
+
+	/**
+	 * Find {@code @ModelAttribute} arguments also listed as {@code @SessionAttributes}.
+	 */
+	private List&lt;String&gt; findSessionAttributeArguments(HandlerMethod handlerMethod) {
+<span class="fc" id="L171">		List&lt;String&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">		for (MethodParameter parameter : handlerMethod.getMethodParameters()) {</span>
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">			if (parameter.hasParameterAnnotation(ModelAttribute.class)) {</span>
+<span class="fc" id="L174">				String name = getNameForParameter(parameter);</span>
+<span class="fc" id="L175">				Class&lt;?&gt; paramType = parameter.getParameterType();</span>
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">				if (this.sessionAttributesHandler.isHandlerSessionAttribute(name, paramType)) {</span>
+<span class="fc" id="L177">					result.add(name);</span>
+				}
+			}
+		}
+<span class="fc" id="L181">		return result;</span>
+	}
+
+	/**
+	 * Promote model attributes listed as {@code @SessionAttributes} to the session.
+	 * Add {@link BindingResult} attributes where necessary.
+	 * @param request the current request
+	 * @param container contains the model to update
+	 * @throws Exception if creating BindingResult attributes fails
+	 */
+	public void updateModel(NativeWebRequest request, ModelAndViewContainer container) throws Exception {
+<span class="fc" id="L192">		ModelMap defaultModel = container.getDefaultModel();</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">		if (container.getSessionStatus().isComplete()){</span>
+<span class="fc" id="L194">			this.sessionAttributesHandler.cleanupAttributes(request);</span>
+		}
+		else {
+<span class="fc" id="L197">			this.sessionAttributesHandler.storeAttributes(request, defaultModel);</span>
+		}
+<span class="pc bpc" id="L199" title="1 of 4 branches missed.">		if (!container.isRequestHandled() &amp;&amp; container.getModel() == defaultModel) {</span>
+<span class="fc" id="L200">			updateBindingResult(request, defaultModel);</span>
+		}
+<span class="fc" id="L202">	}</span>
+
+	/**
+	 * Add {@link BindingResult} attributes to the model for attributes that require it.
+	 */
+	private void updateBindingResult(NativeWebRequest request, ModelMap model) throws Exception {
+<span class="fc" id="L208">		List&lt;String&gt; keyNames = new ArrayList&lt;&gt;(model.keySet());</span>
+<span class="fc bfc" id="L209" title="All 2 branches covered.">		for (String name : keyNames) {</span>
+<span class="fc" id="L210">			Object value = model.get(name);</span>
+<span class="pc bpc" id="L211" title="2 of 4 branches missed.">			if (value != null &amp;&amp; isBindingCandidate(name, value)) {</span>
+<span class="fc" id="L212">				String bindingResultKey = BindingResult.MODEL_KEY_PREFIX + name;</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">				if (!model.containsAttribute(bindingResultKey)) {</span>
+<span class="fc" id="L214">					WebDataBinder dataBinder = this.dataBinderFactory.createBinder(request, value, name);</span>
+<span class="fc" id="L215">					model.put(bindingResultKey, dataBinder.getBindingResult());</span>
+				}
+			}
+<span class="fc" id="L218">		}</span>
+<span class="fc" id="L219">	}</span>
+
+	/**
+	 * Whether the given attribute requires a {@link BindingResult} in the model.
+	 */
+	private boolean isBindingCandidate(String attributeName, Object value) {
+<span class="pc bpc" id="L225" title="1 of 2 branches missed.">		if (attributeName.startsWith(BindingResult.MODEL_KEY_PREFIX)) {</span>
+<span class="nc" id="L226">			return false;</span>
+		}
+
+<span class="fc bfc" id="L229" title="All 2 branches covered.">		if (this.sessionAttributesHandler.isHandlerSessionAttribute(attributeName, value.getClass())) {</span>
+<span class="fc" id="L230">			return true;</span>
+		}
+
+<span class="pc bpc" id="L233" title="3 of 6 branches missed.">		return (!value.getClass().isArray() &amp;&amp; !(value instanceof Collection) &amp;&amp;</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">				!(value instanceof Map) &amp;&amp; !BeanUtils.isSimpleValueType(value.getClass()));</span>
+	}
+
+
+	/**
+	 * Derive the model attribute name for the given method parameter based on
+	 * a {@code @ModelAttribute} parameter annotation (if present) or falling
+	 * back on parameter type based conventions.
+	 * @param parameter a descriptor for the method parameter
+	 * @return the derived name
+	 * @see Conventions#getVariableNameForParameter(MethodParameter)
+	 */
+	public static String getNameForParameter(MethodParameter parameter) {
+<span class="fc" id="L247">		ModelAttribute ann = parameter.getParameterAnnotation(ModelAttribute.class);</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">		String name = (ann != null ? ann.value() : null);</span>
+<span class="fc bfc" id="L249" title="All 2 branches covered.">		return (StringUtils.hasText(name) ? name : Conventions.getVariableNameForParameter(parameter));</span>
+	}
+
+	/**
+	 * Derive the model attribute name for the given return value. Results will be
+	 * based on:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;the method {@code ModelAttribute} annotation value
+	 * &lt;li&gt;the declared return type if it is more specific than {@code Object}
+	 * &lt;li&gt;the actual return value type
+	 * &lt;/ol&gt;
+	 * @param returnValue the value returned from a method invocation
+	 * @param returnType a descriptor for the return type of the method
+	 * @return the derived name (never {@code null} or empty String)
+	 */
+	public static String getNameForReturnValue(@Nullable Object returnValue, MethodParameter returnType) {
+<span class="fc" id="L265">		ModelAttribute ann = returnType.getMethodAnnotation(ModelAttribute.class);</span>
+<span class="fc bfc" id="L266" title="All 4 branches covered.">		if (ann != null &amp;&amp; StringUtils.hasText(ann.value())) {</span>
+<span class="fc" id="L267">			return ann.value();</span>
+		}
+		else {
+<span class="fc" id="L270">			Method method = returnType.getMethod();</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">			Assert.state(method != null, &quot;No handler method&quot;);</span>
+<span class="fc" id="L272">			Class&lt;?&gt; containingClass = returnType.getContainingClass();</span>
+<span class="fc" id="L273">			Class&lt;?&gt; resolvedType = GenericTypeResolver.resolveReturnType(method, containingClass);</span>
+<span class="fc" id="L274">			return Conventions.getVariableNameForReturnType(method, resolvedType, returnValue);</span>
+		}
+	}
+
+
+	private static class ModelMethod {
+
+		private final InvocableHandlerMethod handlerMethod;
+
+<span class="fc" id="L283">		private final Set&lt;String&gt; dependencies = new HashSet&lt;&gt;();</span>
+
+<span class="fc" id="L285">		public ModelMethod(InvocableHandlerMethod handlerMethod) {</span>
+<span class="fc" id="L286">			this.handlerMethod = handlerMethod;</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">			for (MethodParameter parameter : handlerMethod.getMethodParameters()) {</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">				if (parameter.hasParameterAnnotation(ModelAttribute.class)) {</span>
+<span class="fc" id="L289">					this.dependencies.add(getNameForParameter(parameter));</span>
+				}
+			}
+<span class="fc" id="L292">		}</span>
+
+		public InvocableHandlerMethod getHandlerMethod() {
+<span class="fc" id="L295">			return this.handlerMethod;</span>
+		}
+
+		public boolean checkDependencies(ModelAndViewContainer mavContainer) {
+<span class="fc bfc" id="L299" title="All 2 branches covered.">			for (String name : this.dependencies) {</span>
+<span class="fc bfc" id="L300" title="All 2 branches covered.">				if (!mavContainer.containsAttribute(name)) {</span>
+<span class="fc" id="L301">					return false;</span>
+				}
+<span class="fc" id="L303">			}</span>
+<span class="fc" id="L304">			return true;</span>
+		}
+
+		public List&lt;String&gt; getUnresolvedDependencies(ModelAndViewContainer mavContainer) {
+<span class="nc" id="L308">			List&lt;String&gt; result = new ArrayList&lt;&gt;(this.dependencies.size());</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">			for (String name : this.dependencies) {</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">				if (!mavContainer.containsAttribute(name)) {</span>
+<span class="nc" id="L311">					result.add(name);</span>
+				}
+<span class="nc" id="L313">			}</span>
+<span class="nc" id="L314">			return result;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L319">			return this.handlerMethod.getMethod().toGenericString();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

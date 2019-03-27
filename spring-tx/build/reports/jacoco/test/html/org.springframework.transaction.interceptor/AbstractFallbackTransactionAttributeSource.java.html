@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractFallbackTransactionAttributeSource.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.interceptor</a> &gt; <span class="el_source">AbstractFallbackTransactionAttributeSource.java</span></div><h1>AbstractFallbackTransactionAttributeSource.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.interceptor;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aop.support.AopUtils;
+import org.springframework.core.MethodClassKey;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Abstract implementation of {@link TransactionAttributeSource} that caches
+ * attributes for methods and implements a fallback policy: 1. specific target
+ * method; 2. target class; 3. declaring method; 4. declaring class/interface.
+ *
+ * &lt;p&gt;Defaults to using the target class's transaction attribute if none is
+ * associated with the target method. Any transaction attribute associated with
+ * the target method completely overrides a class transaction attribute.
+ * If none found on the target class, the interface that the invoked method
+ * has been called through (in case of a JDK proxy) will be checked.
+ *
+ * &lt;p&gt;This implementation caches attributes by method after they are first used.
+ * If it is ever desirable to allow dynamic changing of transaction attributes
+ * (which is very unlikely), caching could be made configurable. Caching is
+ * desirable because of the cost of evaluating rollback rules.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @since 1.1
+ */
+<span class="fc" id="L52">public abstract class AbstractFallbackTransactionAttributeSource implements TransactionAttributeSource {</span>
+
+	/**
+	 * Canonical value held in cache to indicate no transaction attribute was
+	 * found for this method, and we don't need to look again.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L59">	private static final TransactionAttribute NULL_TRANSACTION_ATTRIBUTE = new DefaultTransactionAttribute() {</span>
+		@Override
+		public String toString() {
+<span class="nc" id="L62">			return &quot;null&quot;;</span>
+		}
+	};
+
+
+	/**
+	 * Logger available to subclasses.
+	 * &lt;p&gt;As this base class is not marked Serializable, the logger will be recreated
+	 * after serialization - provided that the concrete subclass is Serializable.
+	 */
+<span class="fc" id="L72">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	/**
+	 * Cache of TransactionAttributes, keyed by method on a specific target class.
+	 * &lt;p&gt;As this base class is not marked Serializable, the cache will be recreated
+	 * after serialization - provided that the concrete subclass is Serializable.
+	 */
+<span class="fc" id="L79">	private final Map&lt;Object, TransactionAttribute&gt; attributeCache = new ConcurrentHashMap&lt;&gt;(1024);</span>
+
+
+	/**
+	 * Determine the transaction attribute for this method invocation.
+	 * &lt;p&gt;Defaults to the class's transaction attribute if no method attribute is found.
+	 * @param method the method for the current invocation (never {@code null})
+	 * @param targetClass the target class for this invocation (may be {@code null})
+	 * @return a TransactionAttribute for this method, or {@code null} if the method
+	 * is not transactional
+	 */
+	@Override
+	@Nullable
+	public TransactionAttribute getTransactionAttribute(Method method, @Nullable Class&lt;?&gt; targetClass) {
+<span class="fc bfc" id="L93" title="All 2 branches covered.">		if (method.getDeclaringClass() == Object.class) {</span>
+<span class="fc" id="L94">			return null;</span>
+		}
+
+		// First, see if we have a cached value.
+<span class="fc" id="L98">		Object cacheKey = getCacheKey(method, targetClass);</span>
+<span class="fc" id="L99">		TransactionAttribute cached = this.attributeCache.get(cacheKey);</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">		if (cached != null) {</span>
+			// Value will either be canonical value indicating there is no transaction attribute,
+			// or an actual transaction attribute.
+<span class="fc bfc" id="L103" title="All 2 branches covered.">			if (cached == NULL_TRANSACTION_ATTRIBUTE) {</span>
+<span class="fc" id="L104">				return null;</span>
+			}
+			else {
+<span class="fc" id="L107">				return cached;</span>
+			}
+		}
+		else {
+			// We need to work it out.
+<span class="fc" id="L112">			TransactionAttribute txAttr = computeTransactionAttribute(method, targetClass);</span>
+			// Put it in the cache.
+<span class="fc bfc" id="L114" title="All 2 branches covered.">			if (txAttr == null) {</span>
+<span class="fc" id="L115">				this.attributeCache.put(cacheKey, NULL_TRANSACTION_ATTRIBUTE);</span>
+			}
+			else {
+<span class="fc" id="L118">				String methodIdentification = ClassUtils.getQualifiedMethodName(method, targetClass);</span>
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">				if (txAttr instanceof DefaultTransactionAttribute) {</span>
+<span class="fc" id="L120">					((DefaultTransactionAttribute) txAttr).setDescriptor(methodIdentification);</span>
+				}
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L123">					logger.trace(&quot;Adding transactional method '&quot; + methodIdentification + &quot;' with attribute: &quot; + txAttr);</span>
+				}
+<span class="fc" id="L125">				this.attributeCache.put(cacheKey, txAttr);</span>
+			}
+<span class="fc" id="L127">			return txAttr;</span>
+		}
+	}
+
+	/**
+	 * Determine a cache key for the given method and target class.
+	 * &lt;p&gt;Must not produce same key for overloaded methods.
+	 * Must produce same key for different instances of the same method.
+	 * @param method the method (never {@code null})
+	 * @param targetClass the target class (may be {@code null})
+	 * @return the cache key (never {@code null})
+	 */
+	protected Object getCacheKey(Method method, @Nullable Class&lt;?&gt; targetClass) {
+<span class="fc" id="L140">		return new MethodClassKey(method, targetClass);</span>
+	}
+
+	/**
+	 * Same signature as {@link #getTransactionAttribute}, but doesn't cache the result.
+	 * {@link #getTransactionAttribute} is effectively a caching decorator for this method.
+	 * &lt;p&gt;As of 4.1.8, this method can be overridden.
+	 * @since 4.1.8
+	 * @see #getTransactionAttribute
+	 */
+	@Nullable
+	protected TransactionAttribute computeTransactionAttribute(Method method, @Nullable Class&lt;?&gt; targetClass) {
+		// Don't allow no-public methods as required.
+<span class="fc bfc" id="L153" title="All 4 branches covered.">		if (allowPublicMethodsOnly() &amp;&amp; !Modifier.isPublic(method.getModifiers())) {</span>
+<span class="fc" id="L154">			return null;</span>
+		}
+
+		// The method may be on an interface, but we need attributes from the target class.
+		// If the target class is null, the method will be unchanged.
+<span class="fc" id="L159">		Method specificMethod = AopUtils.getMostSpecificMethod(method, targetClass);</span>
+
+		// First try is the method in the target class.
+<span class="fc" id="L162">		TransactionAttribute txAttr = findTransactionAttribute(specificMethod);</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">		if (txAttr != null) {</span>
+<span class="fc" id="L164">			return txAttr;</span>
+		}
+
+		// Second try is the transaction attribute on the target class.
+<span class="fc" id="L168">		txAttr = findTransactionAttribute(specificMethod.getDeclaringClass());</span>
+<span class="fc bfc" id="L169" title="All 4 branches covered.">		if (txAttr != null &amp;&amp; ClassUtils.isUserLevelMethod(method)) {</span>
+<span class="fc" id="L170">			return txAttr;</span>
+		}
+
+<span class="fc bfc" id="L173" title="All 2 branches covered.">		if (specificMethod != method) {</span>
+			// Fallback is to look at the original method.
+<span class="fc" id="L175">			txAttr = findTransactionAttribute(method);</span>
+<span class="fc bfc" id="L176" title="All 2 branches covered.">			if (txAttr != null) {</span>
+<span class="fc" id="L177">				return txAttr;</span>
+			}
+			// Last fallback is the class of the original method.
+<span class="fc" id="L180">			txAttr = findTransactionAttribute(method.getDeclaringClass());</span>
+<span class="pc bpc" id="L181" title="1 of 4 branches missed.">			if (txAttr != null &amp;&amp; ClassUtils.isUserLevelMethod(method)) {</span>
+<span class="fc" id="L182">				return txAttr;</span>
+			}
+		}
+
+<span class="fc" id="L186">		return null;</span>
+	}
+
+
+	/**
+	 * Subclasses need to implement this to return the transaction attribute for the
+	 * given class, if any.
+	 * @param clazz the class to retrieve the attribute for
+	 * @return all transaction attribute associated with this class, or {@code null} if none
+	 */
+	@Nullable
+	protected abstract TransactionAttribute findTransactionAttribute(Class&lt;?&gt; clazz);
+
+	/**
+	 * Subclasses need to implement this to return the transaction attribute for the
+	 * given method, if any.
+	 * @param method the method to retrieve the attribute for
+	 * @return all transaction attribute associated with this method, or {@code null} if none
+	 */
+	@Nullable
+	protected abstract TransactionAttribute findTransactionAttribute(Method method);
+
+	/**
+	 * Should only public methods be allowed to have transactional semantics?
+	 * &lt;p&gt;The default implementation returns {@code false}.
+	 */
+	protected boolean allowPublicMethodsOnly() {
+<span class="fc" id="L213">		return false;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

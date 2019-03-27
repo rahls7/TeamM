@@ -1,0 +1,446 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HandlerMethod.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.handler</a> &gt; <span class="el_source">HandlerMethod.java</span></div><h1>HandlerMethod.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.handler;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.GenericTypeResolver;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.SynthesizingMethodParameter;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Encapsulates information about a handler method consisting of a
+ * {@linkplain #getMethod() method} and a {@linkplain #getBean() bean}.
+ * Provides convenient access to method parameters, the method return value,
+ * method annotations, etc.
+ *
+ * &lt;p&gt;The class may be created with a bean instance or with a bean name
+ * (e.g. lazy-init bean, prototype bean). Use {@link #createWithResolvedBean()}
+ * to obtain a {@code HandlerMethod} instance with a bean instance resolved
+ * through the associated {@link BeanFactory}.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 4.0
+ */
+public class HandlerMethod {
+
+	/** Public for wrapping with fallback logger. */
+<span class="fc" id="L58">	public static final Log defaultLogger = LogFactory.getLog(HandlerMethod.class);</span>
+
+
+<span class="pc" id="L61">	protected Log logger = defaultLogger;</span>
+
+	private final Object bean;
+
+	@Nullable
+	private final BeanFactory beanFactory;
+
+	private final Class&lt;?&gt; beanType;
+
+	private final Method method;
+
+	private final Method bridgedMethod;
+
+	private final MethodParameter[] parameters;
+
+	@Nullable
+	private HandlerMethod resolvedFromHandlerMethod;
+
+
+	/**
+	 * Create an instance from a bean instance and a method.
+	 */
+<span class="fc" id="L83">	public HandlerMethod(Object bean, Method method) {</span>
+<span class="fc" id="L84">		Assert.notNull(bean, &quot;Bean is required&quot;);</span>
+<span class="fc" id="L85">		Assert.notNull(method, &quot;Method is required&quot;);</span>
+<span class="fc" id="L86">		this.bean = bean;</span>
+<span class="fc" id="L87">		this.beanFactory = null;</span>
+<span class="fc" id="L88">		this.beanType = ClassUtils.getUserClass(bean);</span>
+<span class="fc" id="L89">		this.method = method;</span>
+<span class="fc" id="L90">		this.bridgedMethod = BridgeMethodResolver.findBridgedMethod(method);</span>
+<span class="fc" id="L91">		this.parameters = initMethodParameters();</span>
+<span class="fc" id="L92">	}</span>
+
+	/**
+	 * Create an instance from a bean instance, method name, and parameter types.
+	 * @throws NoSuchMethodException when the method cannot be found
+	 */
+<span class="nc" id="L98">	public HandlerMethod(Object bean, String methodName, Class&lt;?&gt;... parameterTypes) throws NoSuchMethodException {</span>
+<span class="nc" id="L99">		Assert.notNull(bean, &quot;Bean is required&quot;);</span>
+<span class="nc" id="L100">		Assert.notNull(methodName, &quot;Method name is required&quot;);</span>
+<span class="nc" id="L101">		this.bean = bean;</span>
+<span class="nc" id="L102">		this.beanFactory = null;</span>
+<span class="nc" id="L103">		this.beanType = ClassUtils.getUserClass(bean);</span>
+<span class="nc" id="L104">		this.method = bean.getClass().getMethod(methodName, parameterTypes);</span>
+<span class="nc" id="L105">		this.bridgedMethod = BridgeMethodResolver.findBridgedMethod(this.method);</span>
+<span class="nc" id="L106">		this.parameters = initMethodParameters();</span>
+<span class="nc" id="L107">	}</span>
+
+	/**
+	 * Create an instance from a bean name, a method, and a {@code BeanFactory}.
+	 * The method {@link #createWithResolvedBean()} may be used later to
+	 * re-create the {@code HandlerMethod} with an initialized bean.
+	 */
+<span class="fc" id="L114">	public HandlerMethod(String beanName, BeanFactory beanFactory, Method method) {</span>
+<span class="fc" id="L115">		Assert.hasText(beanName, &quot;Bean name is required&quot;);</span>
+<span class="fc" id="L116">		Assert.notNull(beanFactory, &quot;BeanFactory is required&quot;);</span>
+<span class="fc" id="L117">		Assert.notNull(method, &quot;Method is required&quot;);</span>
+<span class="fc" id="L118">		this.bean = beanName;</span>
+<span class="fc" id="L119">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L120">		Class&lt;?&gt; beanType = beanFactory.getType(beanName);</span>
+<span class="pc bpc" id="L121" title="1 of 2 branches missed.">		if (beanType == null) {</span>
+<span class="nc" id="L122">			throw new IllegalStateException(&quot;Cannot resolve bean type for bean with name '&quot; + beanName + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L124">		this.beanType = ClassUtils.getUserClass(beanType);</span>
+<span class="fc" id="L125">		this.method = method;</span>
+<span class="fc" id="L126">		this.bridgedMethod = BridgeMethodResolver.findBridgedMethod(method);</span>
+<span class="fc" id="L127">		this.parameters = initMethodParameters();</span>
+<span class="fc" id="L128">	}</span>
+
+	/**
+	 * Copy constructor for use in subclasses.
+	 */
+<span class="fc" id="L133">	protected HandlerMethod(HandlerMethod handlerMethod) {</span>
+<span class="fc" id="L134">		Assert.notNull(handlerMethod, &quot;HandlerMethod is required&quot;);</span>
+<span class="fc" id="L135">		this.bean = handlerMethod.bean;</span>
+<span class="fc" id="L136">		this.beanFactory = handlerMethod.beanFactory;</span>
+<span class="fc" id="L137">		this.beanType = handlerMethod.beanType;</span>
+<span class="fc" id="L138">		this.method = handlerMethod.method;</span>
+<span class="fc" id="L139">		this.bridgedMethod = handlerMethod.bridgedMethod;</span>
+<span class="fc" id="L140">		this.parameters = handlerMethod.parameters;</span>
+<span class="fc" id="L141">		this.resolvedFromHandlerMethod = handlerMethod.resolvedFromHandlerMethod;</span>
+<span class="fc" id="L142">	}</span>
+
+	/**
+	 * Re-create HandlerMethod with the resolved handler.
+	 */
+<span class="fc" id="L147">	private HandlerMethod(HandlerMethod handlerMethod, Object handler) {</span>
+<span class="fc" id="L148">		Assert.notNull(handlerMethod, &quot;HandlerMethod is required&quot;);</span>
+<span class="fc" id="L149">		Assert.notNull(handler, &quot;Handler object is required&quot;);</span>
+<span class="fc" id="L150">		this.bean = handler;</span>
+<span class="fc" id="L151">		this.beanFactory = handlerMethod.beanFactory;</span>
+<span class="fc" id="L152">		this.beanType = handlerMethod.beanType;</span>
+<span class="fc" id="L153">		this.method = handlerMethod.method;</span>
+<span class="fc" id="L154">		this.bridgedMethod = handlerMethod.bridgedMethod;</span>
+<span class="fc" id="L155">		this.parameters = handlerMethod.parameters;</span>
+<span class="fc" id="L156">		this.resolvedFromHandlerMethod = handlerMethod;</span>
+<span class="fc" id="L157">	}</span>
+
+
+	private MethodParameter[] initMethodParameters() {
+<span class="fc" id="L161">		int count = this.bridgedMethod.getParameterCount();</span>
+<span class="fc" id="L162">		MethodParameter[] result = new MethodParameter[count];</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">		for (int i = 0; i &lt; count; i++) {</span>
+<span class="fc" id="L164">			HandlerMethodParameter parameter = new HandlerMethodParameter(i);</span>
+<span class="fc" id="L165">			GenericTypeResolver.resolveParameterType(parameter, this.beanType);</span>
+<span class="fc" id="L166">			result[i] = parameter;</span>
+		}
+<span class="fc" id="L168">		return result;</span>
+	}
+
+
+	/**
+	 * Set an alternative logger to use than the one based on the class name.
+	 * @param logger the logger to use
+	 * @since 5.1
+	 */
+	public void setLogger(Log logger) {
+<span class="fc" id="L178">		this.logger = logger;</span>
+<span class="fc" id="L179">	}</span>
+
+	/**
+	 * Return the currently configured Logger.
+	 * @since 5.1
+	 */
+	public Log getLogger() {
+<span class="nc" id="L186">		return logger;</span>
+	}
+
+	/**
+	 * Return the bean for this handler method.
+	 */
+	public Object getBean() {
+<span class="fc" id="L193">		return this.bean;</span>
+	}
+
+	/**
+	 * Return the method for this handler method.
+	 */
+	public Method getMethod() {
+<span class="fc" id="L200">		return this.method;</span>
+	}
+
+	/**
+	 * This method returns the type of the handler for this handler method.
+	 * &lt;p&gt;Note that if the bean type is a CGLIB-generated class, the original
+	 * user-defined class is returned.
+	 */
+	public Class&lt;?&gt; getBeanType() {
+<span class="fc" id="L209">		return this.beanType;</span>
+	}
+
+	/**
+	 * If the bean method is a bridge method, this method returns the bridged
+	 * (user-defined) method. Otherwise it returns the same method as {@link #getMethod()}.
+	 */
+	protected Method getBridgedMethod() {
+<span class="fc" id="L217">		return this.bridgedMethod;</span>
+	}
+
+	/**
+	 * Return the method parameters for this handler method.
+	 */
+	public MethodParameter[] getMethodParameters() {
+<span class="fc" id="L224">		return this.parameters;</span>
+	}
+
+	/**
+	 * Return the HandlerMethod return type.
+	 */
+	public MethodParameter getReturnType() {
+<span class="fc" id="L231">		return new HandlerMethodParameter(-1);</span>
+	}
+
+	/**
+	 * Return the actual return value type.
+	 */
+	public MethodParameter getReturnValueType(@Nullable Object returnValue) {
+<span class="nc" id="L238">		return new ReturnValueMethodParameter(returnValue);</span>
+	}
+
+	/**
+	 * Return {@code true} if the method return type is void, {@code false} otherwise.
+	 */
+	public boolean isVoid() {
+<span class="nc" id="L245">		return Void.TYPE.equals(getReturnType().getParameterType());</span>
+	}
+
+	/**
+	 * Return a single annotation on the underlying method traversing its super methods
+	 * if no annotation can be found on the given method itself.
+	 * &lt;p&gt;Also supports &lt;em&gt;merged&lt;/em&gt; composed annotations with attribute
+	 * overrides as of Spring Framework 4.3.
+	 * @param annotationType the type of annotation to introspect the method for
+	 * @return the annotation, or {@code null} if none found
+	 * @see AnnotatedElementUtils#findMergedAnnotation
+	 */
+	@Nullable
+	public &lt;A extends Annotation&gt; A getMethodAnnotation(Class&lt;A&gt; annotationType) {
+<span class="nc" id="L259">		return AnnotatedElementUtils.findMergedAnnotation(this.method, annotationType);</span>
+	}
+
+	/**
+	 * Return whether the parameter is declared with the given annotation type.
+	 * @param annotationType the annotation type to look for
+	 * @since 4.3
+	 * @see AnnotatedElementUtils#hasAnnotation
+	 */
+	public &lt;A extends Annotation&gt; boolean hasMethodAnnotation(Class&lt;A&gt; annotationType) {
+<span class="fc" id="L269">		return AnnotatedElementUtils.hasAnnotation(this.method, annotationType);</span>
+	}
+
+	/**
+	 * Return the HandlerMethod from which this HandlerMethod instance was
+	 * resolved via {@link #createWithResolvedBean()}.
+	 * @since 4.3
+	 */
+	@Nullable
+	public HandlerMethod getResolvedFromHandlerMethod() {
+<span class="nc" id="L279">		return this.resolvedFromHandlerMethod;</span>
+	}
+
+	/**
+	 * If the provided instance contains a bean name rather than an object instance,
+	 * the bean name is resolved before a {@link HandlerMethod} is created and returned.
+	 */
+	public HandlerMethod createWithResolvedBean() {
+<span class="fc" id="L287">		Object handler = this.bean;</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">		if (this.bean instanceof String) {</span>
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">			Assert.state(this.beanFactory != null, &quot;Cannot resolve bean name without BeanFactory&quot;);</span>
+<span class="fc" id="L290">			String beanName = (String) this.bean;</span>
+<span class="fc" id="L291">			handler = this.beanFactory.getBean(beanName);</span>
+		}
+<span class="fc" id="L293">		return new HandlerMethod(this, handler);</span>
+	}
+
+	/**
+	 * Return a short representation of this handler method for log message purposes.
+	 */
+	public String getShortLogMessage() {
+<span class="fc" id="L300">		int args = this.method.getParameterCount();</span>
+<span class="fc" id="L301">		return getBeanType().getSimpleName() + &quot;#&quot; + this.method.getName() + &quot;[&quot; + args + &quot; args]&quot;;</span>
+	}
+
+
+	@Override
+	public boolean equals(Object other) {
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">		if (this == other) {</span>
+<span class="nc" id="L308">			return true;</span>
+		}
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">		if (!(other instanceof HandlerMethod)) {</span>
+<span class="nc" id="L311">			return false;</span>
+		}
+<span class="fc" id="L313">		HandlerMethod otherMethod = (HandlerMethod) other;</span>
+<span class="pc bpc" id="L314" title="2 of 4 branches missed.">		return (this.bean.equals(otherMethod.bean) &amp;&amp; this.method.equals(otherMethod.method));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="nc" id="L319">		return (this.bean.hashCode() * 31 + this.method.hashCode());</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="fc" id="L324">		return this.method.toGenericString();</span>
+	}
+
+
+	// Support methods for use in &quot;InvocableHandlerMethod&quot; sub-class variants..
+
+	@Nullable
+	protected static Object findProvidedArgument(MethodParameter parameter, @Nullable Object... providedArgs) {
+<span class="fc bfc" id="L332" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(providedArgs)) {</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">			for (Object providedArg : providedArgs) {</span>
+<span class="fc bfc" id="L334" title="All 2 branches covered.">				if (parameter.getParameterType().isInstance(providedArg)) {</span>
+<span class="fc" id="L335">					return providedArg;</span>
+				}
+			}
+		}
+<span class="fc" id="L339">		return null;</span>
+	}
+
+	protected static String formatArgumentError(MethodParameter param, String message) {
+<span class="fc" id="L343">		return &quot;Could not resolve parameter [&quot; + param.getParameterIndex() + &quot;] in &quot; +</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">				param.getExecutable().toGenericString() + (StringUtils.hasText(message) ? &quot;: &quot; + message : &quot;&quot;);</span>
+	}
+
+	/**
+	 * Assert that the target bean class is an instance of the class where the given
+	 * method is declared. In some cases the actual endpoint instance at request-
+	 * processing time may be a JDK dynamic proxy (lazy initialization, prototype
+	 * beans, and others). Endpoint classes that require proxying should prefer
+	 * class-based proxy mechanisms.
+	 */
+	protected void assertTargetBean(Method method, Object targetBean, Object[] args) {
+<span class="fc" id="L355">		Class&lt;?&gt; methodDeclaringClass = method.getDeclaringClass();</span>
+<span class="fc" id="L356">		Class&lt;?&gt; targetBeanClass = targetBean.getClass();</span>
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">		if (!methodDeclaringClass.isAssignableFrom(targetBeanClass)) {</span>
+<span class="nc" id="L358">			String text = &quot;The mapped handler method class '&quot; + methodDeclaringClass.getName() +</span>
+					&quot;' is not an instance of the actual endpoint bean class '&quot; +
+<span class="nc" id="L360">					targetBeanClass.getName() + &quot;'. If the endpoint requires proxying &quot; +</span>
+					&quot;(e.g. due to @Transactional), please use class-based proxying.&quot;;
+<span class="nc" id="L362">			throw new IllegalStateException(formatInvokeError(text, args));</span>
+		}
+<span class="fc" id="L364">	}</span>
+
+	protected String formatInvokeError(String text, Object[] args) {
+
+<span class="fc" id="L368">		String formattedArgs = IntStream.range(0, args.length)</span>
+<span class="fc bfc" id="L369" title="All 2 branches covered.">				.mapToObj(i -&gt; (args[i] != null ?</span>
+<span class="fc" id="L370">						&quot;[&quot; + i + &quot;] [type=&quot; + args[i].getClass().getName() + &quot;] [value=&quot; + args[i] + &quot;]&quot; :</span>
+						&quot;[&quot; + i + &quot;] [null]&quot;))
+<span class="fc" id="L372">				.collect(Collectors.joining(&quot;,\n&quot;, &quot; &quot;, &quot; &quot;));</span>
+
+<span class="fc" id="L374">		return text + &quot;\n&quot; +</span>
+<span class="fc" id="L375">				&quot;Endpoint [&quot; + getBeanType().getName() + &quot;]\n&quot; +</span>
+<span class="fc" id="L376">				&quot;Method [&quot; + getBridgedMethod().toGenericString() + &quot;] &quot; +</span>
+				&quot;with argument values:\n&quot; + formattedArgs;
+	}
+
+
+	/**
+	 * A MethodParameter with HandlerMethod-specific behavior.
+	 */
+	protected class HandlerMethodParameter extends SynthesizingMethodParameter {
+
+<span class="fc" id="L386">		public HandlerMethodParameter(int index) {</span>
+<span class="fc" id="L387">			super(HandlerMethod.this.bridgedMethod, index);</span>
+<span class="fc" id="L388">		}</span>
+
+<span class="fc" id="L390">		protected HandlerMethodParameter(HandlerMethodParameter original) {</span>
+<span class="fc" id="L391">			super(original);</span>
+<span class="fc" id="L392">		}</span>
+
+		@Override
+		public Class&lt;?&gt; getContainingClass() {
+<span class="fc" id="L396">			return HandlerMethod.this.getBeanType();</span>
+		}
+
+		@Override
+		public &lt;T extends Annotation&gt; T getMethodAnnotation(Class&lt;T&gt; annotationType) {
+<span class="nc" id="L401">			return HandlerMethod.this.getMethodAnnotation(annotationType);</span>
+		}
+
+		@Override
+		public &lt;T extends Annotation&gt; boolean hasMethodAnnotation(Class&lt;T&gt; annotationType) {
+<span class="fc" id="L406">			return HandlerMethod.this.hasMethodAnnotation(annotationType);</span>
+		}
+
+		@Override
+		public HandlerMethodParameter clone() {
+<span class="fc" id="L411">			return new HandlerMethodParameter(this);</span>
+		}
+	}
+
+
+	/**
+	 * A MethodParameter for a HandlerMethod return type based on an actual return value.
+	 */
+	private class ReturnValueMethodParameter extends HandlerMethodParameter {
+
+		@Nullable
+		private final Object returnValue;
+
+<span class="nc" id="L424">		public ReturnValueMethodParameter(@Nullable Object returnValue) {</span>
+<span class="nc" id="L425">			super(-1);</span>
+<span class="nc" id="L426">			this.returnValue = returnValue;</span>
+<span class="nc" id="L427">		}</span>
+
+<span class="nc" id="L429">		protected ReturnValueMethodParameter(ReturnValueMethodParameter original) {</span>
+<span class="nc" id="L430">			super(original);</span>
+<span class="nc" id="L431">			this.returnValue = original.returnValue;</span>
+<span class="nc" id="L432">		}</span>
+
+		@Override
+		public Class&lt;?&gt; getParameterType() {
+<span class="nc bnc" id="L436" title="All 2 branches missed.">			return (this.returnValue != null ? this.returnValue.getClass() : super.getParameterType());</span>
+		}
+
+		@Override
+		public ReturnValueMethodParameter clone() {
+<span class="nc" id="L441">			return new ReturnValueMethodParameter(this);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

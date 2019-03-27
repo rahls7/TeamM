@@ -1,0 +1,1312 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractPlatformTransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.support</a> &gt; <span class="el_source">AbstractPlatformTransactionManager.java</span></div><h1>AbstractPlatformTransactionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.support;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.Serializable;
+import java.util.List;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.Constants;
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.InvalidTimeoutException;
+import org.springframework.transaction.NestedTransactionNotSupportedException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.TransactionSuspensionNotSupportedException;
+import org.springframework.transaction.UnexpectedRollbackException;
+
+/**
+ * Abstract base class that implements Spring's standard transaction workflow,
+ * serving as basis for concrete platform transaction managers like
+ * {@link org.springframework.transaction.jta.JtaTransactionManager}.
+ *
+ * &lt;p&gt;This base class provides the following workflow handling:
+ * &lt;ul&gt;
+ * &lt;li&gt;determines if there is an existing transaction;
+ * &lt;li&gt;applies the appropriate propagation behavior;
+ * &lt;li&gt;suspends and resumes transactions if necessary;
+ * &lt;li&gt;checks the rollback-only flag on commit;
+ * &lt;li&gt;applies the appropriate modification on rollback
+ * (actual rollback or setting rollback-only);
+ * &lt;li&gt;triggers registered synchronization callbacks
+ * (if transaction synchronization is active).
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Subclasses have to implement specific template methods for specific
+ * states of a transaction, e.g.: begin, suspend, resume, commit, rollback.
+ * The most important of them are abstract and must be provided by a concrete
+ * implementation; for the rest, defaults are provided, so overriding is optional.
+ *
+ * &lt;p&gt;Transaction synchronization is a generic mechanism for registering callbacks
+ * that get invoked at transaction completion time. This is mainly used internally
+ * by the data access support classes for JDBC, Hibernate, JPA, etc when running
+ * within a JTA transaction: They register resources that are opened within the
+ * transaction for closing at transaction completion time, allowing e.g. for reuse
+ * of the same Hibernate Session within the transaction. The same mechanism can
+ * also be leveraged for custom synchronization needs in an application.
+ *
+ * &lt;p&gt;The state of this class is serializable, to allow for serializing the
+ * transaction strategy along with proxies that carry a transaction interceptor.
+ * It is up to subclasses if they wish to make their state to be serializable too.
+ * They should implement the {@code java.io.Serializable} marker interface in
+ * that case, and potentially a private {@code readObject()} method (according
+ * to Java serialization rules) if they need to restore any transient state.
+ *
+ * @author Juergen Hoeller
+ * @since 28.03.2003
+ * @see #setTransactionSynchronization
+ * @see TransactionSynchronizationManager
+ * @see org.springframework.transaction.jta.JtaTransactionManager
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L83">public abstract class AbstractPlatformTransactionManager implements PlatformTransactionManager, Serializable {</span>
+
+	/**
+	 * Always activate transaction synchronization, even for &quot;empty&quot; transactions
+	 * that result from PROPAGATION_SUPPORTS with no existing backend transaction.
+	 * @see org.springframework.transaction.TransactionDefinition#PROPAGATION_SUPPORTS
+	 * @see org.springframework.transaction.TransactionDefinition#PROPAGATION_NOT_SUPPORTED
+	 * @see org.springframework.transaction.TransactionDefinition#PROPAGATION_NEVER
+	 */
+	public static final int SYNCHRONIZATION_ALWAYS = 0;
+
+	/**
+	 * Activate transaction synchronization only for actual transactions,
+	 * that is, not for empty ones that result from PROPAGATION_SUPPORTS with
+	 * no existing backend transaction.
+	 * @see org.springframework.transaction.TransactionDefinition#PROPAGATION_REQUIRED
+	 * @see org.springframework.transaction.TransactionDefinition#PROPAGATION_MANDATORY
+	 * @see org.springframework.transaction.TransactionDefinition#PROPAGATION_REQUIRES_NEW
+	 */
+	public static final int SYNCHRONIZATION_ON_ACTUAL_TRANSACTION = 1;
+
+	/**
+	 * Never active transaction synchronization, not even for actual transactions.
+	 */
+	public static final int SYNCHRONIZATION_NEVER = 2;
+
+
+	/** Constants instance for AbstractPlatformTransactionManager. */
+<span class="fc" id="L111">	private static final Constants constants = new Constants(AbstractPlatformTransactionManager.class);</span>
+
+
+<span class="fc" id="L114">	protected transient Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L116">	private int transactionSynchronization = SYNCHRONIZATION_ALWAYS;</span>
+
+<span class="fc" id="L118">	private int defaultTimeout = TransactionDefinition.TIMEOUT_DEFAULT;</span>
+
+<span class="fc" id="L120">	private boolean nestedTransactionAllowed = false;</span>
+
+<span class="fc" id="L122">	private boolean validateExistingTransaction = false;</span>
+
+<span class="fc" id="L124">	private boolean globalRollbackOnParticipationFailure = true;</span>
+
+<span class="fc" id="L126">	private boolean failEarlyOnGlobalRollbackOnly = false;</span>
+
+<span class="fc" id="L128">	private boolean rollbackOnCommitFailure = false;</span>
+
+
+	/**
+	 * Set the transaction synchronization by the name of the corresponding constant
+	 * in this class, e.g. &quot;SYNCHRONIZATION_ALWAYS&quot;.
+	 * @param constantName name of the constant
+	 * @see #SYNCHRONIZATION_ALWAYS
+	 */
+	public final void setTransactionSynchronizationName(String constantName) {
+<span class="fc" id="L138">		setTransactionSynchronization(constants.asNumber(constantName).intValue());</span>
+<span class="fc" id="L139">	}</span>
+
+	/**
+	 * Set when this transaction manager should activate the thread-bound
+	 * transaction synchronization support. Default is &quot;always&quot;.
+	 * &lt;p&gt;Note that transaction synchronization isn't supported for
+	 * multiple concurrent transactions by different transaction managers.
+	 * Only one transaction manager is allowed to activate it at any time.
+	 * @see #SYNCHRONIZATION_ALWAYS
+	 * @see #SYNCHRONIZATION_ON_ACTUAL_TRANSACTION
+	 * @see #SYNCHRONIZATION_NEVER
+	 * @see TransactionSynchronizationManager
+	 * @see TransactionSynchronization
+	 */
+	public final void setTransactionSynchronization(int transactionSynchronization) {
+<span class="fc" id="L154">		this.transactionSynchronization = transactionSynchronization;</span>
+<span class="fc" id="L155">	}</span>
+
+	/**
+	 * Return if this transaction manager should activate the thread-bound
+	 * transaction synchronization support.
+	 */
+	public final int getTransactionSynchronization() {
+<span class="fc" id="L162">		return this.transactionSynchronization;</span>
+	}
+
+	/**
+	 * Specify the default timeout that this transaction manager should apply
+	 * if there is no timeout specified at the transaction level, in seconds.
+	 * &lt;p&gt;Default is the underlying transaction infrastructure's default timeout,
+	 * e.g. typically 30 seconds in case of a JTA provider, indicated by the
+	 * {@code TransactionDefinition.TIMEOUT_DEFAULT} value.
+	 * @see org.springframework.transaction.TransactionDefinition#TIMEOUT_DEFAULT
+	 */
+	public final void setDefaultTimeout(int defaultTimeout) {
+<span class="nc bnc" id="L174" title="All 2 branches missed.">		if (defaultTimeout &lt; TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L175">			throw new InvalidTimeoutException(&quot;Invalid default timeout&quot;, defaultTimeout);</span>
+		}
+<span class="nc" id="L177">		this.defaultTimeout = defaultTimeout;</span>
+<span class="nc" id="L178">	}</span>
+
+	/**
+	 * Return the default timeout that this transaction manager should apply
+	 * if there is no timeout specified at the transaction level, in seconds.
+	 * &lt;p&gt;Returns {@code TransactionDefinition.TIMEOUT_DEFAULT} to indicate
+	 * the underlying transaction infrastructure's default timeout.
+	 */
+	public final int getDefaultTimeout() {
+<span class="nc" id="L187">		return this.defaultTimeout;</span>
+	}
+
+	/**
+	 * Set whether nested transactions are allowed. Default is &quot;false&quot;.
+	 * &lt;p&gt;Typically initialized with an appropriate default by the
+	 * concrete transaction manager subclass.
+	 */
+	public final void setNestedTransactionAllowed(boolean nestedTransactionAllowed) {
+<span class="fc" id="L196">		this.nestedTransactionAllowed = nestedTransactionAllowed;</span>
+<span class="fc" id="L197">	}</span>
+
+	/**
+	 * Return whether nested transactions are allowed.
+	 */
+	public final boolean isNestedTransactionAllowed() {
+<span class="fc" id="L203">		return this.nestedTransactionAllowed;</span>
+	}
+
+	/**
+	 * Set whether existing transactions should be validated before participating
+	 * in them.
+	 * &lt;p&gt;When participating in an existing transaction (e.g. with
+	 * PROPAGATION_REQUIRED or PROPAGATION_SUPPORTS encountering an existing
+	 * transaction), this outer transaction's characteristics will apply even
+	 * to the inner transaction scope. Validation will detect incompatible
+	 * isolation level and read-only settings on the inner transaction definition
+	 * and reject participation accordingly through throwing a corresponding exception.
+	 * &lt;p&gt;Default is &quot;false&quot;, leniently ignoring inner transaction settings,
+	 * simply overriding them with the outer transaction's characteristics.
+	 * Switch this flag to &quot;true&quot; in order to enforce strict validation.
+	 * @since 2.5.1
+	 */
+	public final void setValidateExistingTransaction(boolean validateExistingTransaction) {
+<span class="nc" id="L221">		this.validateExistingTransaction = validateExistingTransaction;</span>
+<span class="nc" id="L222">	}</span>
+
+	/**
+	 * Return whether existing transactions should be validated before participating
+	 * in them.
+	 * @since 2.5.1
+	 */
+	public final boolean isValidateExistingTransaction() {
+<span class="fc" id="L230">		return this.validateExistingTransaction;</span>
+	}
+
+	/**
+	 * Set whether to globally mark an existing transaction as rollback-only
+	 * after a participating transaction failed.
+	 * &lt;p&gt;Default is &quot;true&quot;: If a participating transaction (e.g. with
+	 * PROPAGATION_REQUIRED or PROPAGATION_SUPPORTS encountering an existing
+	 * transaction) fails, the transaction will be globally marked as rollback-only.
+	 * The only possible outcome of such a transaction is a rollback: The
+	 * transaction originator &lt;i&gt;cannot&lt;/i&gt; make the transaction commit anymore.
+	 * &lt;p&gt;Switch this to &quot;false&quot; to let the transaction originator make the rollback
+	 * decision. If a participating transaction fails with an exception, the caller
+	 * can still decide to continue with a different path within the transaction.
+	 * However, note that this will only work as long as all participating resources
+	 * are capable of continuing towards a transaction commit even after a data access
+	 * failure: This is generally not the case for a Hibernate Session, for example;
+	 * neither is it for a sequence of JDBC insert/update/delete operations.
+	 * &lt;p&gt;&lt;b&gt;Note:&lt;/b&gt;This flag only applies to an explicit rollback attempt for a
+	 * subtransaction, typically caused by an exception thrown by a data access operation
+	 * (where TransactionInterceptor will trigger a {@code PlatformTransactionManager.rollback()}
+	 * call according to a rollback rule). If the flag is off, the caller can handle the exception
+	 * and decide on a rollback, independent of the rollback rules of the subtransaction.
+	 * This flag does, however, &lt;i&gt;not&lt;/i&gt; apply to explicit {@code setRollbackOnly}
+	 * calls on a {@code TransactionStatus}, which will always cause an eventual
+	 * global rollback (as it might not throw an exception after the rollback-only call).
+	 * &lt;p&gt;The recommended solution for handling failure of a subtransaction
+	 * is a &quot;nested transaction&quot;, where the global transaction can be rolled
+	 * back to a savepoint taken at the beginning of the subtransaction.
+	 * PROPAGATION_NESTED provides exactly those semantics; however, it will
+	 * only work when nested transaction support is available. This is the case
+	 * with DataSourceTransactionManager, but not with JtaTransactionManager.
+	 * @see #setNestedTransactionAllowed
+	 * @see org.springframework.transaction.jta.JtaTransactionManager
+	 */
+	public final void setGlobalRollbackOnParticipationFailure(boolean globalRollbackOnParticipationFailure) {
+<span class="fc" id="L266">		this.globalRollbackOnParticipationFailure = globalRollbackOnParticipationFailure;</span>
+<span class="fc" id="L267">	}</span>
+
+	/**
+	 * Return whether to globally mark an existing transaction as rollback-only
+	 * after a participating transaction failed.
+	 */
+	public final boolean isGlobalRollbackOnParticipationFailure() {
+<span class="fc" id="L274">		return this.globalRollbackOnParticipationFailure;</span>
+	}
+
+	/**
+	 * Set whether to fail early in case of the transaction being globally marked
+	 * as rollback-only.
+	 * &lt;p&gt;Default is &quot;false&quot;, only causing an UnexpectedRollbackException at the
+	 * outermost transaction boundary. Switch this flag on to cause an
+	 * UnexpectedRollbackException as early as the global rollback-only marker
+	 * has been first detected, even from within an inner transaction boundary.
+	 * &lt;p&gt;Note that, as of Spring 2.0, the fail-early behavior for global
+	 * rollback-only markers has been unified: All transaction managers will by
+	 * default only cause UnexpectedRollbackException at the outermost transaction
+	 * boundary. This allows, for example, to continue unit tests even after an
+	 * operation failed and the transaction will never be completed. All transaction
+	 * managers will only fail earlier if this flag has explicitly been set to &quot;true&quot;.
+	 * @since 2.0
+	 * @see org.springframework.transaction.UnexpectedRollbackException
+	 */
+	public final void setFailEarlyOnGlobalRollbackOnly(boolean failEarlyOnGlobalRollbackOnly) {
+<span class="fc" id="L294">		this.failEarlyOnGlobalRollbackOnly = failEarlyOnGlobalRollbackOnly;</span>
+<span class="fc" id="L295">	}</span>
+
+	/**
+	 * Return whether to fail early in case of the transaction being globally marked
+	 * as rollback-only.
+	 * @since 2.0
+	 */
+	public final boolean isFailEarlyOnGlobalRollbackOnly() {
+<span class="fc" id="L303">		return this.failEarlyOnGlobalRollbackOnly;</span>
+	}
+
+	/**
+	 * Set whether {@code doRollback} should be performed on failure of the
+	 * {@code doCommit} call. Typically not necessary and thus to be avoided,
+	 * as it can potentially override the commit exception with a subsequent
+	 * rollback exception.
+	 * &lt;p&gt;Default is &quot;false&quot;.
+	 * @see #doCommit
+	 * @see #doRollback
+	 */
+	public final void setRollbackOnCommitFailure(boolean rollbackOnCommitFailure) {
+<span class="fc" id="L316">		this.rollbackOnCommitFailure = rollbackOnCommitFailure;</span>
+<span class="fc" id="L317">	}</span>
+
+	/**
+	 * Return whether {@code doRollback} should be performed on failure of the
+	 * {@code doCommit} call.
+	 */
+	public final boolean isRollbackOnCommitFailure() {
+<span class="fc" id="L324">		return this.rollbackOnCommitFailure;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of PlatformTransactionManager
+	//---------------------------------------------------------------------
+
+	/**
+	 * This implementation handles propagation behavior. Delegates to
+	 * {@code doGetTransaction}, {@code isExistingTransaction}
+	 * and {@code doBegin}.
+	 * @see #doGetTransaction
+	 * @see #isExistingTransaction
+	 * @see #doBegin
+	 */
+	@Override
+	public final TransactionStatus getTransaction(@Nullable TransactionDefinition definition) throws TransactionException {
+<span class="fc" id="L342">		Object transaction = doGetTransaction();</span>
+
+		// Cache debug flag to avoid repeated checks.
+<span class="fc" id="L345">		boolean debugEnabled = logger.isDebugEnabled();</span>
+
+<span class="fc bfc" id="L347" title="All 2 branches covered.">		if (definition == null) {</span>
+			// Use defaults if no transaction definition given.
+<span class="fc" id="L349">			definition = new DefaultTransactionDefinition();</span>
+		}
+
+<span class="fc bfc" id="L352" title="All 2 branches covered.">		if (isExistingTransaction(transaction)) {</span>
+			// Existing transaction found -&gt; check propagation behavior to find out how to behave.
+<span class="fc" id="L354">			return handleExistingTransaction(definition, transaction, debugEnabled);</span>
+		}
+
+		// Check definition settings for new transaction.
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">		if (definition.getTimeout() &lt; TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L359">			throw new InvalidTimeoutException(&quot;Invalid transaction timeout&quot;, definition.getTimeout());</span>
+		}
+
+		// No existing transaction found -&gt; check propagation behavior to find out how to proceed.
+<span class="fc bfc" id="L363" title="All 2 branches covered.">		if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_MANDATORY) {</span>
+<span class="fc" id="L364">			throw new IllegalTransactionStateException(</span>
+					&quot;No existing transaction found for transaction marked with propagation 'mandatory'&quot;);
+		}
+<span class="fc bfc" id="L367" title="All 2 branches covered.">		else if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_REQUIRED ||</span>
+<span class="fc bfc" id="L368" title="All 2 branches covered.">				definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_REQUIRES_NEW ||</span>
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">				definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NESTED) {</span>
+<span class="fc" id="L370">			SuspendedResourcesHolder suspendedResources = suspend(null);</span>
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">			if (debugEnabled) {</span>
+<span class="nc" id="L372">				logger.debug(&quot;Creating new transaction with name [&quot; + definition.getName() + &quot;]: &quot; + definition);</span>
+			}
+			try {
+<span class="fc bfc" id="L375" title="All 2 branches covered.">				boolean newSynchronization = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);</span>
+<span class="fc" id="L376">				DefaultTransactionStatus status = newTransactionStatus(</span>
+						definition, transaction, true, newSynchronization, debugEnabled, suspendedResources);
+<span class="fc" id="L378">				doBegin(transaction, definition);</span>
+<span class="fc" id="L379">				prepareSynchronization(status, definition);</span>
+<span class="fc" id="L380">				return status;</span>
+			}
+<span class="fc" id="L382">			catch (RuntimeException | Error ex) {</span>
+<span class="fc" id="L383">				resume(null, suspendedResources);</span>
+<span class="fc" id="L384">				throw ex;</span>
+			}
+		}
+		else {
+			// Create &quot;empty&quot; transaction: no actual transaction, but potentially synchronization.
+<span class="pc bpc" id="L389" title="3 of 4 branches missed.">			if (definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT &amp;&amp; logger.isWarnEnabled()) {</span>
+<span class="nc" id="L390">				logger.warn(&quot;Custom isolation level specified but no actual transaction initiated; &quot; +</span>
+						&quot;isolation level will effectively be ignored: &quot; + definition);
+			}
+<span class="fc bfc" id="L393" title="All 2 branches covered.">			boolean newSynchronization = (getTransactionSynchronization() == SYNCHRONIZATION_ALWAYS);</span>
+<span class="fc" id="L394">			return prepareTransactionStatus(definition, null, true, newSynchronization, debugEnabled, null);</span>
+		}
+	}
+
+	/**
+	 * Create a TransactionStatus for an existing transaction.
+	 */
+	private TransactionStatus handleExistingTransaction(
+			TransactionDefinition definition, Object transaction, boolean debugEnabled)
+			throws TransactionException {
+
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">		if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NEVER) {</span>
+<span class="nc" id="L406">			throw new IllegalTransactionStateException(</span>
+					&quot;Existing transaction found for transaction marked with propagation 'never'&quot;);
+		}
+
+<span class="fc bfc" id="L410" title="All 2 branches covered.">		if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NOT_SUPPORTED) {</span>
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">			if (debugEnabled) {</span>
+<span class="nc" id="L412">				logger.debug(&quot;Suspending current transaction&quot;);</span>
+			}
+<span class="fc" id="L414">			Object suspendedResources = suspend(transaction);</span>
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">			boolean newSynchronization = (getTransactionSynchronization() == SYNCHRONIZATION_ALWAYS);</span>
+<span class="fc" id="L416">			return prepareTransactionStatus(</span>
+					definition, null, false, newSynchronization, debugEnabled, suspendedResources);
+		}
+
+<span class="fc bfc" id="L420" title="All 2 branches covered.">		if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_REQUIRES_NEW) {</span>
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">			if (debugEnabled) {</span>
+<span class="nc" id="L422">				logger.debug(&quot;Suspending current transaction, creating new transaction with name [&quot; +</span>
+<span class="nc" id="L423">						definition.getName() + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L425">			SuspendedResourcesHolder suspendedResources = suspend(transaction);</span>
+			try {
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">				boolean newSynchronization = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);</span>
+<span class="fc" id="L428">				DefaultTransactionStatus status = newTransactionStatus(</span>
+						definition, transaction, true, newSynchronization, debugEnabled, suspendedResources);
+<span class="fc" id="L430">				doBegin(transaction, definition);</span>
+<span class="fc" id="L431">				prepareSynchronization(status, definition);</span>
+<span class="fc" id="L432">				return status;</span>
+			}
+<span class="fc" id="L434">			catch (RuntimeException | Error beginEx) {</span>
+<span class="fc" id="L435">				resumeAfterBeginException(transaction, suspendedResources, beginEx);</span>
+<span class="fc" id="L436">				throw beginEx;</span>
+			}
+		}
+
+<span class="fc bfc" id="L440" title="All 2 branches covered.">		if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NESTED) {</span>
+<span class="pc bpc" id="L441" title="1 of 2 branches missed.">			if (!isNestedTransactionAllowed()) {</span>
+<span class="nc" id="L442">				throw new NestedTransactionNotSupportedException(</span>
+						&quot;Transaction manager does not allow nested transactions by default - &quot; +
+						&quot;specify 'nestedTransactionAllowed' property with value 'true'&quot;);
+			}
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">			if (debugEnabled) {</span>
+<span class="nc" id="L447">				logger.debug(&quot;Creating nested transaction with name [&quot; + definition.getName() + &quot;]&quot;);</span>
+			}
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">			if (useSavepointForNestedTransaction()) {</span>
+				// Create savepoint within existing Spring-managed transaction,
+				// through the SavepointManager API implemented by TransactionStatus.
+				// Usually uses JDBC 3.0 savepoints. Never activates Spring synchronization.
+<span class="nc" id="L453">				DefaultTransactionStatus status =</span>
+<span class="nc" id="L454">						prepareTransactionStatus(definition, transaction, false, false, debugEnabled, null);</span>
+<span class="nc" id="L455">				status.createAndHoldSavepoint();</span>
+<span class="nc" id="L456">				return status;</span>
+			}
+			else {
+				// Nested transaction through nested begin and commit/rollback calls.
+				// Usually only for JTA: Spring synchronization might get activated here
+				// in case of a pre-existing JTA transaction.
+<span class="pc bpc" id="L462" title="1 of 2 branches missed.">				boolean newSynchronization = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);</span>
+<span class="fc" id="L463">				DefaultTransactionStatus status = newTransactionStatus(</span>
+						definition, transaction, true, newSynchronization, debugEnabled, null);
+<span class="fc" id="L465">				doBegin(transaction, definition);</span>
+<span class="fc" id="L466">				prepareSynchronization(status, definition);</span>
+<span class="fc" id="L467">				return status;</span>
+			}
+		}
+
+		// Assumably PROPAGATION_SUPPORTS or PROPAGATION_REQUIRED.
+<span class="pc bpc" id="L472" title="1 of 2 branches missed.">		if (debugEnabled) {</span>
+<span class="nc" id="L473">			logger.debug(&quot;Participating in existing transaction&quot;);</span>
+		}
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">		if (isValidateExistingTransaction()) {</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">			if (definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT) {</span>
+<span class="nc" id="L477">				Integer currentIsolationLevel = TransactionSynchronizationManager.getCurrentTransactionIsolationLevel();</span>
+<span class="nc bnc" id="L478" title="All 4 branches missed.">				if (currentIsolationLevel == null || currentIsolationLevel != definition.getIsolationLevel()) {</span>
+<span class="nc" id="L479">					Constants isoConstants = DefaultTransactionDefinition.constants;</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">					throw new IllegalTransactionStateException(&quot;Participating transaction with definition [&quot; +</span>
+							definition + &quot;] specifies isolation level which is incompatible with existing transaction: &quot; +
+							(currentIsolationLevel != null ?
+<span class="nc" id="L483">									isoConstants.toCode(currentIsolationLevel, DefaultTransactionDefinition.PREFIX_ISOLATION) :</span>
+									&quot;(unknown)&quot;));
+				}
+			}
+<span class="nc bnc" id="L487" title="All 2 branches missed.">			if (!definition.isReadOnly()) {</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">				if (TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {</span>
+<span class="nc" id="L489">					throw new IllegalTransactionStateException(&quot;Participating transaction with definition [&quot; +</span>
+							definition + &quot;] is not marked as read-only but existing transaction is&quot;);
+				}
+			}
+		}
+<span class="fc bfc" id="L494" title="All 2 branches covered.">		boolean newSynchronization = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);</span>
+<span class="fc" id="L495">		return prepareTransactionStatus(definition, transaction, false, newSynchronization, debugEnabled, null);</span>
+	}
+
+	/**
+	 * Create a new TransactionStatus for the given arguments,
+	 * also initializing transaction synchronization as appropriate.
+	 * @see #newTransactionStatus
+	 * @see #prepareTransactionStatus
+	 */
+	protected final DefaultTransactionStatus prepareTransactionStatus(
+			TransactionDefinition definition, @Nullable Object transaction, boolean newTransaction,
+			boolean newSynchronization, boolean debug, @Nullable Object suspendedResources) {
+
+<span class="fc" id="L508">		DefaultTransactionStatus status = newTransactionStatus(</span>
+				definition, transaction, newTransaction, newSynchronization, debug, suspendedResources);
+<span class="fc" id="L510">		prepareSynchronization(status, definition);</span>
+<span class="fc" id="L511">		return status;</span>
+	}
+
+	/**
+	 * Create a TransactionStatus instance for the given arguments.
+	 */
+	protected DefaultTransactionStatus newTransactionStatus(
+			TransactionDefinition definition, @Nullable Object transaction, boolean newTransaction,
+			boolean newSynchronization, boolean debug, @Nullable Object suspendedResources) {
+
+<span class="fc bfc" id="L521" title="All 2 branches covered.">		boolean actualNewSynchronization = newSynchronization &amp;&amp;</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">				!TransactionSynchronizationManager.isSynchronizationActive();</span>
+<span class="fc" id="L523">		return new DefaultTransactionStatus(</span>
+				transaction, newTransaction, actualNewSynchronization,
+<span class="fc" id="L525">				definition.isReadOnly(), debug, suspendedResources);</span>
+	}
+
+	/**
+	 * Initialize transaction synchronization as appropriate.
+	 */
+	protected void prepareSynchronization(DefaultTransactionStatus status, TransactionDefinition definition) {
+<span class="fc bfc" id="L532" title="All 2 branches covered.">		if (status.isNewSynchronization()) {</span>
+<span class="fc" id="L533">			TransactionSynchronizationManager.setActualTransactionActive(status.hasTransaction());</span>
+<span class="fc" id="L534">			TransactionSynchronizationManager.setCurrentTransactionIsolationLevel(</span>
+<span class="pc bpc" id="L535" title="1 of 2 branches missed.">					definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT ?</span>
+<span class="pc" id="L536">							definition.getIsolationLevel() : null);</span>
+<span class="fc" id="L537">			TransactionSynchronizationManager.setCurrentTransactionReadOnly(definition.isReadOnly());</span>
+<span class="fc" id="L538">			TransactionSynchronizationManager.setCurrentTransactionName(definition.getName());</span>
+<span class="fc" id="L539">			TransactionSynchronizationManager.initSynchronization();</span>
+		}
+<span class="fc" id="L541">	}</span>
+
+	/**
+	 * Determine the actual timeout to use for the given definition.
+	 * Will fall back to this manager's default timeout if the
+	 * transaction definition doesn't specify a non-default value.
+	 * @param definition the transaction definition
+	 * @return the actual timeout to use
+	 * @see org.springframework.transaction.TransactionDefinition#getTimeout()
+	 * @see #setDefaultTimeout
+	 */
+	protected int determineTimeout(TransactionDefinition definition) {
+<span class="fc bfc" id="L553" title="All 2 branches covered.">		if (definition.getTimeout() != TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="fc" id="L554">			return definition.getTimeout();</span>
+		}
+<span class="fc" id="L556">		return this.defaultTimeout;</span>
+	}
+
+
+	/**
+	 * Suspend the given transaction. Suspends transaction synchronization first,
+	 * then delegates to the {@code doSuspend} template method.
+	 * @param transaction the current transaction object
+	 * (or {@code null} to just suspend active synchronizations, if any)
+	 * @return an object that holds suspended resources
+	 * (or {@code null} if neither transaction nor synchronization active)
+	 * @see #doSuspend
+	 * @see #resume
+	 */
+	@Nullable
+	protected final SuspendedResourcesHolder suspend(@Nullable Object transaction) throws TransactionException {
+<span class="fc bfc" id="L572" title="All 2 branches covered.">		if (TransactionSynchronizationManager.isSynchronizationActive()) {</span>
+<span class="fc" id="L573">			List&lt;TransactionSynchronization&gt; suspendedSynchronizations = doSuspendSynchronization();</span>
+			try {
+<span class="fc" id="L575">				Object suspendedResources = null;</span>
+<span class="fc bfc" id="L576" title="All 2 branches covered.">				if (transaction != null) {</span>
+<span class="fc" id="L577">					suspendedResources = doSuspend(transaction);</span>
+				}
+<span class="fc" id="L579">				String name = TransactionSynchronizationManager.getCurrentTransactionName();</span>
+<span class="fc" id="L580">				TransactionSynchronizationManager.setCurrentTransactionName(null);</span>
+<span class="fc" id="L581">				boolean readOnly = TransactionSynchronizationManager.isCurrentTransactionReadOnly();</span>
+<span class="fc" id="L582">				TransactionSynchronizationManager.setCurrentTransactionReadOnly(false);</span>
+<span class="fc" id="L583">				Integer isolationLevel = TransactionSynchronizationManager.getCurrentTransactionIsolationLevel();</span>
+<span class="fc" id="L584">				TransactionSynchronizationManager.setCurrentTransactionIsolationLevel(null);</span>
+<span class="fc" id="L585">				boolean wasActive = TransactionSynchronizationManager.isActualTransactionActive();</span>
+<span class="fc" id="L586">				TransactionSynchronizationManager.setActualTransactionActive(false);</span>
+<span class="fc" id="L587">				return new SuspendedResourcesHolder(</span>
+						suspendedResources, suspendedSynchronizations, name, readOnly, isolationLevel, wasActive);
+			}
+<span class="nc" id="L590">			catch (RuntimeException | Error ex) {</span>
+				// doSuspend failed - original transaction is still active...
+<span class="nc" id="L592">				doResumeSynchronization(suspendedSynchronizations);</span>
+<span class="nc" id="L593">				throw ex;</span>
+			}
+		}
+<span class="fc bfc" id="L596" title="All 2 branches covered.">		else if (transaction != null) {</span>
+			// Transaction active but no synchronization active.
+<span class="fc" id="L598">			Object suspendedResources = doSuspend(transaction);</span>
+<span class="fc" id="L599">			return new SuspendedResourcesHolder(suspendedResources);</span>
+		}
+		else {
+			// Neither transaction nor synchronization active.
+<span class="fc" id="L603">			return null;</span>
+		}
+	}
+
+	/**
+	 * Resume the given transaction. Delegates to the {@code doResume}
+	 * template method first, then resuming transaction synchronization.
+	 * @param transaction the current transaction object
+	 * @param resourcesHolder the object that holds suspended resources,
+	 * as returned by {@code suspend} (or {@code null} to just
+	 * resume synchronizations, if any)
+	 * @see #doResume
+	 * @see #suspend
+	 */
+	protected final void resume(@Nullable Object transaction, @Nullable SuspendedResourcesHolder resourcesHolder)
+			throws TransactionException {
+
+<span class="fc bfc" id="L620" title="All 2 branches covered.">		if (resourcesHolder != null) {</span>
+<span class="fc" id="L621">			Object suspendedResources = resourcesHolder.suspendedResources;</span>
+<span class="fc bfc" id="L622" title="All 2 branches covered.">			if (suspendedResources != null) {</span>
+<span class="fc" id="L623">				doResume(transaction, suspendedResources);</span>
+			}
+<span class="fc" id="L625">			List&lt;TransactionSynchronization&gt; suspendedSynchronizations = resourcesHolder.suspendedSynchronizations;</span>
+<span class="fc bfc" id="L626" title="All 2 branches covered.">			if (suspendedSynchronizations != null) {</span>
+<span class="fc" id="L627">				TransactionSynchronizationManager.setActualTransactionActive(resourcesHolder.wasActive);</span>
+<span class="fc" id="L628">				TransactionSynchronizationManager.setCurrentTransactionIsolationLevel(resourcesHolder.isolationLevel);</span>
+<span class="fc" id="L629">				TransactionSynchronizationManager.setCurrentTransactionReadOnly(resourcesHolder.readOnly);</span>
+<span class="fc" id="L630">				TransactionSynchronizationManager.setCurrentTransactionName(resourcesHolder.name);</span>
+<span class="fc" id="L631">				doResumeSynchronization(suspendedSynchronizations);</span>
+			}
+		}
+<span class="fc" id="L634">	}</span>
+
+	/**
+	 * Resume outer transaction after inner transaction begin failed.
+	 */
+	private void resumeAfterBeginException(
+			Object transaction, @Nullable SuspendedResourcesHolder suspendedResources, Throwable beginEx) {
+
+<span class="fc" id="L642">		String exMessage = &quot;Inner transaction begin exception overridden by outer transaction resume exception&quot;;</span>
+		try {
+<span class="fc" id="L644">			resume(transaction, suspendedResources);</span>
+		}
+<span class="nc" id="L646">		catch (RuntimeException | Error resumeEx) {</span>
+<span class="nc" id="L647">			logger.error(exMessage, beginEx);</span>
+<span class="nc" id="L648">			throw resumeEx;</span>
+<span class="fc" id="L649">		}</span>
+<span class="fc" id="L650">	}</span>
+
+	/**
+	 * Suspend all current synchronizations and deactivate transaction
+	 * synchronization for the current thread.
+	 * @return the List of suspended TransactionSynchronization objects
+	 */
+	private List&lt;TransactionSynchronization&gt; doSuspendSynchronization() {
+		List&lt;TransactionSynchronization&gt; suspendedSynchronizations =
+<span class="fc" id="L659">				TransactionSynchronizationManager.getSynchronizations();</span>
+<span class="fc bfc" id="L660" title="All 2 branches covered.">		for (TransactionSynchronization synchronization : suspendedSynchronizations) {</span>
+<span class="fc" id="L661">			synchronization.suspend();</span>
+<span class="fc" id="L662">		}</span>
+<span class="fc" id="L663">		TransactionSynchronizationManager.clearSynchronization();</span>
+<span class="fc" id="L664">		return suspendedSynchronizations;</span>
+	}
+
+	/**
+	 * Reactivate transaction synchronization for the current thread
+	 * and resume all given synchronizations.
+	 * @param suspendedSynchronizations a List of TransactionSynchronization objects
+	 */
+	private void doResumeSynchronization(List&lt;TransactionSynchronization&gt; suspendedSynchronizations) {
+<span class="fc" id="L673">		TransactionSynchronizationManager.initSynchronization();</span>
+<span class="fc bfc" id="L674" title="All 2 branches covered.">		for (TransactionSynchronization synchronization : suspendedSynchronizations) {</span>
+<span class="fc" id="L675">			synchronization.resume();</span>
+<span class="fc" id="L676">			TransactionSynchronizationManager.registerSynchronization(synchronization);</span>
+<span class="fc" id="L677">		}</span>
+<span class="fc" id="L678">	}</span>
+
+
+	/**
+	 * This implementation of commit handles participating in existing
+	 * transactions and programmatic rollback requests.
+	 * Delegates to {@code isRollbackOnly}, {@code doCommit}
+	 * and {@code rollback}.
+	 * @see org.springframework.transaction.TransactionStatus#isRollbackOnly()
+	 * @see #doCommit
+	 * @see #rollback
+	 */
+	@Override
+	public final void commit(TransactionStatus status) throws TransactionException {
+<span class="fc bfc" id="L692" title="All 2 branches covered.">		if (status.isCompleted()) {</span>
+<span class="fc" id="L693">			throw new IllegalTransactionStateException(</span>
+					&quot;Transaction is already completed - do not call commit or rollback more than once per transaction&quot;);
+		}
+
+<span class="fc" id="L697">		DefaultTransactionStatus defStatus = (DefaultTransactionStatus) status;</span>
+<span class="fc bfc" id="L698" title="All 2 branches covered.">		if (defStatus.isLocalRollbackOnly()) {</span>
+<span class="pc bpc" id="L699" title="1 of 2 branches missed.">			if (defStatus.isDebug()) {</span>
+<span class="nc" id="L700">				logger.debug(&quot;Transactional code has requested rollback&quot;);</span>
+			}
+<span class="fc" id="L702">			processRollback(defStatus, false);</span>
+<span class="fc" id="L703">			return;</span>
+		}
+
+<span class="pc bpc" id="L706" title="1 of 4 branches missed.">		if (!shouldCommitOnGlobalRollbackOnly() &amp;&amp; defStatus.isGlobalRollbackOnly()) {</span>
+<span class="nc bnc" id="L707" title="All 2 branches missed.">			if (defStatus.isDebug()) {</span>
+<span class="nc" id="L708">				logger.debug(&quot;Global transaction is marked as rollback-only but transactional code requested commit&quot;);</span>
+			}
+<span class="nc" id="L710">			processRollback(defStatus, true);</span>
+<span class="nc" id="L711">			return;</span>
+		}
+
+<span class="fc" id="L714">		processCommit(defStatus);</span>
+<span class="fc" id="L715">	}</span>
+
+	/**
+	 * Process an actual commit.
+	 * Rollback-only flags have already been checked and applied.
+	 * @param status object representing the transaction
+	 * @throws TransactionException in case of commit failure
+	 */
+	private void processCommit(DefaultTransactionStatus status) throws TransactionException {
+		try {
+<span class="fc" id="L725">			boolean beforeCompletionInvoked = false;</span>
+
+			try {
+<span class="fc" id="L728">				boolean unexpectedRollback = false;</span>
+<span class="fc" id="L729">				prepareForCommit(status);</span>
+<span class="fc" id="L730">				triggerBeforeCommit(status);</span>
+<span class="fc" id="L731">				triggerBeforeCompletion(status);</span>
+<span class="fc" id="L732">				beforeCompletionInvoked = true;</span>
+
+<span class="pc bpc" id="L734" title="1 of 2 branches missed.">				if (status.hasSavepoint()) {</span>
+<span class="nc bnc" id="L735" title="All 2 branches missed.">					if (status.isDebug()) {</span>
+<span class="nc" id="L736">						logger.debug(&quot;Releasing transaction savepoint&quot;);</span>
+					}
+<span class="nc" id="L738">					unexpectedRollback = status.isGlobalRollbackOnly();</span>
+<span class="nc" id="L739">					status.releaseHeldSavepoint();</span>
+				}
+<span class="fc bfc" id="L741" title="All 2 branches covered.">				else if (status.isNewTransaction()) {</span>
+<span class="pc bpc" id="L742" title="1 of 2 branches missed.">					if (status.isDebug()) {</span>
+<span class="nc" id="L743">						logger.debug(&quot;Initiating transaction commit&quot;);</span>
+					}
+<span class="fc" id="L745">					unexpectedRollback = status.isGlobalRollbackOnly();</span>
+<span class="fc" id="L746">					doCommit(status);</span>
+				}
+<span class="fc bfc" id="L748" title="All 2 branches covered.">				else if (isFailEarlyOnGlobalRollbackOnly()) {</span>
+<span class="fc" id="L749">					unexpectedRollback = status.isGlobalRollbackOnly();</span>
+				}
+
+				// Throw UnexpectedRollbackException if we have a global rollback-only
+				// marker but still didn't get a corresponding exception from commit.
+<span class="fc bfc" id="L754" title="All 2 branches covered.">				if (unexpectedRollback) {</span>
+<span class="fc" id="L755">					throw new UnexpectedRollbackException(</span>
+							&quot;Transaction silently rolled back because it has been marked as rollback-only&quot;);
+				}
+			}
+<span class="fc" id="L759">			catch (UnexpectedRollbackException ex) {</span>
+				// can only be caused by doCommit
+<span class="fc" id="L761">				triggerAfterCompletion(status, TransactionSynchronization.STATUS_ROLLED_BACK);</span>
+<span class="fc" id="L762">				throw ex;</span>
+			}
+<span class="fc" id="L764">			catch (TransactionException ex) {</span>
+				// can only be caused by doCommit
+<span class="pc bpc" id="L766" title="1 of 2 branches missed.">				if (isRollbackOnCommitFailure()) {</span>
+<span class="nc" id="L767">					doRollbackOnCommitException(status, ex);</span>
+				}
+				else {
+<span class="fc" id="L770">					triggerAfterCompletion(status, TransactionSynchronization.STATUS_UNKNOWN);</span>
+				}
+<span class="fc" id="L772">				throw ex;</span>
+			}
+<span class="fc" id="L774">			catch (RuntimeException | Error ex) {</span>
+<span class="pc bpc" id="L775" title="1 of 2 branches missed.">				if (!beforeCompletionInvoked) {</span>
+<span class="fc" id="L776">					triggerBeforeCompletion(status);</span>
+				}
+<span class="fc" id="L778">				doRollbackOnCommitException(status, ex);</span>
+<span class="fc" id="L779">				throw ex;</span>
+<span class="fc" id="L780">			}</span>
+
+			// Trigger afterCommit callbacks, with an exception thrown there
+			// propagated to callers but the transaction still considered as committed.
+			try {
+<span class="fc" id="L785">				triggerAfterCommit(status);</span>
+			}
+			finally {
+<span class="fc" id="L788">				triggerAfterCompletion(status, TransactionSynchronization.STATUS_COMMITTED);</span>
+			}
+
+		}
+		finally {
+<span class="fc" id="L793">			cleanupAfterCompletion(status);</span>
+		}
+<span class="fc" id="L795">	}</span>
+
+	/**
+	 * This implementation of rollback handles participating in existing
+	 * transactions. Delegates to {@code doRollback} and
+	 * {@code doSetRollbackOnly}.
+	 * @see #doRollback
+	 * @see #doSetRollbackOnly
+	 */
+	@Override
+	public final void rollback(TransactionStatus status) throws TransactionException {
+<span class="fc bfc" id="L806" title="All 2 branches covered.">		if (status.isCompleted()) {</span>
+<span class="fc" id="L807">			throw new IllegalTransactionStateException(</span>
+					&quot;Transaction is already completed - do not call commit or rollback more than once per transaction&quot;);
+		}
+
+<span class="fc" id="L811">		DefaultTransactionStatus defStatus = (DefaultTransactionStatus) status;</span>
+<span class="fc" id="L812">		processRollback(defStatus, false);</span>
+<span class="fc" id="L813">	}</span>
+
+	/**
+	 * Process an actual rollback.
+	 * The completed flag has already been checked.
+	 * @param status object representing the transaction
+	 * @throws TransactionException in case of rollback failure
+	 */
+	private void processRollback(DefaultTransactionStatus status, boolean unexpected) {
+		try {
+<span class="fc" id="L823">			boolean unexpectedRollback = unexpected;</span>
+
+			try {
+<span class="fc" id="L826">				triggerBeforeCompletion(status);</span>
+
+<span class="pc bpc" id="L828" title="1 of 2 branches missed.">				if (status.hasSavepoint()) {</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">					if (status.isDebug()) {</span>
+<span class="nc" id="L830">						logger.debug(&quot;Rolling back transaction to savepoint&quot;);</span>
+					}
+<span class="nc" id="L832">					status.rollbackToHeldSavepoint();</span>
+				}
+<span class="fc bfc" id="L834" title="All 2 branches covered.">				else if (status.isNewTransaction()) {</span>
+<span class="pc bpc" id="L835" title="1 of 2 branches missed.">					if (status.isDebug()) {</span>
+<span class="nc" id="L836">						logger.debug(&quot;Initiating transaction rollback&quot;);</span>
+					}
+<span class="fc" id="L838">					doRollback(status);</span>
+				}
+				else {
+					// Participating in larger transaction
+<span class="fc bfc" id="L842" title="All 2 branches covered.">					if (status.hasTransaction()) {</span>
+<span class="fc bfc" id="L843" title="All 4 branches covered.">						if (status.isLocalRollbackOnly() || isGlobalRollbackOnParticipationFailure()) {</span>
+<span class="pc bpc" id="L844" title="1 of 2 branches missed.">							if (status.isDebug()) {</span>
+<span class="nc" id="L845">								logger.debug(&quot;Participating transaction failed - marking existing transaction as rollback-only&quot;);</span>
+							}
+<span class="fc" id="L847">							doSetRollbackOnly(status);</span>
+						}
+						else {
+<span class="pc bpc" id="L850" title="1 of 2 branches missed.">							if (status.isDebug()) {</span>
+<span class="nc" id="L851">								logger.debug(&quot;Participating transaction failed - letting transaction originator decide on rollback&quot;);</span>
+							}
+						}
+					}
+					else {
+<span class="fc" id="L856">						logger.debug(&quot;Should roll back transaction but cannot - no transaction available&quot;);</span>
+					}
+					// Unexpected rollback only matters here if we're asked to fail early
+<span class="pc bpc" id="L859" title="1 of 2 branches missed.">					if (!isFailEarlyOnGlobalRollbackOnly()) {</span>
+<span class="fc" id="L860">						unexpectedRollback = false;</span>
+					}
+				}
+			}
+<span class="fc" id="L864">			catch (RuntimeException | Error ex) {</span>
+<span class="fc" id="L865">				triggerAfterCompletion(status, TransactionSynchronization.STATUS_UNKNOWN);</span>
+<span class="fc" id="L866">				throw ex;</span>
+<span class="fc" id="L867">			}</span>
+
+<span class="fc" id="L869">			triggerAfterCompletion(status, TransactionSynchronization.STATUS_ROLLED_BACK);</span>
+
+			// Raise UnexpectedRollbackException if we had a global rollback-only marker
+<span class="pc bpc" id="L872" title="1 of 2 branches missed.">			if (unexpectedRollback) {</span>
+<span class="nc" id="L873">				throw new UnexpectedRollbackException(</span>
+						&quot;Transaction rolled back because it has been marked as rollback-only&quot;);
+			}
+		}
+		finally {
+<span class="fc" id="L878">			cleanupAfterCompletion(status);</span>
+		}
+<span class="fc" id="L880">	}</span>
+
+	/**
+	 * Invoke {@code doRollback}, handling rollback exceptions properly.
+	 * @param status object representing the transaction
+	 * @param ex the thrown application exception or error
+	 * @throws TransactionException in case of rollback failure
+	 * @see #doRollback
+	 */
+	private void doRollbackOnCommitException(DefaultTransactionStatus status, Throwable ex) throws TransactionException {
+		try {
+<span class="fc bfc" id="L891" title="All 2 branches covered.">			if (status.isNewTransaction()) {</span>
+<span class="pc bpc" id="L892" title="1 of 2 branches missed.">				if (status.isDebug()) {</span>
+<span class="nc" id="L893">					logger.debug(&quot;Initiating transaction rollback after commit exception&quot;, ex);</span>
+				}
+<span class="fc" id="L895">				doRollback(status);</span>
+			}
+<span class="pc bpc" id="L897" title="2 of 4 branches missed.">			else if (status.hasTransaction() &amp;&amp; isGlobalRollbackOnParticipationFailure()) {</span>
+<span class="pc bpc" id="L898" title="1 of 2 branches missed.">				if (status.isDebug()) {</span>
+<span class="nc" id="L899">					logger.debug(&quot;Marking existing transaction as rollback-only after commit exception&quot;, ex);</span>
+				}
+<span class="fc" id="L901">				doSetRollbackOnly(status);</span>
+			}
+		}
+<span class="nc" id="L904">		catch (RuntimeException | Error rbex) {</span>
+<span class="nc" id="L905">			logger.error(&quot;Commit exception overridden by rollback exception&quot;, ex);</span>
+<span class="nc" id="L906">			triggerAfterCompletion(status, TransactionSynchronization.STATUS_UNKNOWN);</span>
+<span class="nc" id="L907">			throw rbex;</span>
+<span class="fc" id="L908">		}</span>
+<span class="fc" id="L909">		triggerAfterCompletion(status, TransactionSynchronization.STATUS_ROLLED_BACK);</span>
+<span class="fc" id="L910">	}</span>
+
+
+	/**
+	 * Trigger {@code beforeCommit} callbacks.
+	 * @param status object representing the transaction
+	 */
+	protected final void triggerBeforeCommit(DefaultTransactionStatus status) {
+<span class="fc bfc" id="L918" title="All 2 branches covered.">		if (status.isNewSynchronization()) {</span>
+<span class="pc bpc" id="L919" title="1 of 2 branches missed.">			if (status.isDebug()) {</span>
+<span class="nc" id="L920">				logger.trace(&quot;Triggering beforeCommit synchronization&quot;);</span>
+			}
+<span class="fc" id="L922">			TransactionSynchronizationUtils.triggerBeforeCommit(status.isReadOnly());</span>
+		}
+<span class="fc" id="L924">	}</span>
+
+	/**
+	 * Trigger {@code beforeCompletion} callbacks.
+	 * @param status object representing the transaction
+	 */
+	protected final void triggerBeforeCompletion(DefaultTransactionStatus status) {
+<span class="fc bfc" id="L931" title="All 2 branches covered.">		if (status.isNewSynchronization()) {</span>
+<span class="pc bpc" id="L932" title="1 of 2 branches missed.">			if (status.isDebug()) {</span>
+<span class="nc" id="L933">				logger.trace(&quot;Triggering beforeCompletion synchronization&quot;);</span>
+			}
+<span class="fc" id="L935">			TransactionSynchronizationUtils.triggerBeforeCompletion();</span>
+		}
+<span class="fc" id="L937">	}</span>
+
+	/**
+	 * Trigger {@code afterCommit} callbacks.
+	 * @param status object representing the transaction
+	 */
+	private void triggerAfterCommit(DefaultTransactionStatus status) {
+<span class="fc bfc" id="L944" title="All 2 branches covered.">		if (status.isNewSynchronization()) {</span>
+<span class="pc bpc" id="L945" title="1 of 2 branches missed.">			if (status.isDebug()) {</span>
+<span class="nc" id="L946">				logger.trace(&quot;Triggering afterCommit synchronization&quot;);</span>
+			}
+<span class="fc" id="L948">			TransactionSynchronizationUtils.triggerAfterCommit();</span>
+		}
+<span class="fc" id="L950">	}</span>
+
+	/**
+	 * Trigger {@code afterCompletion} callbacks.
+	 * @param status object representing the transaction
+	 * @param completionStatus completion status according to TransactionSynchronization constants
+	 */
+	private void triggerAfterCompletion(DefaultTransactionStatus status, int completionStatus) {
+<span class="fc bfc" id="L958" title="All 2 branches covered.">		if (status.isNewSynchronization()) {</span>
+<span class="fc" id="L959">			List&lt;TransactionSynchronization&gt; synchronizations = TransactionSynchronizationManager.getSynchronizations();</span>
+<span class="fc" id="L960">			TransactionSynchronizationManager.clearSynchronization();</span>
+<span class="fc bfc" id="L961" title="All 4 branches covered.">			if (!status.hasTransaction() || status.isNewTransaction()) {</span>
+<span class="pc bpc" id="L962" title="1 of 2 branches missed.">				if (status.isDebug()) {</span>
+<span class="nc" id="L963">					logger.trace(&quot;Triggering afterCompletion synchronization&quot;);</span>
+				}
+				// No transaction or new transaction for the current scope -&gt;
+				// invoke the afterCompletion callbacks immediately
+<span class="fc" id="L967">				invokeAfterCompletion(synchronizations, completionStatus);</span>
+			}
+<span class="fc bfc" id="L969" title="All 2 branches covered.">			else if (!synchronizations.isEmpty()) {</span>
+				// Existing transaction that we participate in, controlled outside
+				// of the scope of this Spring transaction manager -&gt; try to register
+				// an afterCompletion callback with the existing (JTA) transaction.
+<span class="fc" id="L973">				registerAfterCompletionWithExistingTransaction(status.getTransaction(), synchronizations);</span>
+			}
+		}
+<span class="fc" id="L976">	}</span>
+
+	/**
+	 * Actually invoke the {@code afterCompletion} methods of the
+	 * given Spring TransactionSynchronization objects.
+	 * &lt;p&gt;To be called by this abstract manager itself, or by special implementations
+	 * of the {@code registerAfterCompletionWithExistingTransaction} callback.
+	 * @param synchronizations a List of TransactionSynchronization objects
+	 * @param completionStatus the completion status according to the
+	 * constants in the TransactionSynchronization interface
+	 * @see #registerAfterCompletionWithExistingTransaction(Object, java.util.List)
+	 * @see TransactionSynchronization#STATUS_COMMITTED
+	 * @see TransactionSynchronization#STATUS_ROLLED_BACK
+	 * @see TransactionSynchronization#STATUS_UNKNOWN
+	 */
+	protected final void invokeAfterCompletion(List&lt;TransactionSynchronization&gt; synchronizations, int completionStatus) {
+<span class="fc" id="L992">		TransactionSynchronizationUtils.invokeAfterCompletion(synchronizations, completionStatus);</span>
+<span class="fc" id="L993">	}</span>
+
+	/**
+	 * Clean up after completion, clearing synchronization if necessary,
+	 * and invoking doCleanupAfterCompletion.
+	 * @param status object representing the transaction
+	 * @see #doCleanupAfterCompletion
+	 */
+	private void cleanupAfterCompletion(DefaultTransactionStatus status) {
+<span class="fc" id="L1002">		status.setCompleted();</span>
+<span class="fc bfc" id="L1003" title="All 2 branches covered.">		if (status.isNewSynchronization()) {</span>
+<span class="fc" id="L1004">			TransactionSynchronizationManager.clear();</span>
+		}
+<span class="fc bfc" id="L1006" title="All 2 branches covered.">		if (status.isNewTransaction()) {</span>
+<span class="fc" id="L1007">			doCleanupAfterCompletion(status.getTransaction());</span>
+		}
+<span class="fc bfc" id="L1009" title="All 2 branches covered.">		if (status.getSuspendedResources() != null) {</span>
+<span class="pc bpc" id="L1010" title="1 of 2 branches missed.">			if (status.isDebug()) {</span>
+<span class="nc" id="L1011">				logger.debug(&quot;Resuming suspended transaction after completion of inner transaction&quot;);</span>
+			}
+<span class="fc bfc" id="L1013" title="All 2 branches covered.">			Object transaction = (status.hasTransaction() ? status.getTransaction() : null);</span>
+<span class="fc" id="L1014">			resume(transaction, (SuspendedResourcesHolder) status.getSuspendedResources());</span>
+		}
+<span class="fc" id="L1016">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Template methods to be implemented in subclasses
+	//---------------------------------------------------------------------
+
+	/**
+	 * Return a transaction object for the current transaction state.
+	 * &lt;p&gt;The returned object will usually be specific to the concrete transaction
+	 * manager implementation, carrying corresponding transaction state in a
+	 * modifiable fashion. This object will be passed into the other template
+	 * methods (e.g. doBegin and doCommit), either directly or as part of a
+	 * DefaultTransactionStatus instance.
+	 * &lt;p&gt;The returned object should contain information about any existing
+	 * transaction, that is, a transaction that has already started before the
+	 * current {@code getTransaction} call on the transaction manager.
+	 * Consequently, a {@code doGetTransaction} implementation will usually
+	 * look for an existing transaction and store corresponding state in the
+	 * returned transaction object.
+	 * @return the current transaction object
+	 * @throws org.springframework.transaction.CannotCreateTransactionException
+	 * if transaction support is not available
+	 * @throws TransactionException in case of lookup or system errors
+	 * @see #doBegin
+	 * @see #doCommit
+	 * @see #doRollback
+	 * @see DefaultTransactionStatus#getTransaction
+	 */
+	protected abstract Object doGetTransaction() throws TransactionException;
+
+	/**
+	 * Check if the given transaction object indicates an existing transaction
+	 * (that is, a transaction which has already started).
+	 * &lt;p&gt;The result will be evaluated according to the specified propagation
+	 * behavior for the new transaction. An existing transaction might get
+	 * suspended (in case of PROPAGATION_REQUIRES_NEW), or the new transaction
+	 * might participate in the existing one (in case of PROPAGATION_REQUIRED).
+	 * &lt;p&gt;The default implementation returns {@code false}, assuming that
+	 * participating in existing transactions is generally not supported.
+	 * Subclasses are of course encouraged to provide such support.
+	 * @param transaction transaction object returned by doGetTransaction
+	 * @return if there is an existing transaction
+	 * @throws TransactionException in case of system errors
+	 * @see #doGetTransaction
+	 */
+	protected boolean isExistingTransaction(Object transaction) throws TransactionException {
+<span class="fc" id="L1063">		return false;</span>
+	}
+
+	/**
+	 * Return whether to use a savepoint for a nested transaction.
+	 * &lt;p&gt;Default is {@code true}, which causes delegation to DefaultTransactionStatus
+	 * for creating and holding a savepoint. If the transaction object does not implement
+	 * the SavepointManager interface, a NestedTransactionNotSupportedException will be
+	 * thrown. Else, the SavepointManager will be asked to create a new savepoint to
+	 * demarcate the start of the nested transaction.
+	 * &lt;p&gt;Subclasses can override this to return {@code false}, causing a further
+	 * call to {@code doBegin} - within the context of an already existing transaction.
+	 * The {@code doBegin} implementation needs to handle this accordingly in such
+	 * a scenario. This is appropriate for JTA, for example.
+	 * @see DefaultTransactionStatus#createAndHoldSavepoint
+	 * @see DefaultTransactionStatus#rollbackToHeldSavepoint
+	 * @see DefaultTransactionStatus#releaseHeldSavepoint
+	 * @see #doBegin
+	 */
+	protected boolean useSavepointForNestedTransaction() {
+<span class="nc" id="L1083">		return true;</span>
+	}
+
+	/**
+	 * Begin a new transaction with semantics according to the given transaction
+	 * definition. Does not have to care about applying the propagation behavior,
+	 * as this has already been handled by this abstract manager.
+	 * &lt;p&gt;This method gets called when the transaction manager has decided to actually
+	 * start a new transaction. Either there wasn't any transaction before, or the
+	 * previous transaction has been suspended.
+	 * &lt;p&gt;A special scenario is a nested transaction without savepoint: If
+	 * {@code useSavepointForNestedTransaction()} returns &quot;false&quot;, this method
+	 * will be called to start a nested transaction when necessary. In such a context,
+	 * there will be an active transaction: The implementation of this method has
+	 * to detect this and start an appropriate nested transaction.
+	 * @param transaction transaction object returned by {@code doGetTransaction}
+	 * @param definition a TransactionDefinition instance, describing propagation
+	 * behavior, isolation level, read-only flag, timeout, and transaction name
+	 * @throws TransactionException in case of creation or system errors
+	 */
+	protected abstract void doBegin(Object transaction, TransactionDefinition definition)
+			throws TransactionException;
+
+	/**
+	 * Suspend the resources of the current transaction.
+	 * Transaction synchronization will already have been suspended.
+	 * &lt;p&gt;The default implementation throws a TransactionSuspensionNotSupportedException,
+	 * assuming that transaction suspension is generally not supported.
+	 * @param transaction transaction object returned by {@code doGetTransaction}
+	 * @return an object that holds suspended resources
+	 * (will be kept unexamined for passing it into doResume)
+	 * @throws org.springframework.transaction.TransactionSuspensionNotSupportedException
+	 * if suspending is not supported by the transaction manager implementation
+	 * @throws TransactionException in case of system errors
+	 * @see #doResume
+	 */
+	protected Object doSuspend(Object transaction) throws TransactionException {
+<span class="nc" id="L1120">		throw new TransactionSuspensionNotSupportedException(</span>
+<span class="nc" id="L1121">				&quot;Transaction manager [&quot; + getClass().getName() + &quot;] does not support transaction suspension&quot;);</span>
+	}
+
+	/**
+	 * Resume the resources of the current transaction.
+	 * Transaction synchronization will be resumed afterwards.
+	 * &lt;p&gt;The default implementation throws a TransactionSuspensionNotSupportedException,
+	 * assuming that transaction suspension is generally not supported.
+	 * @param transaction transaction object returned by {@code doGetTransaction}
+	 * @param suspendedResources the object that holds suspended resources,
+	 * as returned by doSuspend
+	 * @throws org.springframework.transaction.TransactionSuspensionNotSupportedException
+	 * if resuming is not supported by the transaction manager implementation
+	 * @throws TransactionException in case of system errors
+	 * @see #doSuspend
+	 */
+	protected void doResume(@Nullable Object transaction, Object suspendedResources) throws TransactionException {
+<span class="nc" id="L1138">		throw new TransactionSuspensionNotSupportedException(</span>
+<span class="nc" id="L1139">				&quot;Transaction manager [&quot; + getClass().getName() + &quot;] does not support transaction suspension&quot;);</span>
+	}
+
+	/**
+	 * Return whether to call {@code doCommit} on a transaction that has been
+	 * marked as rollback-only in a global fashion.
+	 * &lt;p&gt;Does not apply if an application locally sets the transaction to rollback-only
+	 * via the TransactionStatus, but only to the transaction itself being marked as
+	 * rollback-only by the transaction coordinator.
+	 * &lt;p&gt;Default is &quot;false&quot;: Local transaction strategies usually don't hold the rollback-only
+	 * marker in the transaction itself, therefore they can't handle rollback-only transactions
+	 * as part of transaction commit. Hence, AbstractPlatformTransactionManager will trigger
+	 * a rollback in that case, throwing an UnexpectedRollbackException afterwards.
+	 * &lt;p&gt;Override this to return &quot;true&quot; if the concrete transaction manager expects a
+	 * {@code doCommit} call even for a rollback-only transaction, allowing for
+	 * special handling there. This will, for example, be the case for JTA, where
+	 * {@code UserTransaction.commit} will check the read-only flag itself and
+	 * throw a corresponding RollbackException, which might include the specific reason
+	 * (such as a transaction timeout).
+	 * &lt;p&gt;If this method returns &quot;true&quot; but the {@code doCommit} implementation does not
+	 * throw an exception, this transaction manager will throw an UnexpectedRollbackException
+	 * itself. This should not be the typical case; it is mainly checked to cover misbehaving
+	 * JTA providers that silently roll back even when the rollback has not been requested
+	 * by the calling code.
+	 * @see #doCommit
+	 * @see DefaultTransactionStatus#isGlobalRollbackOnly()
+	 * @see DefaultTransactionStatus#isLocalRollbackOnly()
+	 * @see org.springframework.transaction.TransactionStatus#setRollbackOnly()
+	 * @see org.springframework.transaction.UnexpectedRollbackException
+	 * @see javax.transaction.UserTransaction#commit()
+	 * @see javax.transaction.RollbackException
+	 */
+	protected boolean shouldCommitOnGlobalRollbackOnly() {
+<span class="fc" id="L1172">		return false;</span>
+	}
+
+	/**
+	 * Make preparations for commit, to be performed before the
+	 * {@code beforeCommit} synchronization callbacks occur.
+	 * &lt;p&gt;Note that exceptions will get propagated to the commit caller
+	 * and cause a rollback of the transaction.
+	 * @param status the status representation of the transaction
+	 * @throws RuntimeException in case of errors; will be &lt;b&gt;propagated to the caller&lt;/b&gt;
+	 * (note: do not throw TransactionException subclasses here!)
+	 */
+	protected void prepareForCommit(DefaultTransactionStatus status) {
+<span class="fc" id="L1185">	}</span>
+
+	/**
+	 * Perform an actual commit of the given transaction.
+	 * &lt;p&gt;An implementation does not need to check the &quot;new transaction&quot; flag
+	 * or the rollback-only flag; this will already have been handled before.
+	 * Usually, a straight commit will be performed on the transaction object
+	 * contained in the passed-in status.
+	 * @param status the status representation of the transaction
+	 * @throws TransactionException in case of commit or system errors
+	 * @see DefaultTransactionStatus#getTransaction
+	 */
+	protected abstract void doCommit(DefaultTransactionStatus status) throws TransactionException;
+
+	/**
+	 * Perform an actual rollback of the given transaction.
+	 * &lt;p&gt;An implementation does not need to check the &quot;new transaction&quot; flag;
+	 * this will already have been handled before. Usually, a straight rollback
+	 * will be performed on the transaction object contained in the passed-in status.
+	 * @param status the status representation of the transaction
+	 * @throws TransactionException in case of system errors
+	 * @see DefaultTransactionStatus#getTransaction
+	 */
+	protected abstract void doRollback(DefaultTransactionStatus status) throws TransactionException;
+
+	/**
+	 * Set the given transaction rollback-only. Only called on rollback
+	 * if the current transaction participates in an existing one.
+	 * &lt;p&gt;The default implementation throws an IllegalTransactionStateException,
+	 * assuming that participating in existing transactions is generally not
+	 * supported. Subclasses are of course encouraged to provide such support.
+	 * @param status the status representation of the transaction
+	 * @throws TransactionException in case of system errors
+	 */
+	protected void doSetRollbackOnly(DefaultTransactionStatus status) throws TransactionException {
+<span class="nc" id="L1220">		throw new IllegalTransactionStateException(</span>
+				&quot;Participating in existing transactions is not supported - when 'isExistingTransaction' &quot; +
+				&quot;returns true, appropriate 'doSetRollbackOnly' behavior must be provided&quot;);
+	}
+
+	/**
+	 * Register the given list of transaction synchronizations with the existing transaction.
+	 * &lt;p&gt;Invoked when the control of the Spring transaction manager and thus all Spring
+	 * transaction synchronizations end, without the transaction being completed yet. This
+	 * is for example the case when participating in an existing JTA or EJB CMT transaction.
+	 * &lt;p&gt;The default implementation simply invokes the {@code afterCompletion} methods
+	 * immediately, passing in &quot;STATUS_UNKNOWN&quot;. This is the best we can do if there's no
+	 * chance to determine the actual outcome of the outer transaction.
+	 * @param transaction transaction object returned by {@code doGetTransaction}
+	 * @param synchronizations a List of TransactionSynchronization objects
+	 * @throws TransactionException in case of system errors
+	 * @see #invokeAfterCompletion(java.util.List, int)
+	 * @see TransactionSynchronization#afterCompletion(int)
+	 * @see TransactionSynchronization#STATUS_UNKNOWN
+	 */
+	protected void registerAfterCompletionWithExistingTransaction(
+			Object transaction, List&lt;TransactionSynchronization&gt; synchronizations) throws TransactionException {
+
+<span class="nc" id="L1243">		logger.debug(&quot;Cannot register Spring after-completion synchronization with existing transaction - &quot; +</span>
+				&quot;processing Spring after-completion callbacks immediately, with outcome status 'unknown'&quot;);
+<span class="nc" id="L1245">		invokeAfterCompletion(synchronizations, TransactionSynchronization.STATUS_UNKNOWN);</span>
+<span class="nc" id="L1246">	}</span>
+
+	/**
+	 * Cleanup resources after transaction completion.
+	 * &lt;p&gt;Called after {@code doCommit} and {@code doRollback} execution,
+	 * on any outcome. The default implementation does nothing.
+	 * &lt;p&gt;Should not throw any exceptions but just issue warnings on errors.
+	 * @param transaction transaction object returned by {@code doGetTransaction}
+	 */
+	protected void doCleanupAfterCompletion(Object transaction) {
+<span class="fc" id="L1256">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+		// Rely on default serialization; just initialize state after deserialization.
+<span class="fc" id="L1265">		ois.defaultReadObject();</span>
+
+		// Initialize transient fields.
+<span class="fc" id="L1268">		this.logger = LogFactory.getLog(getClass());</span>
+<span class="fc" id="L1269">	}</span>
+
+
+	/**
+	 * Holder for suspended resources.
+	 * Used internally by {@code suspend} and {@code resume}.
+	 */
+	protected static final class SuspendedResourcesHolder {
+
+		@Nullable
+		private final Object suspendedResources;
+
+		@Nullable
+		private List&lt;TransactionSynchronization&gt; suspendedSynchronizations;
+
+		@Nullable
+		private String name;
+
+		private boolean readOnly;
+
+		@Nullable
+		private Integer isolationLevel;
+
+		private boolean wasActive;
+
+<span class="fc" id="L1294">		private SuspendedResourcesHolder(Object suspendedResources) {</span>
+<span class="fc" id="L1295">			this.suspendedResources = suspendedResources;</span>
+<span class="fc" id="L1296">		}</span>
+
+		private SuspendedResourcesHolder(
+				@Nullable Object suspendedResources, List&lt;TransactionSynchronization&gt; suspendedSynchronizations,
+<span class="fc" id="L1300">				@Nullable String name, boolean readOnly, @Nullable Integer isolationLevel, boolean wasActive) {</span>
+
+<span class="fc" id="L1302">			this.suspendedResources = suspendedResources;</span>
+<span class="fc" id="L1303">			this.suspendedSynchronizations = suspendedSynchronizations;</span>
+<span class="fc" id="L1304">			this.name = name;</span>
+<span class="fc" id="L1305">			this.readOnly = readOnly;</span>
+<span class="fc" id="L1306">			this.isolationLevel = isolationLevel;</span>
+<span class="fc" id="L1307">			this.wasActive = wasActive;</span>
+<span class="fc" id="L1308">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

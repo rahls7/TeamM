@@ -1,0 +1,495 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExceptionHandlerExceptionResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.mvc.method.annotation</a> &gt; <span class="el_source">ExceptionHandlerExceptionResolver.java</span></div><h1>ExceptionHandlerExceptionResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.mvc.method.annotation;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.ByteArrayHttpMessageConverter;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.StringHttpMessageConverter;
+import org.springframework.http.converter.support.AllEncompassingFormHttpMessageConverter;
+import org.springframework.http.converter.xml.SourceHttpMessageConverter;
+import org.springframework.lang.Nullable;
+import org.springframework.ui.ModelMap;
+import org.springframework.web.accept.ContentNegotiationManager;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.method.ControllerAdviceBean;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.method.annotation.ExceptionHandlerMethodResolver;
+import org.springframework.web.method.annotation.MapMethodProcessor;
+import org.springframework.web.method.annotation.ModelAttributeMethodProcessor;
+import org.springframework.web.method.annotation.ModelMethodProcessor;
+import org.springframework.web.method.support.HandlerMethodArgumentResolver;
+import org.springframework.web.method.support.HandlerMethodArgumentResolverComposite;
+import org.springframework.web.method.support.HandlerMethodReturnValueHandler;
+import org.springframework.web.method.support.HandlerMethodReturnValueHandlerComposite;
+import org.springframework.web.method.support.ModelAndViewContainer;
+import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.servlet.View;
+import org.springframework.web.servlet.handler.AbstractHandlerMethodExceptionResolver;
+import org.springframework.web.servlet.mvc.support.RedirectAttributes;
+import org.springframework.web.servlet.support.RequestContextUtils;
+
+/**
+ * An {@link AbstractHandlerMethodExceptionResolver} that resolves exceptions
+ * through {@code @ExceptionHandler} methods.
+ *
+ * &lt;p&gt;Support for custom argument and return value types can be added via
+ * {@link #setCustomArgumentResolvers} and {@link #setCustomReturnValueHandlers}.
+ * Or alternatively to re-configure all argument and return value types use
+ * {@link #setArgumentResolvers} and {@link #setReturnValueHandlers(List)}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 3.1
+ */
+public class ExceptionHandlerExceptionResolver extends AbstractHandlerMethodExceptionResolver
+		implements ApplicationContextAware, InitializingBean {
+
+	@Nullable
+	private List&lt;HandlerMethodArgumentResolver&gt; customArgumentResolvers;
+
+	@Nullable
+	private HandlerMethodArgumentResolverComposite argumentResolvers;
+
+	@Nullable
+	private List&lt;HandlerMethodReturnValueHandler&gt; customReturnValueHandlers;
+
+	@Nullable
+	private HandlerMethodReturnValueHandlerComposite returnValueHandlers;
+
+	private List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters;
+
+<span class="fc" id="L93">	private ContentNegotiationManager contentNegotiationManager = new ContentNegotiationManager();</span>
+
+<span class="fc" id="L95">	private final List&lt;Object&gt; responseBodyAdvice = new ArrayList&lt;&gt;();</span>
+
+	@Nullable
+	private ApplicationContext applicationContext;
+
+<span class="fc" id="L100">	private final Map&lt;Class&lt;?&gt;, ExceptionHandlerMethodResolver&gt; exceptionHandlerCache =</span>
+			new ConcurrentHashMap&lt;&gt;(64);
+
+<span class="fc" id="L103">	private final Map&lt;ControllerAdviceBean, ExceptionHandlerMethodResolver&gt; exceptionHandlerAdviceCache =</span>
+			new LinkedHashMap&lt;&gt;();
+
+
+<span class="fc" id="L107">	public ExceptionHandlerExceptionResolver() {</span>
+<span class="fc" id="L108">		StringHttpMessageConverter stringHttpMessageConverter = new StringHttpMessageConverter();</span>
+<span class="fc" id="L109">		stringHttpMessageConverter.setWriteAcceptCharset(false);  // see SPR-7316</span>
+
+<span class="fc" id="L111">		this.messageConverters = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L112">		this.messageConverters.add(new ByteArrayHttpMessageConverter());</span>
+<span class="fc" id="L113">		this.messageConverters.add(stringHttpMessageConverter);</span>
+		try {
+<span class="fc" id="L115">			this.messageConverters.add(new SourceHttpMessageConverter&lt;&gt;());</span>
+		}
+<span class="nc" id="L117">		catch (Error err) {</span>
+			// Ignore when no TransformerFactory implementation is available
+<span class="fc" id="L119">		}</span>
+<span class="fc" id="L120">		this.messageConverters.add(new AllEncompassingFormHttpMessageConverter());</span>
+<span class="fc" id="L121">	}</span>
+
+
+	/**
+	 * Provide resolvers for custom argument types. Custom resolvers are ordered
+	 * after built-in ones. To override the built-in support for argument
+	 * resolution use {@link #setArgumentResolvers} instead.
+	 */
+	public void setCustomArgumentResolvers(@Nullable List&lt;HandlerMethodArgumentResolver&gt; argumentResolvers) {
+<span class="fc" id="L130">		this.customArgumentResolvers = argumentResolvers;</span>
+<span class="fc" id="L131">	}</span>
+
+	/**
+	 * Return the custom argument resolvers, or {@code null}.
+	 */
+	@Nullable
+	public List&lt;HandlerMethodArgumentResolver&gt; getCustomArgumentResolvers() {
+<span class="fc" id="L138">		return this.customArgumentResolvers;</span>
+	}
+
+	/**
+	 * Configure the complete list of supported argument types thus overriding
+	 * the resolvers that would otherwise be configured by default.
+	 */
+	public void setArgumentResolvers(@Nullable List&lt;HandlerMethodArgumentResolver&gt; argumentResolvers) {
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">		if (argumentResolvers == null) {</span>
+<span class="nc" id="L147">			this.argumentResolvers = null;</span>
+		}
+		else {
+<span class="fc" id="L150">			this.argumentResolvers = new HandlerMethodArgumentResolverComposite();</span>
+<span class="fc" id="L151">			this.argumentResolvers.addResolvers(argumentResolvers);</span>
+		}
+<span class="fc" id="L153">	}</span>
+
+	/**
+	 * Return the configured argument resolvers, or possibly {@code null} if
+	 * not initialized yet via {@link #afterPropertiesSet()}.
+	 */
+	@Nullable
+	public HandlerMethodArgumentResolverComposite getArgumentResolvers() {
+<span class="fc" id="L161">		return this.argumentResolvers;</span>
+	}
+
+	/**
+	 * Provide handlers for custom return value types. Custom handlers are
+	 * ordered after built-in ones. To override the built-in support for
+	 * return value handling use {@link #setReturnValueHandlers}.
+	 */
+	public void setCustomReturnValueHandlers(@Nullable List&lt;HandlerMethodReturnValueHandler&gt; returnValueHandlers) {
+<span class="fc" id="L170">		this.customReturnValueHandlers = returnValueHandlers;</span>
+<span class="fc" id="L171">	}</span>
+
+	/**
+	 * Return the custom return value handlers, or {@code null}.
+	 */
+	@Nullable
+	public List&lt;HandlerMethodReturnValueHandler&gt; getCustomReturnValueHandlers() {
+<span class="fc" id="L178">		return this.customReturnValueHandlers;</span>
+	}
+
+	/**
+	 * Configure the complete list of supported return value types thus
+	 * overriding handlers that would otherwise be configured by default.
+	 */
+	public void setReturnValueHandlers(@Nullable List&lt;HandlerMethodReturnValueHandler&gt; returnValueHandlers) {
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">		if (returnValueHandlers == null) {</span>
+<span class="nc" id="L187">			this.returnValueHandlers = null;</span>
+		}
+		else {
+<span class="fc" id="L190">			this.returnValueHandlers = new HandlerMethodReturnValueHandlerComposite();</span>
+<span class="fc" id="L191">			this.returnValueHandlers.addHandlers(returnValueHandlers);</span>
+		}
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * Return the configured handlers, or possibly {@code null} if not
+	 * initialized yet via {@link #afterPropertiesSet()}.
+	 */
+	@Nullable
+	public HandlerMethodReturnValueHandlerComposite getReturnValueHandlers() {
+<span class="fc" id="L201">		return this.returnValueHandlers;</span>
+	}
+
+	/**
+	 * Set the message body converters to use.
+	 * &lt;p&gt;These converters are used to convert from and to HTTP requests and responses.
+	 */
+	public void setMessageConverters(List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters) {
+<span class="fc" id="L209">		this.messageConverters = messageConverters;</span>
+<span class="fc" id="L210">	}</span>
+
+	/**
+	 * Return the configured message body converters.
+	 */
+	public List&lt;HttpMessageConverter&lt;?&gt;&gt; getMessageConverters() {
+<span class="fc" id="L216">		return this.messageConverters;</span>
+	}
+
+	/**
+	 * Set the {@link ContentNegotiationManager} to use to determine requested media types.
+	 * If not set, the default constructor is used.
+	 */
+	public void setContentNegotiationManager(ContentNegotiationManager contentNegotiationManager) {
+<span class="fc" id="L224">		this.contentNegotiationManager = contentNegotiationManager;</span>
+<span class="fc" id="L225">	}</span>
+
+	/**
+	 * Return the configured {@link ContentNegotiationManager}.
+	 */
+	public ContentNegotiationManager getContentNegotiationManager() {
+<span class="nc" id="L231">		return this.contentNegotiationManager;</span>
+	}
+
+	/**
+	 * Add one or more components to be invoked after the execution of a controller
+	 * method annotated with {@code @ResponseBody} or returning {@code ResponseEntity}
+	 * but before the body is written to the response with the selected
+	 * {@code HttpMessageConverter}.
+	 */
+	public void setResponseBodyAdvice(@Nullable List&lt;ResponseBodyAdvice&lt;?&gt;&gt; responseBodyAdvice) {
+<span class="fc" id="L241">		this.responseBodyAdvice.clear();</span>
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">		if (responseBodyAdvice != null) {</span>
+<span class="fc" id="L243">			this.responseBodyAdvice.addAll(responseBodyAdvice);</span>
+		}
+<span class="fc" id="L245">	}</span>
+
+	@Override
+	public void setApplicationContext(@Nullable ApplicationContext applicationContext) {
+<span class="fc" id="L249">		this.applicationContext = applicationContext;</span>
+<span class="fc" id="L250">	}</span>
+
+	@Nullable
+	public ApplicationContext getApplicationContext() {
+<span class="fc" id="L254">		return this.applicationContext;</span>
+	}
+
+
+	@Override
+	public void afterPropertiesSet() {
+		// Do this first, it may add ResponseBodyAdvice beans
+<span class="fc" id="L261">		initExceptionHandlerAdviceCache();</span>
+
+<span class="fc bfc" id="L263" title="All 2 branches covered.">		if (this.argumentResolvers == null) {</span>
+<span class="fc" id="L264">			List&lt;HandlerMethodArgumentResolver&gt; resolvers = getDefaultArgumentResolvers();</span>
+<span class="fc" id="L265">			this.argumentResolvers = new HandlerMethodArgumentResolverComposite().addResolvers(resolvers);</span>
+		}
+<span class="fc bfc" id="L267" title="All 2 branches covered.">		if (this.returnValueHandlers == null) {</span>
+<span class="fc" id="L268">			List&lt;HandlerMethodReturnValueHandler&gt; handlers = getDefaultReturnValueHandlers();</span>
+<span class="fc" id="L269">			this.returnValueHandlers = new HandlerMethodReturnValueHandlerComposite().addHandlers(handlers);</span>
+		}
+<span class="fc" id="L271">	}</span>
+
+	private void initExceptionHandlerAdviceCache() {
+<span class="fc bfc" id="L274" title="All 2 branches covered.">		if (getApplicationContext() == null) {</span>
+<span class="fc" id="L275">			return;</span>
+		}
+
+<span class="fc" id="L278">		List&lt;ControllerAdviceBean&gt; adviceBeans = ControllerAdviceBean.findAnnotatedBeans(getApplicationContext());</span>
+<span class="fc" id="L279">		AnnotationAwareOrderComparator.sort(adviceBeans);</span>
+
+<span class="fc bfc" id="L281" title="All 2 branches covered.">		for (ControllerAdviceBean adviceBean : adviceBeans) {</span>
+<span class="fc" id="L282">			Class&lt;?&gt; beanType = adviceBean.getBeanType();</span>
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">			if (beanType == null) {</span>
+<span class="nc" id="L284">				throw new IllegalStateException(&quot;Unresolvable type for ControllerAdviceBean: &quot; + adviceBean);</span>
+			}
+<span class="fc" id="L286">			ExceptionHandlerMethodResolver resolver = new ExceptionHandlerMethodResolver(beanType);</span>
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">			if (resolver.hasExceptionMappings()) {</span>
+<span class="fc" id="L288">				this.exceptionHandlerAdviceCache.put(adviceBean, resolver);</span>
+			}
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">			if (ResponseBodyAdvice.class.isAssignableFrom(beanType)) {</span>
+<span class="nc" id="L291">				this.responseBodyAdvice.add(adviceBean);</span>
+			}
+<span class="fc" id="L293">		}</span>
+
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L296">			int handlerSize = this.exceptionHandlerAdviceCache.size();</span>
+<span class="nc" id="L297">			int adviceSize = this.responseBodyAdvice.size();</span>
+<span class="nc bnc" id="L298" title="All 4 branches missed.">			if (handlerSize == 0 &amp;&amp; adviceSize == 0) {</span>
+<span class="nc" id="L299">				logger.debug(&quot;ControllerAdvice beans: none&quot;);</span>
+			}
+			else {
+<span class="nc" id="L302">				logger.debug(&quot;ControllerAdvice beans: &quot; +</span>
+						handlerSize + &quot; @ExceptionHandler, &quot; + adviceSize + &quot; ResponseBodyAdvice&quot;);
+			}
+		}
+<span class="fc" id="L306">	}</span>
+
+	/**
+	 * Return an unmodifiable Map with the {@link ControllerAdvice @ControllerAdvice}
+	 * beans discovered in the ApplicationContext. The returned map will be empty if
+	 * the method is invoked before the bean has been initialized via
+	 * {@link #afterPropertiesSet()}.
+	 */
+	public Map&lt;ControllerAdviceBean, ExceptionHandlerMethodResolver&gt; getExceptionHandlerAdviceCache() {
+<span class="nc" id="L315">		return Collections.unmodifiableMap(this.exceptionHandlerAdviceCache);</span>
+	}
+
+	/**
+	 * Return the list of argument resolvers to use including built-in resolvers
+	 * and custom resolvers provided via {@link #setCustomArgumentResolvers}.
+	 */
+	protected List&lt;HandlerMethodArgumentResolver&gt; getDefaultArgumentResolvers() {
+<span class="fc" id="L323">		List&lt;HandlerMethodArgumentResolver&gt; resolvers = new ArrayList&lt;&gt;();</span>
+
+		// Annotation-based argument resolution
+<span class="fc" id="L326">		resolvers.add(new SessionAttributeMethodArgumentResolver());</span>
+<span class="fc" id="L327">		resolvers.add(new RequestAttributeMethodArgumentResolver());</span>
+
+		// Type-based argument resolution
+<span class="fc" id="L330">		resolvers.add(new ServletRequestMethodArgumentResolver());</span>
+<span class="fc" id="L331">		resolvers.add(new ServletResponseMethodArgumentResolver());</span>
+<span class="fc" id="L332">		resolvers.add(new RedirectAttributesMethodArgumentResolver());</span>
+<span class="fc" id="L333">		resolvers.add(new ModelMethodProcessor());</span>
+
+		// Custom arguments
+<span class="fc bfc" id="L336" title="All 2 branches covered.">		if (getCustomArgumentResolvers() != null) {</span>
+<span class="fc" id="L337">			resolvers.addAll(getCustomArgumentResolvers());</span>
+		}
+
+<span class="fc" id="L340">		return resolvers;</span>
+	}
+
+	/**
+	 * Return the list of return value handlers to use including built-in and
+	 * custom handlers provided via {@link #setReturnValueHandlers}.
+	 */
+	protected List&lt;HandlerMethodReturnValueHandler&gt; getDefaultReturnValueHandlers() {
+<span class="fc" id="L348">		List&lt;HandlerMethodReturnValueHandler&gt; handlers = new ArrayList&lt;&gt;();</span>
+
+		// Single-purpose return value types
+<span class="fc" id="L351">		handlers.add(new ModelAndViewMethodReturnValueHandler());</span>
+<span class="fc" id="L352">		handlers.add(new ModelMethodProcessor());</span>
+<span class="fc" id="L353">		handlers.add(new ViewMethodReturnValueHandler());</span>
+<span class="fc" id="L354">		handlers.add(new HttpEntityMethodProcessor(</span>
+<span class="fc" id="L355">				getMessageConverters(), this.contentNegotiationManager, this.responseBodyAdvice));</span>
+
+		// Annotation-based return value types
+<span class="fc" id="L358">		handlers.add(new ModelAttributeMethodProcessor(false));</span>
+<span class="fc" id="L359">		handlers.add(new RequestResponseBodyMethodProcessor(</span>
+<span class="fc" id="L360">				getMessageConverters(), this.contentNegotiationManager, this.responseBodyAdvice));</span>
+
+		// Multi-purpose return value types
+<span class="fc" id="L363">		handlers.add(new ViewNameMethodReturnValueHandler());</span>
+<span class="fc" id="L364">		handlers.add(new MapMethodProcessor());</span>
+
+		// Custom return value types
+<span class="fc bfc" id="L367" title="All 2 branches covered.">		if (getCustomReturnValueHandlers() != null) {</span>
+<span class="fc" id="L368">			handlers.addAll(getCustomReturnValueHandlers());</span>
+		}
+
+		// Catch-all
+<span class="fc" id="L372">		handlers.add(new ModelAttributeMethodProcessor(true));</span>
+
+<span class="fc" id="L374">		return handlers;</span>
+	}
+
+
+	/**
+	 * Find an {@code @ExceptionHandler} method and invoke it to handle the raised exception.
+	 */
+	@Override
+	@Nullable
+	protected ModelAndView doResolveHandlerMethodException(HttpServletRequest request,
+			HttpServletResponse response, @Nullable HandlerMethod handlerMethod, Exception exception) {
+
+<span class="fc" id="L386">		ServletInvocableHandlerMethod exceptionHandlerMethod = getExceptionHandlerMethod(handlerMethod, exception);</span>
+<span class="fc bfc" id="L387" title="All 2 branches covered.">		if (exceptionHandlerMethod == null) {</span>
+<span class="fc" id="L388">			return null;</span>
+		}
+
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">		if (this.argumentResolvers != null) {</span>
+<span class="fc" id="L392">			exceptionHandlerMethod.setHandlerMethodArgumentResolvers(this.argumentResolvers);</span>
+		}
+<span class="pc bpc" id="L394" title="1 of 2 branches missed.">		if (this.returnValueHandlers != null) {</span>
+<span class="fc" id="L395">			exceptionHandlerMethod.setHandlerMethodReturnValueHandlers(this.returnValueHandlers);</span>
+		}
+
+<span class="fc" id="L398">		ServletWebRequest webRequest = new ServletWebRequest(request, response);</span>
+<span class="fc" id="L399">		ModelAndViewContainer mavContainer = new ModelAndViewContainer();</span>
+
+		try {
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L403">				logger.debug(&quot;Using @ExceptionHandler &quot; + exceptionHandlerMethod);</span>
+			}
+<span class="fc" id="L405">			Throwable cause = exception.getCause();</span>
+<span class="fc bfc" id="L406" title="All 2 branches covered.">			if (cause != null) {</span>
+				// Expose cause as provided argument as well
+<span class="fc" id="L408">				exceptionHandlerMethod.invokeAndHandle(webRequest, mavContainer, exception, cause, handlerMethod);</span>
+			}
+			else {
+				// Otherwise, just the given exception as-is
+<span class="fc" id="L412">				exceptionHandlerMethod.invokeAndHandle(webRequest, mavContainer, exception, handlerMethod);</span>
+			}
+		}
+<span class="fc" id="L415">		catch (Throwable invocationEx) {</span>
+			// Any other than the original exception is unintended here,
+			// probably an accident (e.g. failed assertion or the like).
+<span class="pc bpc" id="L418" title="3 of 4 branches missed.">			if (invocationEx != exception &amp;&amp; logger.isWarnEnabled()) {</span>
+<span class="nc" id="L419">				logger.warn(&quot;Failure in @ExceptionHandler &quot; + exceptionHandlerMethod, invocationEx);</span>
+			}
+			// Continue with default processing of the original exception...
+<span class="fc" id="L422">			return null;</span>
+<span class="fc" id="L423">		}</span>
+
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		if (mavContainer.isRequestHandled()) {</span>
+<span class="fc" id="L426">			return new ModelAndView();</span>
+		}
+		else {
+<span class="fc" id="L429">			ModelMap model = mavContainer.getModel();</span>
+<span class="fc" id="L430">			HttpStatus status = mavContainer.getStatus();</span>
+<span class="fc" id="L431">			ModelAndView mav = new ModelAndView(mavContainer.getViewName(), model, status);</span>
+<span class="fc" id="L432">			mav.setViewName(mavContainer.getViewName());</span>
+<span class="fc bfc" id="L433" title="All 2 branches covered.">			if (!mavContainer.isViewReference()) {</span>
+<span class="fc" id="L434">				mav.setView((View) mavContainer.getView());</span>
+			}
+<span class="fc bfc" id="L436" title="All 2 branches covered.">			if (model instanceof RedirectAttributes) {</span>
+<span class="fc" id="L437">				Map&lt;String, ?&gt; flashAttributes = ((RedirectAttributes) model).getFlashAttributes();</span>
+<span class="fc" id="L438">				RequestContextUtils.getOutputFlashMap(request).putAll(flashAttributes);</span>
+			}
+<span class="fc" id="L440">			return mav;</span>
+		}
+	}
+
+	/**
+	 * Find an {@code @ExceptionHandler} method for the given exception. The default
+	 * implementation searches methods in the class hierarchy of the controller first
+	 * and if not found, it continues searching for additional {@code @ExceptionHandler}
+	 * methods assuming some {@linkplain ControllerAdvice @ControllerAdvice}
+	 * Spring-managed beans were detected.
+	 * @param handlerMethod the method where the exception was raised (may be {@code null})
+	 * @param exception the raised exception
+	 * @return a method to handle the exception, or {@code null} if none
+	 */
+	@Nullable
+	protected ServletInvocableHandlerMethod getExceptionHandlerMethod(
+			@Nullable HandlerMethod handlerMethod, Exception exception) {
+
+<span class="fc" id="L458">		Class&lt;?&gt; handlerType = null;</span>
+
+<span class="fc bfc" id="L460" title="All 2 branches covered.">		if (handlerMethod != null) {</span>
+			// Local exception handler methods on the controller class itself.
+			// To be invoked through the proxy, even in case of an interface-based proxy.
+<span class="fc" id="L463">			handlerType = handlerMethod.getBeanType();</span>
+<span class="fc" id="L464">			ExceptionHandlerMethodResolver resolver = this.exceptionHandlerCache.get(handlerType);</span>
+<span class="pc bpc" id="L465" title="1 of 2 branches missed.">			if (resolver == null) {</span>
+<span class="fc" id="L466">				resolver = new ExceptionHandlerMethodResolver(handlerType);</span>
+<span class="fc" id="L467">				this.exceptionHandlerCache.put(handlerType, resolver);</span>
+			}
+<span class="fc" id="L469">			Method method = resolver.resolveMethod(exception);</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">			if (method != null) {</span>
+<span class="fc" id="L471">				return new ServletInvocableHandlerMethod(handlerMethod.getBean(), method);</span>
+			}
+			// For advice applicability check below (involving base packages, assignable types
+			// and annotation presence), use target class instead of interface-based proxy.
+<span class="fc bfc" id="L475" title="All 2 branches covered.">			if (Proxy.isProxyClass(handlerType)) {</span>
+<span class="fc" id="L476">				handlerType = AopUtils.getTargetClass(handlerMethod.getBean());</span>
+			}
+		}
+
+<span class="fc bfc" id="L480" title="All 2 branches covered.">		for (Map.Entry&lt;ControllerAdviceBean, ExceptionHandlerMethodResolver&gt; entry : this.exceptionHandlerAdviceCache.entrySet()) {</span>
+<span class="fc" id="L481">			ControllerAdviceBean advice = entry.getKey();</span>
+<span class="fc bfc" id="L482" title="All 2 branches covered.">			if (advice.isApplicableToBeanType(handlerType)) {</span>
+<span class="fc" id="L483">				ExceptionHandlerMethodResolver resolver = entry.getValue();</span>
+<span class="fc" id="L484">				Method method = resolver.resolveMethod(exception);</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">				if (method != null) {</span>
+<span class="fc" id="L486">					return new ServletInvocableHandlerMethod(advice.resolveBean(), method);</span>
+				}
+			}
+<span class="fc" id="L489">		}</span>
+
+<span class="fc" id="L491">		return null;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,385 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ThreadPoolTaskExecutor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.concurrent</a> &gt; <span class="el_source">ThreadPoolTaskExecutor.java</span></div><h1>ThreadPoolTaskExecutor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.concurrent;
+
+import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import org.springframework.core.task.AsyncListenableTaskExecutor;
+import org.springframework.core.task.TaskDecorator;
+import org.springframework.core.task.TaskRejectedException;
+import org.springframework.lang.Nullable;
+import org.springframework.scheduling.SchedulingTaskExecutor;
+import org.springframework.util.Assert;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.concurrent.ListenableFuture;
+import org.springframework.util.concurrent.ListenableFutureTask;
+
+/**
+ * JavaBean that allows for configuring a {@link java.util.concurrent.ThreadPoolExecutor}
+ * in bean style (through its &quot;corePoolSize&quot;, &quot;maxPoolSize&quot;, &quot;keepAliveSeconds&quot;, &quot;queueCapacity&quot;
+ * properties) and exposing it as a Spring {@link org.springframework.core.task.TaskExecutor}.
+ * This class is also well suited for management and monitoring (e.g. through JMX),
+ * providing several useful attributes: &quot;corePoolSize&quot;, &quot;maxPoolSize&quot;, &quot;keepAliveSeconds&quot;
+ * (all supporting updates at runtime); &quot;poolSize&quot;, &quot;activeCount&quot; (for introspection only).
+ *
+ * &lt;p&gt;The default configuration is a core pool size of 1, with unlimited max pool size
+ * and unlimited queue capacity. This is roughly equivalent to
+ * {@link java.util.concurrent.Executors#newSingleThreadExecutor()}, sharing a single
+ * thread for all tasks. Setting {@link #setQueueCapacity &quot;queueCapacity&quot;} to 0 mimics
+ * {@link java.util.concurrent.Executors#newCachedThreadPool()}, with immediate scaling
+ * of threads in the pool to a potentially very high number. Consider also setting a
+ * {@link #setMaxPoolSize &quot;maxPoolSize&quot;} at that point, as well as possibly a higher
+ * {@link #setCorePoolSize &quot;corePoolSize&quot;} (see also the
+ * {@link #setAllowCoreThreadTimeOut &quot;allowCoreThreadTimeOut&quot;} mode of scaling).
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; This class implements Spring's
+ * {@link org.springframework.core.task.TaskExecutor} interface as well as the
+ * {@link java.util.concurrent.Executor} interface, with the former being the primary
+ * interface, the other just serving as secondary convenience. For this reason, the
+ * exception handling follows the TaskExecutor contract rather than the Executor contract,
+ * in particular regarding the {@link org.springframework.core.task.TaskRejectedException}.
+ *
+ * &lt;p&gt;For an alternative, you may set up a ThreadPoolExecutor instance directly using
+ * constructor injection, or use a factory method definition that points to the
+ * {@link java.util.concurrent.Executors} class. To expose such a raw Executor as a
+ * Spring {@link org.springframework.core.task.TaskExecutor}, simply wrap it with a
+ * {@link org.springframework.scheduling.concurrent.ConcurrentTaskExecutor} adapter.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see org.springframework.core.task.TaskExecutor
+ * @see java.util.concurrent.ThreadPoolExecutor
+ * @see ThreadPoolExecutorFactoryBean
+ * @see ConcurrentTaskExecutor
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L82">public class ThreadPoolTaskExecutor extends ExecutorConfigurationSupport</span>
+		implements AsyncListenableTaskExecutor, SchedulingTaskExecutor {
+
+<span class="fc" id="L85">	private final Object poolSizeMonitor = new Object();</span>
+
+<span class="fc" id="L87">	private int corePoolSize = 1;</span>
+
+<span class="fc" id="L89">	private int maxPoolSize = Integer.MAX_VALUE;</span>
+
+<span class="fc" id="L91">	private int keepAliveSeconds = 60;</span>
+
+<span class="fc" id="L93">	private int queueCapacity = Integer.MAX_VALUE;</span>
+
+<span class="fc" id="L95">	private boolean allowCoreThreadTimeOut = false;</span>
+
+	@Nullable
+	private TaskDecorator taskDecorator;
+
+	@Nullable
+	private ThreadPoolExecutor threadPoolExecutor;
+
+	// Runnable decorator to user-level FutureTask, if different
+<span class="fc" id="L104">	private final Map&lt;Runnable, Object&gt; decoratedTaskMap =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(16, ConcurrentReferenceHashMap.ReferenceType.WEAK);
+
+
+	/**
+	 * Set the ThreadPoolExecutor's core pool size.
+	 * Default is 1.
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 */
+	public void setCorePoolSize(int corePoolSize) {
+<span class="fc" id="L114">		synchronized (this.poolSizeMonitor) {</span>
+<span class="fc" id="L115">			this.corePoolSize = corePoolSize;</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">			if (this.threadPoolExecutor != null) {</span>
+<span class="nc" id="L117">				this.threadPoolExecutor.setCorePoolSize(corePoolSize);</span>
+			}
+<span class="fc" id="L119">		}</span>
+<span class="fc" id="L120">	}</span>
+
+	/**
+	 * Return the ThreadPoolExecutor's core pool size.
+	 */
+	public int getCorePoolSize() {
+<span class="nc" id="L126">		synchronized (this.poolSizeMonitor) {</span>
+<span class="nc" id="L127">			return this.corePoolSize;</span>
+		}
+	}
+
+	/**
+	 * Set the ThreadPoolExecutor's maximum pool size.
+	 * Default is {@code Integer.MAX_VALUE}.
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 */
+	public void setMaxPoolSize(int maxPoolSize) {
+<span class="fc" id="L137">		synchronized (this.poolSizeMonitor) {</span>
+<span class="fc" id="L138">			this.maxPoolSize = maxPoolSize;</span>
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">			if (this.threadPoolExecutor != null) {</span>
+<span class="nc" id="L140">				this.threadPoolExecutor.setMaximumPoolSize(maxPoolSize);</span>
+			}
+<span class="fc" id="L142">		}</span>
+<span class="fc" id="L143">	}</span>
+
+	/**
+	 * Return the ThreadPoolExecutor's maximum pool size.
+	 */
+	public int getMaxPoolSize() {
+<span class="nc" id="L149">		synchronized (this.poolSizeMonitor) {</span>
+<span class="nc" id="L150">			return this.maxPoolSize;</span>
+		}
+	}
+
+	/**
+	 * Set the ThreadPoolExecutor's keep-alive seconds.
+	 * Default is 60.
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 */
+	public void setKeepAliveSeconds(int keepAliveSeconds) {
+<span class="fc" id="L160">		synchronized (this.poolSizeMonitor) {</span>
+<span class="fc" id="L161">			this.keepAliveSeconds = keepAliveSeconds;</span>
+<span class="pc bpc" id="L162" title="1 of 2 branches missed.">			if (this.threadPoolExecutor != null) {</span>
+<span class="nc" id="L163">				this.threadPoolExecutor.setKeepAliveTime(keepAliveSeconds, TimeUnit.SECONDS);</span>
+			}
+<span class="fc" id="L165">		}</span>
+<span class="fc" id="L166">	}</span>
+
+	/**
+	 * Return the ThreadPoolExecutor's keep-alive seconds.
+	 */
+	public int getKeepAliveSeconds() {
+<span class="nc" id="L172">		synchronized (this.poolSizeMonitor) {</span>
+<span class="nc" id="L173">			return this.keepAliveSeconds;</span>
+		}
+	}
+
+	/**
+	 * Set the capacity for the ThreadPoolExecutor's BlockingQueue.
+	 * Default is {@code Integer.MAX_VALUE}.
+	 * &lt;p&gt;Any positive value will lead to a LinkedBlockingQueue instance;
+	 * any other value will lead to a SynchronousQueue instance.
+	 * @see java.util.concurrent.LinkedBlockingQueue
+	 * @see java.util.concurrent.SynchronousQueue
+	 */
+	public void setQueueCapacity(int queueCapacity) {
+<span class="fc" id="L186">		this.queueCapacity = queueCapacity;</span>
+<span class="fc" id="L187">	}</span>
+
+	/**
+	 * Specify whether to allow core threads to time out. This enables dynamic
+	 * growing and shrinking even in combination with a non-zero queue (since
+	 * the max pool size will only grow once the queue is full).
+	 * &lt;p&gt;Default is &quot;false&quot;.
+	 * @see java.util.concurrent.ThreadPoolExecutor#allowCoreThreadTimeOut(boolean)
+	 */
+	public void setAllowCoreThreadTimeOut(boolean allowCoreThreadTimeOut) {
+<span class="fc" id="L197">		this.allowCoreThreadTimeOut = allowCoreThreadTimeOut;</span>
+<span class="fc" id="L198">	}</span>
+
+	/**
+	 * Specify a custom {@link TaskDecorator} to be applied to any {@link Runnable}
+	 * about to be executed.
+	 * &lt;p&gt;Note that such a decorator is not necessarily being applied to the
+	 * user-supplied {@code Runnable}/{@code Callable} but rather to the actual
+	 * execution callback (which may be a wrapper around the user-supplied task).
+	 * &lt;p&gt;The primary use case is to set some execution context around the task's
+	 * invocation, or to provide some monitoring/statistics for task execution.
+	 * @since 4.3
+	 */
+	public void setTaskDecorator(TaskDecorator taskDecorator) {
+<span class="fc" id="L211">		this.taskDecorator = taskDecorator;</span>
+<span class="fc" id="L212">	}</span>
+
+
+	/**
+	 * Note: This method exposes an {@link ExecutorService} to its base class
+	 * but stores the actual {@link ThreadPoolExecutor} handle internally.
+	 * Do not override this method for replacing the executor, rather just for
+	 * decorating its {@code ExecutorService} handle or storing custom state.
+	 */
+	@Override
+	protected ExecutorService initializeExecutor(
+			ThreadFactory threadFactory, RejectedExecutionHandler rejectedExecutionHandler) {
+
+<span class="fc" id="L225">		BlockingQueue&lt;Runnable&gt; queue = createQueue(this.queueCapacity);</span>
+
+		ThreadPoolExecutor executor;
+<span class="fc bfc" id="L228" title="All 2 branches covered.">		if (this.taskDecorator != null) {</span>
+<span class="fc" id="L229">			executor = new ThreadPoolExecutor(</span>
+					this.corePoolSize, this.maxPoolSize, this.keepAliveSeconds, TimeUnit.SECONDS,
+<span class="fc" id="L231">					queue, threadFactory, rejectedExecutionHandler) {</span>
+				@Override
+				public void execute(Runnable command) {
+<span class="fc" id="L234">					Runnable decorated = taskDecorator.decorate(command);</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">					if (decorated != command) {</span>
+<span class="fc" id="L236">						decoratedTaskMap.put(decorated, command);</span>
+					}
+<span class="fc" id="L238">					super.execute(decorated);</span>
+<span class="fc" id="L239">				}</span>
+			};
+		}
+		else {
+<span class="fc" id="L243">			executor = new ThreadPoolExecutor(</span>
+					this.corePoolSize, this.maxPoolSize, this.keepAliveSeconds, TimeUnit.SECONDS,
+					queue, threadFactory, rejectedExecutionHandler);
+
+		}
+
+<span class="fc bfc" id="L249" title="All 2 branches covered.">		if (this.allowCoreThreadTimeOut) {</span>
+<span class="fc" id="L250">			executor.allowCoreThreadTimeOut(true);</span>
+		}
+
+<span class="fc" id="L253">		this.threadPoolExecutor = executor;</span>
+<span class="fc" id="L254">		return executor;</span>
+	}
+
+	/**
+	 * Create the BlockingQueue to use for the ThreadPoolExecutor.
+	 * &lt;p&gt;A LinkedBlockingQueue instance will be created for a positive
+	 * capacity value; a SynchronousQueue else.
+	 * @param queueCapacity the specified queue capacity
+	 * @return the BlockingQueue instance
+	 * @see java.util.concurrent.LinkedBlockingQueue
+	 * @see java.util.concurrent.SynchronousQueue
+	 */
+	protected BlockingQueue&lt;Runnable&gt; createQueue(int queueCapacity) {
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">		if (queueCapacity &gt; 0) {</span>
+<span class="fc" id="L268">			return new LinkedBlockingQueue&lt;&gt;(queueCapacity);</span>
+		}
+		else {
+<span class="nc" id="L271">			return new SynchronousQueue&lt;&gt;();</span>
+		}
+	}
+
+	/**
+	 * Return the underlying ThreadPoolExecutor for native access.
+	 * @return the underlying ThreadPoolExecutor (never {@code null})
+	 * @throws IllegalStateException if the ThreadPoolTaskExecutor hasn't been initialized yet
+	 */
+	public ThreadPoolExecutor getThreadPoolExecutor() throws IllegalStateException {
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">		Assert.state(this.threadPoolExecutor != null, &quot;ThreadPoolTaskExecutor not initialized&quot;);</span>
+<span class="fc" id="L282">		return this.threadPoolExecutor;</span>
+	}
+
+	/**
+	 * Return the current pool size.
+	 * @see java.util.concurrent.ThreadPoolExecutor#getPoolSize()
+	 */
+	public int getPoolSize() {
+<span class="nc bnc" id="L290" title="All 2 branches missed.">		if (this.threadPoolExecutor == null) {</span>
+			// Not initialized yet: assume core pool size.
+<span class="nc" id="L292">			return this.corePoolSize;</span>
+		}
+<span class="nc" id="L294">		return this.threadPoolExecutor.getPoolSize();</span>
+	}
+
+	/**
+	 * Return the number of currently active threads.
+	 * @see java.util.concurrent.ThreadPoolExecutor#getActiveCount()
+	 */
+	public int getActiveCount() {
+<span class="nc bnc" id="L302" title="All 2 branches missed.">		if (this.threadPoolExecutor == null) {</span>
+			// Not initialized yet: assume no active threads.
+<span class="nc" id="L304">			return 0;</span>
+		}
+<span class="nc" id="L306">		return this.threadPoolExecutor.getActiveCount();</span>
+	}
+
+
+	@Override
+	public void execute(Runnable task) {
+<span class="fc" id="L312">		Executor executor = getThreadPoolExecutor();</span>
+		try {
+<span class="fc" id="L314">			executor.execute(task);</span>
+		}
+<span class="nc" id="L316">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L317">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+<span class="fc" id="L318">		}</span>
+<span class="fc" id="L319">	}</span>
+
+	@Override
+	public void execute(Runnable task, long startTimeout) {
+<span class="nc" id="L323">		execute(task);</span>
+<span class="nc" id="L324">	}</span>
+
+	@Override
+	public Future&lt;?&gt; submit(Runnable task) {
+<span class="fc" id="L328">		ExecutorService executor = getThreadPoolExecutor();</span>
+		try {
+<span class="fc" id="L330">			return executor.submit(task);</span>
+		}
+<span class="nc" id="L332">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L333">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public &lt;T&gt; Future&lt;T&gt; submit(Callable&lt;T&gt; task) {
+<span class="fc" id="L339">		ExecutorService executor = getThreadPoolExecutor();</span>
+		try {
+<span class="fc" id="L341">			return executor.submit(task);</span>
+		}
+<span class="nc" id="L343">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L344">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public ListenableFuture&lt;?&gt; submitListenable(Runnable task) {
+<span class="fc" id="L350">		ExecutorService executor = getThreadPoolExecutor();</span>
+		try {
+<span class="fc" id="L352">			ListenableFutureTask&lt;Object&gt; future = new ListenableFutureTask&lt;&gt;(task, null);</span>
+<span class="fc" id="L353">			executor.execute(future);</span>
+<span class="fc" id="L354">			return future;</span>
+		}
+<span class="nc" id="L356">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L357">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	public &lt;T&gt; ListenableFuture&lt;T&gt; submitListenable(Callable&lt;T&gt; task) {
+<span class="fc" id="L363">		ExecutorService executor = getThreadPoolExecutor();</span>
+		try {
+<span class="fc" id="L365">			ListenableFutureTask&lt;T&gt; future = new ListenableFutureTask&lt;&gt;(task);</span>
+<span class="fc" id="L366">			executor.execute(future);</span>
+<span class="fc" id="L367">			return future;</span>
+		}
+<span class="nc" id="L369">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L370">			throw new TaskRejectedException(&quot;Executor [&quot; + executor + &quot;] did not accept task: &quot; + task, ex);</span>
+		}
+	}
+
+	@Override
+	protected void cancelRemainingTask(Runnable task) {
+<span class="fc" id="L376">		super.cancelRemainingTask(task);</span>
+		// Cancel associated user-level Future handle as well
+<span class="fc" id="L378">		Object original = this.decoratedTaskMap.get(task);</span>
+<span class="fc bfc" id="L379" title="All 2 branches covered.">		if (original instanceof Future) {</span>
+<span class="fc" id="L380">			((Future&lt;?&gt;) original).cancel(true);</span>
+		}
+<span class="fc" id="L382">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

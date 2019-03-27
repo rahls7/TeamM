@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractListenerWebSocketSession.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.socket.adapter</a> &gt; <span class="el_source">AbstractListenerWebSocketSession.java</span></div><h1>AbstractListenerWebSocketSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.socket.adapter;
+
+import java.io.IOException;
+import java.util.Queue;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.MonoProcessor;
+import reactor.util.concurrent.Queues;
+
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.http.server.reactive.AbstractListenerReadPublisher;
+import org.springframework.http.server.reactive.AbstractListenerWriteProcessor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.web.reactive.socket.CloseStatus;
+import org.springframework.web.reactive.socket.HandshakeInfo;
+import org.springframework.web.reactive.socket.WebSocketMessage;
+import org.springframework.web.reactive.socket.WebSocketMessage.Type;
+import org.springframework.web.reactive.socket.WebSocketSession;
+
+/**
+ * Base class for {@link WebSocketSession} implementations that bridge between
+ * event-listener WebSocket APIs (e.g. Java WebSocket API JSR-356, Jetty,
+ * Undertow) and Reactive Streams.
+ *
+ * &lt;p&gt;Also an implementation of {@code Subscriber&amp;lt;Void&amp;gt;} so it can be used as
+ * the completion subscriber for session handling
+ *
+ * @author Violeta Georgieva
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @param &lt;T&gt; the native delegate type
+ */
+public abstract class AbstractListenerWebSocketSession&lt;T&gt; extends AbstractWebSocketSession&lt;T&gt;
+		implements Subscriber&lt;Void&gt; {
+
+	/**
+	 * The &quot;back-pressure&quot; buffer size to use if the underlying WebSocket API
+	 * does not have flow control for receiving messages.
+	 */
+	private static final int RECEIVE_BUFFER_SIZE = 8192;
+
+
+	@Nullable
+	private final MonoProcessor&lt;Void&gt; completionMono;
+
+	private final WebSocketReceivePublisher receivePublisher;
+
+	@Nullable
+	private volatile WebSocketSendProcessor sendProcessor;
+
+<span class="fc" id="L73">	private final AtomicBoolean sendCalled = new AtomicBoolean();</span>
+
+
+	/**
+	 * Base constructor.
+ 	 * @param delegate the native WebSocket session, channel, or connection
+	 * @param id the session id
+	 * @param handshakeInfo the handshake info
+	 * @param bufferFactory the DataBuffer factor for the current connection
+	 */
+	public AbstractListenerWebSocketSession(
+			T delegate, String id, HandshakeInfo handshakeInfo, DataBufferFactory bufferFactory) {
+
+<span class="nc" id="L86">		this(delegate, id, handshakeInfo, bufferFactory, null);</span>
+<span class="nc" id="L87">	}</span>
+
+	/**
+	 * Alternative constructor with completion {@code Mono&amp;lt;Void&amp;gt;} to propagate
+	 * the session completion (success or error) (for client-side use).
+	 */
+	public AbstractListenerWebSocketSession(T delegate, String id, HandshakeInfo info,
+			DataBufferFactory bufferFactory, @Nullable MonoProcessor&lt;Void&gt; completionMono) {
+
+<span class="fc" id="L96">		super(delegate, id, info, bufferFactory);</span>
+<span class="fc" id="L97">		this.receivePublisher = new WebSocketReceivePublisher();</span>
+<span class="fc" id="L98">		this.completionMono = completionMono;</span>
+<span class="fc" id="L99">	}</span>
+
+
+	protected WebSocketSendProcessor getSendProcessor() {
+<span class="fc" id="L103">		WebSocketSendProcessor sendProcessor = this.sendProcessor;</span>
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">		Assert.state(sendProcessor != null, &quot;No WebSocketSendProcessor available&quot;);</span>
+<span class="fc" id="L105">		return sendProcessor;</span>
+	}
+
+	@Override
+	public Flux&lt;WebSocketMessage&gt; receive() {
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">		return (canSuspendReceiving() ? Flux.from(this.receivePublisher) :</span>
+<span class="nc" id="L111">				Flux.from(this.receivePublisher).onBackpressureBuffer(RECEIVE_BUFFER_SIZE));</span>
+	}
+
+	@Override
+	public Mono&lt;Void&gt; send(Publisher&lt;WebSocketMessage&gt; messages) {
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">		if (this.sendCalled.compareAndSet(false, true)) {</span>
+<span class="fc" id="L117">			WebSocketSendProcessor sendProcessor = new WebSocketSendProcessor();</span>
+<span class="fc" id="L118">			this.sendProcessor = sendProcessor;</span>
+<span class="fc" id="L119">			return Mono.from(subscriber -&gt; {</span>
+<span class="fc" id="L120">					messages.subscribe(sendProcessor);</span>
+<span class="fc" id="L121">					sendProcessor.subscribe(subscriber);</span>
+<span class="fc" id="L122">			});</span>
+		}
+		else {
+<span class="nc" id="L125">			return Mono.error(new IllegalStateException(&quot;send() has already been called&quot;));</span>
+		}
+	}
+
+	/**
+	 * Whether the underlying WebSocket API has flow control and can suspend and
+	 * resume the receiving of messages.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Sub-classes are encouraged to start out in
+	 * suspended mode, if possible, and wait until demand is received.
+	 */
+	protected abstract boolean canSuspendReceiving();
+
+	/**
+	 * Suspend receiving until received message(s) are processed and more demand
+	 * is generated by the downstream Subscriber.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; if the underlying WebSocket API does not provide
+	 * flow control for receiving messages, this method should be a no-op
+	 * and {@link #canSuspendReceiving()} should return {@code false}.
+	 */
+	protected abstract void suspendReceiving();
+
+	/**
+	 * Resume receiving new message(s) after demand is generated by the
+	 * downstream Subscriber.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; if the underlying WebSocket API does not provide
+	 * flow control for receiving messages, this method should be a no-op
+	 * and {@link #canSuspendReceiving()} should return {@code false}.
+	 */
+	protected abstract void resumeReceiving();
+
+	/**
+	 * Send the given WebSocket message.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Sub-classes are responsible for releasing the
+	 * payload data buffer, once fully written, if pooled buffers apply to the
+	 * underlying container.
+	 */
+	protected abstract boolean sendMessage(WebSocketMessage message) throws IOException;
+
+
+	// WebSocketHandler adapter delegate methods
+
+	/** Handle a message callback from the WebSocketHandler adapter. */
+	void handleMessage(Type type, WebSocketMessage message) {
+<span class="fc" id="L168">		this.receivePublisher.handleMessage(message);</span>
+<span class="fc" id="L169">	}</span>
+
+	/** Handle an error callback from the WebSocketHandler adapter. */
+	void handleError(Throwable ex) {
+<span class="fc" id="L173">		this.receivePublisher.onError(ex);</span>
+<span class="fc" id="L174">		WebSocketSendProcessor sendProcessor = this.sendProcessor;</span>
+<span class="pc bpc" id="L175" title="1 of 2 branches missed.">		if (sendProcessor != null) {</span>
+<span class="nc" id="L176">			sendProcessor.cancel();</span>
+<span class="nc" id="L177">			sendProcessor.onError(ex);</span>
+		}
+<span class="fc" id="L179">	}</span>
+
+	/** Handle a close callback from the WebSocketHandler adapter. */
+	void handleClose(CloseStatus reason) {
+<span class="fc" id="L183">		this.receivePublisher.onAllDataRead();</span>
+<span class="fc" id="L184">		WebSocketSendProcessor sendProcessor = this.sendProcessor;</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">		if (sendProcessor != null) {</span>
+<span class="fc" id="L186">			sendProcessor.cancel();</span>
+<span class="fc" id="L187">			sendProcessor.onComplete();</span>
+		}
+<span class="fc" id="L189">	}</span>
+
+
+	// Subscriber&lt;Void&gt; implementation
+
+	@Override
+	public void onSubscribe(Subscription subscription) {
+<span class="fc" id="L196">		subscription.request(Long.MAX_VALUE);</span>
+<span class="fc" id="L197">	}</span>
+
+	@Override
+	public void onNext(Void aVoid) {
+		// no op
+<span class="nc" id="L202">	}</span>
+
+	@Override
+	public void onError(Throwable ex) {
+<span class="nc bnc" id="L206" title="All 2 branches missed.">		if (this.completionMono != null) {</span>
+<span class="nc" id="L207">			this.completionMono.onError(ex);</span>
+		}
+<span class="nc" id="L209">		int code = CloseStatus.SERVER_ERROR.getCode();</span>
+<span class="nc" id="L210">		close(new CloseStatus(code, ex.getMessage()));</span>
+<span class="nc" id="L211">	}</span>
+
+	@Override
+	public void onComplete() {
+<span class="fc bfc" id="L215" title="All 2 branches covered.">		if (this.completionMono != null) {</span>
+<span class="fc" id="L216">			this.completionMono.onComplete();</span>
+		}
+<span class="fc" id="L218">		close();</span>
+<span class="fc" id="L219">	}</span>
+
+
+	private final class WebSocketReceivePublisher extends AbstractListenerReadPublisher&lt;WebSocketMessage&gt; {
+
+<span class="fc" id="L224">		private volatile Queue&lt;Object&gt; pendingMessages = Queues.unbounded(Queues.SMALL_BUFFER_SIZE).get();</span>
+
+
+<span class="fc" id="L227">		WebSocketReceivePublisher() {</span>
+<span class="fc" id="L228">			super(AbstractListenerWebSocketSession.this.getLogPrefix());</span>
+<span class="fc" id="L229">		}</span>
+
+
+		@Override
+		protected void checkOnDataAvailable() {
+<span class="fc" id="L234">			resumeReceiving();</span>
+<span class="fc" id="L235">			int size = this.pendingMessages.size();</span>
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">			if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L237">				rsReadLogger.trace(getLogPrefix() + &quot;checkOnDataAvailable (&quot; + size + &quot; pending)&quot;);</span>
+			}
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">			if (size &gt; 0) {</span>
+<span class="nc" id="L240">				onDataAvailable();</span>
+			}
+<span class="fc" id="L242">		}</span>
+
+		@Override
+		protected void readingPaused() {
+<span class="fc" id="L246">			suspendReceiving();</span>
+<span class="fc" id="L247">		}</span>
+
+		@Override
+		@Nullable
+		protected WebSocketMessage read() throws IOException {
+<span class="fc" id="L252">			return (WebSocketMessage) this.pendingMessages.poll();</span>
+		}
+
+		void handleMessage(WebSocketMessage message) {
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L257">				logger.trace(getLogPrefix() + &quot;Received &quot; + message);</span>
+			}
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">			else if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L260">				rsReadLogger.trace(getLogPrefix() + &quot;Received &quot; + message);</span>
+			}
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">			if (!this.pendingMessages.offer(message)) {</span>
+<span class="nc" id="L263">				discardData();</span>
+<span class="nc" id="L264">				throw new IllegalStateException(</span>
+						&quot;Too many messages. Please ensure WebSocketSession.receive() is subscribed to.&quot;);
+			}
+<span class="fc" id="L267">			onDataAvailable();</span>
+<span class="fc" id="L268">		}</span>
+
+		@Override
+		protected void discardData() {
+			while (true) {
+<span class="fc" id="L273">				WebSocketMessage message = (WebSocketMessage) this.pendingMessages.poll();</span>
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">				if (message == null) {</span>
+<span class="fc" id="L275">					return;</span>
+				}
+<span class="nc" id="L277">				message.release();</span>
+<span class="nc" id="L278">			}</span>
+		}
+	}
+
+
+	/**
+	 * Processor to send web socket messages.
+	 */
+	protected final class WebSocketSendProcessor extends AbstractListenerWriteProcessor&lt;WebSocketMessage&gt; {
+
+<span class="fc" id="L288">		private volatile boolean isReady = true;</span>
+
+
+<span class="fc" id="L291">		WebSocketSendProcessor() {</span>
+<span class="fc" id="L292">			super(receivePublisher.getLogPrefix());</span>
+<span class="fc" id="L293">		}</span>
+
+
+		@Override
+		protected boolean write(WebSocketMessage message) throws IOException {
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L299">				logger.trace(getLogPrefix() + &quot;Sending &quot; + message);</span>
+			}
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">			else if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L302">				rsWriteLogger.trace(getLogPrefix() + &quot;Sending &quot; + message);</span>
+			}
+			// In case of IOException, onError handling should call discardData(WebSocketMessage)..
+<span class="fc" id="L305">			return sendMessage(message);</span>
+		}
+
+		@Override
+		protected boolean isDataEmpty(WebSocketMessage message) {
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">			return (message.getPayload().readableByteCount() == 0);</span>
+		}
+
+		@Override
+		protected boolean isWritePossible() {
+<span class="fc" id="L315">			return (this.isReady);</span>
+		}
+
+		/**
+		 * Sub-classes can invoke this before sending a message (false) and
+		 * after receiving the async send callback (true) effective translating
+		 * async completion callback into simple flow control.
+		 */
+		public void setReadyToSend(boolean ready) {
+<span class="pc bpc" id="L324" title="1 of 4 branches missed.">			if (ready &amp;&amp; rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L325">				rsWriteLogger.trace(getLogPrefix() + &quot;Ready to send&quot;);</span>
+			}
+<span class="fc" id="L327">			this.isReady = ready;</span>
+<span class="fc" id="L328">		}</span>
+
+		@Override
+		protected void discardData(WebSocketMessage message) {
+<span class="nc" id="L332">			message.release();</span>
+<span class="nc" id="L333">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

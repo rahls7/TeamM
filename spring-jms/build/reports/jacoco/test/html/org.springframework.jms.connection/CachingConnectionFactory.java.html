@@ -1,0 +1,601 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CachingConnectionFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.connection</a> &gt; <span class="el_source">CachingConnectionFactory.java</span></div><h1>CachingConnectionFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.connection;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import javax.jms.Connection;
+import javax.jms.ConnectionFactory;
+import javax.jms.Destination;
+import javax.jms.JMSException;
+import javax.jms.MessageConsumer;
+import javax.jms.MessageProducer;
+import javax.jms.QueueSession;
+import javax.jms.Session;
+import javax.jms.TemporaryQueue;
+import javax.jms.TemporaryTopic;
+import javax.jms.Topic;
+import javax.jms.TopicSession;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * {@link SingleConnectionFactory} subclass that adds {@link javax.jms.Session}
+ * caching as well {@link javax.jms.MessageProducer} caching. This ConnectionFactory
+ * also switches the {@link #setReconnectOnException &quot;reconnectOnException&quot; property}
+ * to &quot;true&quot; by default, allowing for automatic recovery of the underlying Connection.
+ *
+ * &lt;p&gt;By default, only one single Session will be cached, with further requested
+ * Sessions being created and disposed on demand. Consider raising the
+ * {@link #setSessionCacheSize &quot;sessionCacheSize&quot; value} in case of a
+ * high-concurrency environment.
+ *
+ * &lt;p&gt;When using the JMS 1.0.2 API, this ConnectionFactory will switch
+ * into queue/topic mode according to the JMS API methods used at runtime:
+ * {@code createQueueConnection} and {@code createTopicConnection} will
+ * lead to queue/topic mode, respectively; generic {@code createConnection}
+ * calls will lead to a JMS 1.1 connection which is able to serve both modes.
+ *
+ * &lt;p&gt;As of Spring Framework 5, this class supports JMS 2.0 {@code JMSContext}
+ * calls and therefore requires the JMS 2.0 API to be present at runtime.
+ * It may nevertheless run against a JMS 1.1 driver (bound to the JMS 2.0 API)
+ * as long as no actual JMS 2.0 calls are triggered by the application's setup.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: This ConnectionFactory requires explicit closing of all Sessions
+ * obtained from its shared Connection.&lt;/b&gt; This is the usual recommendation for
+ * native JMS access code anyway. However, with this ConnectionFactory, its use
+ * is mandatory in order to actually allow for Session reuse.
+ *
+ * &lt;p&gt;Note also that MessageConsumers obtained from a cached Session won't get
+ * closed until the Session will eventually be removed from the pool. This may
+ * lead to semantic side effects in some cases. For a durable subscriber, the
+ * logical {@code Session.close()} call will also close the subscription.
+ * Re-registering a durable consumer for the same subscription on the same
+ * Session handle is not supported; close and reobtain a cached Session first.
+ *
+ * @author Juergen Hoeller
+ * @since 2.5.3
+ */
+public class CachingConnectionFactory extends SingleConnectionFactory {
+
+<span class="pc" id="L88">	private int sessionCacheSize = 1;</span>
+
+<span class="pc" id="L90">	private boolean cacheProducers = true;</span>
+
+<span class="pc" id="L92">	private boolean cacheConsumers = true;</span>
+
+<span class="pc" id="L94">	private volatile boolean active = true;</span>
+
+<span class="pc" id="L96">	private final ConcurrentMap&lt;Integer, LinkedList&lt;Session&gt;&gt; cachedSessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Create a new CachingConnectionFactory for bean-style usage.
+	 * @see #setTargetConnectionFactory
+	 */
+	public CachingConnectionFactory() {
+<span class="nc" id="L104">		super();</span>
+<span class="nc" id="L105">		setReconnectOnException(true);</span>
+<span class="nc" id="L106">	}</span>
+
+	/**
+	 * Create a new CachingConnectionFactory for the given target
+	 * ConnectionFactory.
+	 * @param targetConnectionFactory the target ConnectionFactory
+	 */
+	public CachingConnectionFactory(ConnectionFactory targetConnectionFactory) {
+<span class="fc" id="L114">		super(targetConnectionFactory);</span>
+<span class="fc" id="L115">		setReconnectOnException(true);</span>
+<span class="fc" id="L116">	}</span>
+
+
+	/**
+	 * Specify the desired size for the JMS Session cache (per JMS Session type).
+	 * &lt;p&gt;This cache size is the maximum limit for the number of cached Sessions
+	 * per session acknowledgement type (auto, client, dups_ok, transacted).
+	 * As a consequence, the actual number of cached Sessions may be up to
+	 * four times as high as the specified value - in the unlikely case
+	 * of mixing and matching different acknowledgement types.
+	 * &lt;p&gt;Default is 1: caching a single Session, (re-)creating further ones on
+	 * demand. Specify a number like 10 if you'd like to raise the number of cached
+	 * Sessions; that said, 1 may be sufficient for low-concurrency scenarios.
+	 * @see #setCacheProducers
+	 */
+	public void setSessionCacheSize(int sessionCacheSize) {
+<span class="nc bnc" id="L132" title="All 2 branches missed.">		Assert.isTrue(sessionCacheSize &gt;= 1, &quot;Session cache size must be 1 or higher&quot;);</span>
+<span class="nc" id="L133">		this.sessionCacheSize = sessionCacheSize;</span>
+<span class="nc" id="L134">	}</span>
+
+	/**
+	 * Return the desired size for the JMS Session cache (per JMS Session type).
+	 */
+	public int getSessionCacheSize() {
+<span class="fc" id="L140">		return this.sessionCacheSize;</span>
+	}
+
+	/**
+	 * Specify whether to cache JMS MessageProducers per JMS Session instance
+	 * (more specifically: one MessageProducer per Destination and Session).
+	 * &lt;p&gt;Default is &quot;true&quot;. Switch this to &quot;false&quot; in order to always
+	 * recreate MessageProducers on demand.
+	 */
+	public void setCacheProducers(boolean cacheProducers) {
+<span class="nc" id="L150">		this.cacheProducers = cacheProducers;</span>
+<span class="nc" id="L151">	}</span>
+
+	/**
+	 * Return whether to cache JMS MessageProducers per JMS Session instance.
+	 */
+	public boolean isCacheProducers() {
+<span class="nc" id="L157">		return this.cacheProducers;</span>
+	}
+
+	/**
+	 * Specify whether to cache JMS MessageConsumers per JMS Session instance
+	 * (more specifically: one MessageConsumer per Destination, selector String
+	 * and Session). Note that durable subscribers will only be cached until
+	 * logical closing of the Session handle.
+	 * &lt;p&gt;Default is &quot;true&quot;. Switch this to &quot;false&quot; in order to always
+	 * recreate MessageConsumers on demand.
+	 */
+	public void setCacheConsumers(boolean cacheConsumers) {
+<span class="nc" id="L169">		this.cacheConsumers = cacheConsumers;</span>
+<span class="nc" id="L170">	}</span>
+
+	/**
+	 * Return whether to cache JMS MessageConsumers per JMS Session instance.
+	 */
+	public boolean isCacheConsumers() {
+<span class="nc" id="L176">		return this.cacheConsumers;</span>
+	}
+
+
+	/**
+	 * Resets the Session cache as well.
+	 */
+	@Override
+	public void resetConnection() {
+<span class="fc" id="L185">		this.active = false;</span>
+
+<span class="fc" id="L187">		synchronized (this.cachedSessions) {</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">			for (LinkedList&lt;Session&gt; sessionList : this.cachedSessions.values()) {</span>
+<span class="fc" id="L189">				synchronized (sessionList) {</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">					for (Session session : sessionList) {</span>
+						try {
+<span class="fc" id="L192">							session.close();</span>
+						}
+<span class="nc" id="L194">						catch (Throwable ex) {</span>
+<span class="nc" id="L195">							logger.trace(&quot;Could not close cached JMS Session&quot;, ex);</span>
+<span class="fc" id="L196">						}</span>
+<span class="fc" id="L197">					}</span>
+<span class="fc" id="L198">				}</span>
+<span class="fc" id="L199">			}</span>
+<span class="fc" id="L200">			this.cachedSessions.clear();</span>
+<span class="fc" id="L201">		}</span>
+
+		// Now proceed with actual closing of the shared Connection...
+<span class="fc" id="L204">		super.resetConnection();</span>
+
+<span class="fc" id="L206">		this.active = true;</span>
+<span class="fc" id="L207">	}</span>
+
+	/**
+	 * Checks for a cached Session for the given mode.
+	 */
+	@Override
+	protected Session getSession(Connection con, Integer mode) throws JMSException {
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">		if (!this.active) {</span>
+<span class="nc" id="L215">			return null;</span>
+		}
+
+<span class="fc" id="L218">		LinkedList&lt;Session&gt; sessionList = this.cachedSessions.computeIfAbsent(mode, k -&gt; new LinkedList&lt;&gt;());</span>
+<span class="fc" id="L219">		Session session = null;</span>
+<span class="fc" id="L220">		synchronized (sessionList) {</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">			if (!sessionList.isEmpty()) {</span>
+<span class="fc" id="L222">				session = sessionList.removeFirst();</span>
+			}
+<span class="fc" id="L224">		}</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		if (session != null) {</span>
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">				logger.trace(&quot;Found cached JMS Session for mode &quot; + mode + &quot;: &quot; +</span>
+<span class="nc" id="L228">						(session instanceof SessionProxy ? ((SessionProxy) session).getTargetSession() : session));</span>
+			}
+		}
+		else {
+<span class="fc" id="L232">			Session targetSession = createSession(con, mode);</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L234">				logger.debug(&quot;Registering cached JMS Session for mode &quot; + mode + &quot;: &quot; + targetSession);</span>
+			}
+<span class="fc" id="L236">			session = getCachedSessionProxy(targetSession, sessionList);</span>
+		}
+<span class="fc" id="L238">		return session;</span>
+	}
+
+	/**
+	 * Wrap the given Session with a proxy that delegates every method call to it
+	 * but adapts close calls. This is useful for allowing application code to
+	 * handle a special framework Session just like an ordinary Session.
+	 * @param target the original Session to wrap
+	 * @param sessionList the List of cached Sessions that the given Session belongs to
+	 * @return the wrapped Session
+	 */
+	protected Session getCachedSessionProxy(Session target, LinkedList&lt;Session&gt; sessionList) {
+<span class="fc" id="L250">		List&lt;Class&lt;?&gt;&gt; classes = new ArrayList&lt;&gt;(3);</span>
+<span class="fc" id="L251">		classes.add(SessionProxy.class);</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">		if (target instanceof QueueSession) {</span>
+<span class="fc" id="L253">			classes.add(QueueSession.class);</span>
+		}
+<span class="fc bfc" id="L255" title="All 2 branches covered.">		if (target instanceof TopicSession) {</span>
+<span class="fc" id="L256">			classes.add(TopicSession.class);</span>
+		}
+<span class="fc" id="L258">		return (Session) Proxy.newProxyInstance(SessionProxy.class.getClassLoader(),</span>
+<span class="fc" id="L259">				ClassUtils.toClassArray(classes), new CachedSessionInvocationHandler(target, sessionList));</span>
+	}
+
+
+	/**
+	 * Invocation handler for a cached JMS Session proxy.
+	 */
+	private class CachedSessionInvocationHandler implements InvocationHandler {
+
+		private final Session target;
+
+		private final LinkedList&lt;Session&gt; sessionList;
+
+<span class="fc" id="L272">		private final Map&lt;DestinationCacheKey, MessageProducer&gt; cachedProducers = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L274">		private final Map&lt;ConsumerCacheKey, MessageConsumer&gt; cachedConsumers = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L276">		private boolean transactionOpen = false;</span>
+
+<span class="fc" id="L278">		public CachedSessionInvocationHandler(Session target, LinkedList&lt;Session&gt; sessionList) {</span>
+<span class="fc" id="L279">			this.target = target;</span>
+<span class="fc" id="L280">			this.sessionList = sessionList;</span>
+<span class="fc" id="L281">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+<span class="fc" id="L286">			String methodName = method.getName();</span>
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">			if (methodName.equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L289" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="pc bpc" id="L291" title="1 of 2 branches missed.">			else if (methodName.equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Session proxy.
+<span class="nc" id="L293">				return System.identityHashCode(proxy);</span>
+			}
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">			else if (methodName.equals(&quot;toString&quot;)) {</span>
+<span class="nc" id="L296">				return &quot;Cached JMS Session: &quot; + this.target;</span>
+			}
+<span class="fc bfc" id="L298" title="All 2 branches covered.">			else if (methodName.equals(&quot;close&quot;)) {</span>
+				// Handle close method: don't pass the call on.
+<span class="fc bfc" id="L300" title="All 2 branches covered.">				if (active) {</span>
+<span class="fc" id="L301">					synchronized (this.sessionList) {</span>
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">						if (this.sessionList.size() &lt; getSessionCacheSize()) {</span>
+							try {
+<span class="fc" id="L304">								logicalClose((Session) proxy);</span>
+								// Remain open in the session list.
+<span class="fc" id="L306">								return null;</span>
+							}
+<span class="nc" id="L308">							catch (JMSException ex) {</span>
+<span class="nc" id="L309">								logger.trace(&quot;Logical close of cached JMS Session failed - discarding it&quot;, ex);</span>
+								// Proceed to physical close from here...
+							}
+						}
+<span class="nc" id="L313">					}</span>
+				}
+				// If we get here, we're supposed to shut down.
+<span class="fc" id="L316">				physicalClose();</span>
+<span class="fc" id="L317">				return null;</span>
+			}
+<span class="pc bpc" id="L319" title="1 of 2 branches missed.">			else if (methodName.equals(&quot;getTargetSession&quot;)) {</span>
+				// Handle getTargetSession method: return underlying Session.
+<span class="nc" id="L321">				return this.target;</span>
+			}
+<span class="fc bfc" id="L323" title="All 4 branches covered.">			else if (methodName.equals(&quot;commit&quot;) || methodName.equals(&quot;rollback&quot;)) {</span>
+<span class="fc" id="L324">				this.transactionOpen = false;</span>
+			}
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">			else if (methodName.startsWith(&quot;create&quot;)) {</span>
+<span class="nc" id="L327">				this.transactionOpen = true;</span>
+<span class="nc bnc" id="L328" title="All 4 branches missed.">				if (isCacheProducers() &amp;&amp; (methodName.equals(&quot;createProducer&quot;) ||</span>
+<span class="nc bnc" id="L329" title="All 4 branches missed.">						methodName.equals(&quot;createSender&quot;) || methodName.equals(&quot;createPublisher&quot;))) {</span>
+					// Destination argument being null is ok for a producer
+<span class="nc" id="L331">					Destination dest = (Destination) args[0];</span>
+<span class="nc bnc" id="L332" title="All 4 branches missed.">					if (!(dest instanceof TemporaryQueue || dest instanceof TemporaryTopic)) {</span>
+<span class="nc" id="L333">						return getCachedProducer(dest);</span>
+					}
+<span class="nc" id="L335">				}</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">				else if (isCacheConsumers()) {</span>
+					// let raw JMS invocation throw an exception if Destination (i.e. args[0]) is null
+<span class="nc bnc" id="L338" title="All 4 branches missed.">					if ((methodName.equals(&quot;createConsumer&quot;) || methodName.equals(&quot;createReceiver&quot;) ||</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">							methodName.equals(&quot;createSubscriber&quot;))) {</span>
+<span class="nc" id="L340">						Destination dest = (Destination) args[0];</span>
+<span class="nc bnc" id="L341" title="All 6 branches missed.">						if (dest != null &amp;&amp; !(dest instanceof TemporaryQueue || dest instanceof TemporaryTopic)) {</span>
+<span class="nc bnc" id="L342" title="All 4 branches missed.">							return getCachedConsumer(dest,</span>
+									(args.length &gt; 1 ? (String) args[1] : null),
+<span class="nc bnc" id="L344" title="All 2 branches missed.">									(args.length &gt; 2 &amp;&amp; (Boolean) args[2]),</span>
+									null,
+									false);
+						}
+<span class="nc" id="L348">					}</span>
+<span class="nc bnc" id="L349" title="All 4 branches missed.">					else if (methodName.equals(&quot;createDurableConsumer&quot;) || methodName.equals(&quot;createDurableSubscriber&quot;)) {</span>
+<span class="nc" id="L350">						Destination dest = (Destination) args[0];</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">						if (dest != null) {</span>
+<span class="nc bnc" id="L352" title="All 4 branches missed.">							return getCachedConsumer(dest,</span>
+									(args.length &gt; 2 ? (String) args[2] : null),
+<span class="nc bnc" id="L354" title="All 2 branches missed.">									(args.length &gt; 3 &amp;&amp; (Boolean) args[3]),</span>
+									(String) args[1],
+									true);
+						}
+<span class="nc" id="L358">					}</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">					else if (methodName.equals(&quot;createSharedConsumer&quot;)) {</span>
+<span class="nc" id="L360">						Destination dest = (Destination) args[0];</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">						if (dest != null) {</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">							return getCachedConsumer(dest,</span>
+									(args.length &gt; 2 ? (String) args[2] : null),
+									null,
+									(String) args[1],
+									false);
+						}
+<span class="nc" id="L368">					}</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">					else if (methodName.equals(&quot;createSharedDurableConsumer&quot;)) {</span>
+<span class="nc" id="L370">						Destination dest = (Destination) args[0];</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">						if (dest != null) {</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">							return getCachedConsumer(dest,</span>
+									(args.length &gt; 2 ? (String) args[2] : null),
+									null,
+									(String) args[1],
+									true);
+						}
+					}
+				}
+			}
+			try {
+<span class="fc" id="L382">				return method.invoke(this.target, args);</span>
+			}
+<span class="nc" id="L384">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L385">				throw ex.getTargetException();</span>
+			}
+		}
+
+		private MessageProducer getCachedProducer(@Nullable Destination dest) throws JMSException {
+<span class="nc bnc" id="L390" title="All 2 branches missed.">			DestinationCacheKey cacheKey = (dest != null ? new DestinationCacheKey(dest) : null);</span>
+<span class="nc" id="L391">			MessageProducer producer = this.cachedProducers.get(cacheKey);</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">			if (producer != null) {</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L394">					logger.trace(&quot;Found cached JMS MessageProducer for destination [&quot; + dest + &quot;]: &quot; + producer);</span>
+				}
+			}
+			else {
+<span class="nc" id="L398">				producer = this.target.createProducer(dest);</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L400">					logger.debug(&quot;Registering cached JMS MessageProducer for destination [&quot; + dest + &quot;]: &quot; + producer);</span>
+				}
+<span class="nc" id="L402">				this.cachedProducers.put(cacheKey, producer);</span>
+			}
+<span class="nc" id="L404">			return new CachedMessageProducer(producer);</span>
+		}
+
+		private MessageConsumer getCachedConsumer(Destination dest, @Nullable String selector,
+				@Nullable Boolean noLocal, @Nullable String subscription, boolean durable) throws JMSException {
+
+<span class="nc" id="L410">			ConsumerCacheKey cacheKey = new ConsumerCacheKey(dest, selector, noLocal, subscription, durable);</span>
+<span class="nc" id="L411">			MessageConsumer consumer = this.cachedConsumers.get(cacheKey);</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">			if (consumer != null) {</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L414">					logger.trace(&quot;Found cached JMS MessageConsumer for destination [&quot; + dest + &quot;]: &quot; + consumer);</span>
+				}
+			}
+			else {
+<span class="nc bnc" id="L418" title="All 2 branches missed.">				if (dest instanceof Topic) {</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">					if (noLocal == null) {</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">						consumer = (durable ?</span>
+<span class="nc" id="L421">								this.target.createSharedDurableConsumer((Topic) dest, subscription, selector) :</span>
+<span class="nc" id="L422">								this.target.createSharedConsumer((Topic) dest, subscription, selector));</span>
+					}
+					else {
+<span class="nc bnc" id="L425" title="All 2 branches missed.">						consumer = (durable ?</span>
+<span class="nc" id="L426">								this.target.createDurableSubscriber((Topic) dest, subscription, selector, noLocal) :</span>
+<span class="nc" id="L427">								this.target.createConsumer(dest, selector, noLocal));</span>
+					}
+				}
+				else {
+<span class="nc" id="L431">					consumer = this.target.createConsumer(dest, selector);</span>
+				}
+<span class="nc bnc" id="L433" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L434">					logger.debug(&quot;Registering cached JMS MessageConsumer for destination [&quot; + dest + &quot;]: &quot; + consumer);</span>
+				}
+<span class="nc" id="L436">				this.cachedConsumers.put(cacheKey, consumer);</span>
+			}
+<span class="nc" id="L438">			return new CachedMessageConsumer(consumer);</span>
+		}
+
+		private void logicalClose(Session proxy) throws JMSException {
+			// Preserve rollback-on-close semantics.
+<span class="pc bpc" id="L443" title="3 of 4 branches missed.">			if (this.transactionOpen &amp;&amp; this.target.getTransacted()) {</span>
+<span class="nc" id="L444">				this.transactionOpen = false;</span>
+<span class="nc" id="L445">				this.target.rollback();</span>
+			}
+			// Physically close durable subscribers at time of Session close call.
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">			for (Iterator&lt;Map.Entry&lt;ConsumerCacheKey, MessageConsumer&gt;&gt; it = this.cachedConsumers.entrySet().iterator(); it.hasNext();) {</span>
+<span class="nc" id="L449">				Map.Entry&lt;ConsumerCacheKey, MessageConsumer&gt; entry = it.next();</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">				if (entry.getKey().subscription != null) {</span>
+<span class="nc" id="L451">					entry.getValue().close();</span>
+<span class="nc" id="L452">					it.remove();</span>
+				}
+<span class="nc" id="L454">			}</span>
+			// Allow for multiple close calls...
+<span class="fc" id="L456">			boolean returned = false;</span>
+<span class="fc" id="L457">			synchronized (this.sessionList) {</span>
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">				if (!this.sessionList.contains(proxy)) {</span>
+<span class="fc" id="L459">					this.sessionList.addLast(proxy);</span>
+<span class="fc" id="L460">					returned = true;</span>
+				}
+<span class="fc" id="L462">			}</span>
+<span class="pc bpc" id="L463" title="2 of 4 branches missed.">			if (returned &amp;&amp; logger.isTraceEnabled()) {</span>
+<span class="nc" id="L464">				logger.trace(&quot;Returned cached Session: &quot; + this.target);</span>
+			}
+<span class="fc" id="L466">		}</span>
+
+		private void physicalClose() throws JMSException {
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L470">				logger.debug(&quot;Closing cached Session: &quot; + this.target);</span>
+			}
+			// Explicitly close all MessageProducers and MessageConsumers that
+			// this Session happens to cache...
+			try {
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">				for (MessageProducer producer : this.cachedProducers.values()) {</span>
+<span class="nc" id="L476">					producer.close();</span>
+<span class="nc" id="L477">				}</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">				for (MessageConsumer consumer : this.cachedConsumers.values()) {</span>
+<span class="nc" id="L479">					consumer.close();</span>
+<span class="nc" id="L480">				}</span>
+			}
+			finally {
+<span class="fc" id="L483">				this.cachedProducers.clear();</span>
+<span class="fc" id="L484">				this.cachedConsumers.clear();</span>
+				// Now actually close the Session.
+<span class="fc" id="L486">				this.target.close();</span>
+			}
+<span class="fc" id="L488">		}</span>
+	}
+
+
+	/**
+	 * Simple wrapper class around a Destination reference.
+	 * Used as the cache key when caching MessageProducer objects.
+	 */
+	private static class DestinationCacheKey implements Comparable&lt;DestinationCacheKey&gt; {
+
+		private final Destination destination;
+
+		@Nullable
+		private String destinationString;
+
+<span class="nc" id="L503">		public DestinationCacheKey(Destination destination) {</span>
+<span class="nc" id="L504">			Assert.notNull(destination, &quot;Destination must not be null&quot;);</span>
+<span class="nc" id="L505">			this.destination = destination;</span>
+<span class="nc" id="L506">		}</span>
+
+		private String getDestinationString() {
+<span class="nc bnc" id="L509" title="All 2 branches missed.">			if (this.destinationString == null) {</span>
+<span class="nc" id="L510">				this.destinationString = this.destination.toString();</span>
+			}
+<span class="nc" id="L512">			return this.destinationString;</span>
+		}
+
+		protected boolean destinationEquals(DestinationCacheKey otherKey) {
+<span class="nc bnc" id="L516" title="All 2 branches missed.">			return (this.destination.getClass() == otherKey.destination.getClass() &amp;&amp;</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">					(this.destination.equals(otherKey.destination) ||</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">							getDestinationString().equals(otherKey.getDestinationString())));</span>
+		}
+
+		@Override
+		public boolean equals(Object other) {
+			// Effectively checking object equality as well as toString equality.
+			// On WebSphere MQ, Destination objects do not implement equals...
+<span class="nc bnc" id="L525" title="All 4 branches missed.">			return (this == other || destinationEquals((DestinationCacheKey) other));</span>
+		}
+
+		@Override
+		public int hashCode() {
+			// Can't use a more specific hashCode since we can't rely on
+			// this.destination.hashCode() actually being the same value
+			// for equivalent destinations... Thanks a lot, WebSphere MQ!
+<span class="nc" id="L533">			return this.destination.getClass().hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L538">			return getDestinationString();</span>
+		}
+
+		@Override
+		public int compareTo(DestinationCacheKey other) {
+<span class="nc" id="L543">			return getDestinationString().compareTo(other.getDestinationString());</span>
+		}
+	}
+
+
+	/**
+	 * Simple wrapper class around a Destination and other consumer attributes.
+	 * Used as the cache key when caching MessageConsumer objects.
+	 */
+	private static class ConsumerCacheKey extends DestinationCacheKey {
+
+		@Nullable
+		private final String selector;
+
+		@Nullable
+		private final Boolean noLocal;
+
+		@Nullable
+		private final String subscription;
+
+		private final boolean durable;
+
+		public ConsumerCacheKey(Destination destination, @Nullable String selector, @Nullable Boolean noLocal,
+				@Nullable String subscription, boolean durable) {
+
+<span class="nc" id="L568">			super(destination);</span>
+<span class="nc" id="L569">			this.selector = selector;</span>
+<span class="nc" id="L570">			this.noLocal = noLocal;</span>
+<span class="nc" id="L571">			this.subscription = subscription;</span>
+<span class="nc" id="L572">			this.durable = durable;</span>
+<span class="nc" id="L573">		}</span>
+
+		@Override
+		public boolean equals(Object other) {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L578">				return true;</span>
+			}
+<span class="nc" id="L580">			ConsumerCacheKey otherKey = (ConsumerCacheKey) other;</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">			return (destinationEquals(otherKey) &amp;&amp;</span>
+<span class="nc bnc" id="L582" title="All 2 branches missed.">					ObjectUtils.nullSafeEquals(this.selector, otherKey.selector) &amp;&amp;</span>
+<span class="nc bnc" id="L583" title="All 2 branches missed.">					ObjectUtils.nullSafeEquals(this.noLocal, otherKey.noLocal) &amp;&amp;</span>
+<span class="nc bnc" id="L584" title="All 4 branches missed.">					ObjectUtils.nullSafeEquals(this.subscription, otherKey.subscription) &amp;&amp;</span>
+					this.durable == otherKey.durable);
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L590">			return 31 * super.hashCode() + ObjectUtils.nullSafeHashCode(this.selector);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L595">			return super.toString() + &quot; [selector=&quot; + this.selector + &quot;, noLocal=&quot; + this.noLocal +</span>
+					&quot;, subscription=&quot; + this.subscription + &quot;, durable=&quot; + this.durable + &quot;]&quot;;
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

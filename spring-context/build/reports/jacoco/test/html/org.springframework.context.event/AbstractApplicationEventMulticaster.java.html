@@ -1,0 +1,405 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractApplicationEventMulticaster.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.event</a> &gt; <span class="el_source">AbstractApplicationEventMulticaster.java</span></div><h1>AbstractApplicationEventMulticaster.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.event;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.springframework.aop.framework.AopProxyUtils;
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.context.ApplicationEvent;
+import org.springframework.context.ApplicationListener;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * Abstract implementation of the {@link ApplicationEventMulticaster} interface,
+ * providing the basic listener registration facility.
+ *
+ * &lt;p&gt;Doesn't permit multiple instances of the same listener by default,
+ * as it keeps listeners in a linked Set. The collection class used to hold
+ * ApplicationListener objects can be overridden through the &quot;collectionClass&quot;
+ * bean property.
+ *
+ * &lt;p&gt;Implementing ApplicationEventMulticaster's actual {@link #multicastEvent} method
+ * is left to subclasses. {@link SimpleApplicationEventMulticaster} simply multicasts
+ * all events to all registered listeners, invoking them in the calling thread.
+ * Alternative implementations could be more sophisticated in those respects.
+ *
+ * @author Juergen Hoeller
+ * @author Stephane Nicoll
+ * @since 1.2.3
+ * @see #getApplicationListeners(ApplicationEvent, ResolvableType)
+ * @see SimpleApplicationEventMulticaster
+ */
+<span class="fc" id="L62">public abstract class AbstractApplicationEventMulticaster</span>
+		implements ApplicationEventMulticaster, BeanClassLoaderAware, BeanFactoryAware {
+
+<span class="fc" id="L65">	private final ListenerRetriever defaultRetriever = new ListenerRetriever(false);</span>
+
+<span class="fc" id="L67">	final Map&lt;ListenerCacheKey, ListenerRetriever&gt; retrieverCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+	@Nullable
+	private ClassLoader beanClassLoader;
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+<span class="fc" id="L75">	private Object retrievalMutex = this.defaultRetriever;</span>
+
+
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+<span class="fc" id="L80">		this.beanClassLoader = classLoader;</span>
+<span class="fc" id="L81">	}</span>
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="fc" id="L85">		this.beanFactory = beanFactory;</span>
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">		if (beanFactory instanceof ConfigurableBeanFactory) {</span>
+<span class="fc" id="L87">			ConfigurableBeanFactory cbf = (ConfigurableBeanFactory) beanFactory;</span>
+<span class="fc bfc" id="L88" title="All 2 branches covered.">			if (this.beanClassLoader == null) {</span>
+<span class="fc" id="L89">				this.beanClassLoader = cbf.getBeanClassLoader();</span>
+			}
+<span class="fc" id="L91">			this.retrievalMutex = cbf.getSingletonMutex();</span>
+		}
+<span class="fc" id="L93">	}</span>
+
+	private BeanFactory getBeanFactory() {
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">		if (this.beanFactory == null) {</span>
+<span class="nc" id="L97">			throw new IllegalStateException(&quot;ApplicationEventMulticaster cannot retrieve listener beans &quot; +</span>
+					&quot;because it is not associated with a BeanFactory&quot;);
+		}
+<span class="fc" id="L100">		return this.beanFactory;</span>
+	}
+
+
+	@Override
+	public void addApplicationListener(ApplicationListener&lt;?&gt; listener) {
+<span class="fc" id="L106">		synchronized (this.retrievalMutex) {</span>
+			// Explicitly remove target for a proxy, if registered already,
+			// in order to avoid double invocations of the same listener.
+<span class="fc" id="L109">			Object singletonTarget = AopProxyUtils.getSingletonTarget(listener);</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">			if (singletonTarget instanceof ApplicationListener) {</span>
+<span class="fc" id="L111">				this.defaultRetriever.applicationListeners.remove(singletonTarget);</span>
+			}
+<span class="fc" id="L113">			this.defaultRetriever.applicationListeners.add(listener);</span>
+<span class="fc" id="L114">			this.retrieverCache.clear();</span>
+<span class="fc" id="L115">		}</span>
+<span class="fc" id="L116">	}</span>
+
+	@Override
+	public void addApplicationListenerBean(String listenerBeanName) {
+<span class="fc" id="L120">		synchronized (this.retrievalMutex) {</span>
+<span class="fc" id="L121">			this.defaultRetriever.applicationListenerBeans.add(listenerBeanName);</span>
+<span class="fc" id="L122">			this.retrieverCache.clear();</span>
+<span class="fc" id="L123">		}</span>
+<span class="fc" id="L124">	}</span>
+
+	@Override
+	public void removeApplicationListener(ApplicationListener&lt;?&gt; listener) {
+<span class="fc" id="L128">		synchronized (this.retrievalMutex) {</span>
+<span class="fc" id="L129">			this.defaultRetriever.applicationListeners.remove(listener);</span>
+<span class="fc" id="L130">			this.retrieverCache.clear();</span>
+<span class="fc" id="L131">		}</span>
+<span class="fc" id="L132">	}</span>
+
+	@Override
+	public void removeApplicationListenerBean(String listenerBeanName) {
+<span class="fc" id="L136">		synchronized (this.retrievalMutex) {</span>
+<span class="fc" id="L137">			this.defaultRetriever.applicationListenerBeans.remove(listenerBeanName);</span>
+<span class="fc" id="L138">			this.retrieverCache.clear();</span>
+<span class="fc" id="L139">		}</span>
+<span class="fc" id="L140">	}</span>
+
+	@Override
+	public void removeAllListeners() {
+<span class="nc" id="L144">		synchronized (this.retrievalMutex) {</span>
+<span class="nc" id="L145">			this.defaultRetriever.applicationListeners.clear();</span>
+<span class="nc" id="L146">			this.defaultRetriever.applicationListenerBeans.clear();</span>
+<span class="nc" id="L147">			this.retrieverCache.clear();</span>
+<span class="nc" id="L148">		}</span>
+<span class="nc" id="L149">	}</span>
+
+
+	/**
+	 * Return a Collection containing all ApplicationListeners.
+	 * @return a Collection of ApplicationListeners
+	 * @see org.springframework.context.ApplicationListener
+	 */
+	protected Collection&lt;ApplicationListener&lt;?&gt;&gt; getApplicationListeners() {
+<span class="fc" id="L158">		synchronized (this.retrievalMutex) {</span>
+<span class="fc" id="L159">			return this.defaultRetriever.getApplicationListeners();</span>
+		}
+	}
+
+	/**
+	 * Return a Collection of ApplicationListeners matching the given
+	 * event type. Non-matching listeners get excluded early.
+	 * @param event the event to be propagated. Allows for excluding
+	 * non-matching listeners early, based on cached matching information.
+	 * @param eventType the event type
+	 * @return a Collection of ApplicationListeners
+	 * @see org.springframework.context.ApplicationListener
+	 */
+	protected Collection&lt;ApplicationListener&lt;?&gt;&gt; getApplicationListeners(
+			ApplicationEvent event, ResolvableType eventType) {
+
+<span class="fc" id="L175">		Object source = event.getSource();</span>
+<span class="fc bfc" id="L176" title="All 2 branches covered.">		Class&lt;?&gt; sourceType = (source != null ? source.getClass() : null);</span>
+<span class="fc" id="L177">		ListenerCacheKey cacheKey = new ListenerCacheKey(eventType, sourceType);</span>
+
+		// Quick check for existing entry on ConcurrentHashMap...
+<span class="fc" id="L180">		ListenerRetriever retriever = this.retrieverCache.get(cacheKey);</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">		if (retriever != null) {</span>
+<span class="fc" id="L182">			return retriever.getApplicationListeners();</span>
+		}
+
+<span class="fc bfc" id="L185" title="All 2 branches covered.">		if (this.beanClassLoader == null ||</span>
+<span class="pc bpc" id="L186" title="1 of 4 branches missed.">				(ClassUtils.isCacheSafe(event.getClass(), this.beanClassLoader) &amp;&amp;</span>
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">						(sourceType == null || ClassUtils.isCacheSafe(sourceType, this.beanClassLoader)))) {</span>
+			// Fully synchronized building and caching of a ListenerRetriever
+<span class="fc" id="L189">			synchronized (this.retrievalMutex) {</span>
+<span class="fc" id="L190">				retriever = this.retrieverCache.get(cacheKey);</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">				if (retriever != null) {</span>
+<span class="nc" id="L192">					return retriever.getApplicationListeners();</span>
+				}
+<span class="fc" id="L194">				retriever = new ListenerRetriever(true);</span>
+<span class="fc" id="L195">				Collection&lt;ApplicationListener&lt;?&gt;&gt; listeners =</span>
+<span class="fc" id="L196">						retrieveApplicationListeners(eventType, sourceType, retriever);</span>
+<span class="fc" id="L197">				this.retrieverCache.put(cacheKey, retriever);</span>
+<span class="fc" id="L198">				return listeners;</span>
+			}
+		}
+		else {
+			// No ListenerRetriever caching -&gt; no synchronization necessary
+<span class="nc" id="L203">			return retrieveApplicationListeners(eventType, sourceType, null);</span>
+		}
+	}
+
+	/**
+	 * Actually retrieve the application listeners for the given event and source type.
+	 * @param eventType the event type
+	 * @param sourceType the event source type
+	 * @param retriever the ListenerRetriever, if supposed to populate one (for caching purposes)
+	 * @return the pre-filtered list of application listeners for the given event and source type
+	 */
+	private Collection&lt;ApplicationListener&lt;?&gt;&gt; retrieveApplicationListeners(
+			ResolvableType eventType, @Nullable Class&lt;?&gt; sourceType, @Nullable ListenerRetriever retriever) {
+
+<span class="fc" id="L217">		List&lt;ApplicationListener&lt;?&gt;&gt; allListeners = new ArrayList&lt;&gt;();</span>
+		Set&lt;ApplicationListener&lt;?&gt;&gt; listeners;
+		Set&lt;String&gt; listenerBeans;
+<span class="fc" id="L220">		synchronized (this.retrievalMutex) {</span>
+<span class="fc" id="L221">			listeners = new LinkedHashSet&lt;&gt;(this.defaultRetriever.applicationListeners);</span>
+<span class="fc" id="L222">			listenerBeans = new LinkedHashSet&lt;&gt;(this.defaultRetriever.applicationListenerBeans);</span>
+<span class="fc" id="L223">		}</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">		for (ApplicationListener&lt;?&gt; listener : listeners) {</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">			if (supportsEvent(listener, eventType, sourceType)) {</span>
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">				if (retriever != null) {</span>
+<span class="fc" id="L227">					retriever.applicationListeners.add(listener);</span>
+				}
+<span class="fc" id="L229">				allListeners.add(listener);</span>
+			}
+<span class="fc" id="L231">		}</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">		if (!listenerBeans.isEmpty()) {</span>
+<span class="fc" id="L233">			BeanFactory beanFactory = getBeanFactory();</span>
+<span class="fc bfc" id="L234" title="All 2 branches covered.">			for (String listenerBeanName : listenerBeans) {</span>
+				try {
+<span class="fc" id="L236">					Class&lt;?&gt; listenerType = beanFactory.getType(listenerBeanName);</span>
+<span class="pc bpc" id="L237" title="1 of 4 branches missed.">					if (listenerType == null || supportsEvent(listenerType, eventType)) {</span>
+<span class="fc" id="L238">						ApplicationListener&lt;?&gt; listener =</span>
+<span class="fc" id="L239">								beanFactory.getBean(listenerBeanName, ApplicationListener.class);</span>
+<span class="pc bpc" id="L240" title="1 of 4 branches missed.">						if (!allListeners.contains(listener) &amp;&amp; supportsEvent(listener, eventType, sourceType)) {</span>
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">							if (retriever != null) {</span>
+<span class="fc bfc" id="L242" title="All 2 branches covered.">								if (beanFactory.isSingleton(listenerBeanName)) {</span>
+<span class="fc" id="L243">									retriever.applicationListeners.add(listener);</span>
+								}
+								else {
+<span class="fc" id="L246">									retriever.applicationListenerBeans.add(listenerBeanName);</span>
+								}
+							}
+<span class="fc" id="L249">							allListeners.add(listener);</span>
+						}
+					}
+				}
+<span class="nc" id="L253">				catch (NoSuchBeanDefinitionException ex) {</span>
+					// Singleton listener instance (without backing bean definition) disappeared -
+					// probably in the middle of the destruction phase
+<span class="fc" id="L256">				}</span>
+<span class="fc" id="L257">			}</span>
+		}
+<span class="fc" id="L259">		AnnotationAwareOrderComparator.sort(allListeners);</span>
+<span class="pc bpc" id="L260" title="1 of 4 branches missed.">		if (retriever != null &amp;&amp; retriever.applicationListenerBeans.isEmpty()) {</span>
+<span class="fc" id="L261">			retriever.applicationListeners.clear();</span>
+<span class="fc" id="L262">			retriever.applicationListeners.addAll(allListeners);</span>
+		}
+<span class="fc" id="L264">		return allListeners;</span>
+	}
+
+	/**
+	 * Filter a listener early through checking its generically declared event
+	 * type before trying to instantiate it.
+	 * &lt;p&gt;If this method returns {@code true} for a given listener as a first pass,
+	 * the listener instance will get retrieved and fully evaluated through a
+	 * {@link #supportsEvent(ApplicationListener, ResolvableType, Class)} call afterwards.
+	 * @param listenerType the listener's type as determined by the BeanFactory
+	 * @param eventType the event type to check
+	 * @return whether the given listener should be included in the candidates
+	 * for the given event type
+	 */
+	protected boolean supportsEvent(Class&lt;?&gt; listenerType, ResolvableType eventType) {
+<span class="pc bpc" id="L279" title="1 of 2 branches missed.">		if (GenericApplicationListener.class.isAssignableFrom(listenerType) ||</span>
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">				SmartApplicationListener.class.isAssignableFrom(listenerType)) {</span>
+<span class="nc" id="L281">			return true;</span>
+		}
+<span class="fc" id="L283">		ResolvableType declaredEventType = GenericApplicationListenerAdapter.resolveDeclaredEventType(listenerType);</span>
+<span class="pc bpc" id="L284" title="1 of 4 branches missed.">		return (declaredEventType == null || declaredEventType.isAssignableFrom(eventType));</span>
+	}
+
+	/**
+	 * Determine whether the given listener supports the given event.
+	 * &lt;p&gt;The default implementation detects the {@link SmartApplicationListener}
+	 * and {@link GenericApplicationListener} interfaces. In case of a standard
+	 * {@link ApplicationListener}, a {@link GenericApplicationListenerAdapter}
+	 * will be used to introspect the generically declared type of the target listener.
+	 * @param listener the target listener to check
+	 * @param eventType the event type to check against
+	 * @param sourceType the source type to check against
+	 * @return whether the given listener should be included in the candidates
+	 * for the given event type
+	 */
+	protected boolean supportsEvent(
+			ApplicationListener&lt;?&gt; listener, ResolvableType eventType, @Nullable Class&lt;?&gt; sourceType) {
+
+<span class="fc bfc" id="L302" title="All 2 branches covered.">		GenericApplicationListener smartListener = (listener instanceof GenericApplicationListener ?</span>
+				(GenericApplicationListener) listener : new GenericApplicationListenerAdapter(listener));
+<span class="pc bpc" id="L304" title="1 of 4 branches missed.">		return (smartListener.supportsEventType(eventType) &amp;&amp; smartListener.supportsSourceType(sourceType));</span>
+	}
+
+
+	/**
+	 * Cache key for ListenerRetrievers, based on event type and source type.
+	 */
+	private static final class ListenerCacheKey implements Comparable&lt;ListenerCacheKey&gt; {
+
+		private final ResolvableType eventType;
+
+		@Nullable
+		private final Class&lt;?&gt; sourceType;
+
+<span class="fc" id="L318">		public ListenerCacheKey(ResolvableType eventType, @Nullable Class&lt;?&gt; sourceType) {</span>
+<span class="fc" id="L319">			Assert.notNull(eventType, &quot;Event type must not be null&quot;);</span>
+<span class="fc" id="L320">			this.eventType = eventType;</span>
+<span class="fc" id="L321">			this.sourceType = sourceType;</span>
+<span class="fc" id="L322">		}</span>
+
+		@Override
+		public boolean equals(Object other) {
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L327">				return true;</span>
+			}
+<span class="fc" id="L329">			ListenerCacheKey otherKey = (ListenerCacheKey) other;</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">			return (this.eventType.equals(otherKey.eventType) &amp;&amp;</span>
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">					ObjectUtils.nullSafeEquals(this.sourceType, otherKey.sourceType));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L336">			return this.eventType.hashCode() * 29 + ObjectUtils.nullSafeHashCode(this.sourceType);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L341">			return &quot;ListenerCacheKey [eventType = &quot; + this.eventType + &quot;, sourceType = &quot; + this.sourceType + &quot;]&quot;;</span>
+		}
+
+		@Override
+		public int compareTo(ListenerCacheKey other) {
+<span class="nc" id="L346">			int result = this.eventType.toString().compareTo(other.eventType.toString());</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">			if (result == 0) {</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">				if (this.sourceType == null) {</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">					return (other.sourceType == null ? 0 : -1);</span>
+				}
+<span class="nc bnc" id="L351" title="All 2 branches missed.">				if (other.sourceType == null) {</span>
+<span class="nc" id="L352">					return 1;</span>
+				}
+<span class="nc" id="L354">				result = this.sourceType.getName().compareTo(other.sourceType.getName());</span>
+			}
+<span class="nc" id="L356">			return result;</span>
+		}
+	}
+
+
+	/**
+	 * Helper class that encapsulates a specific set of target listeners,
+	 * allowing for efficient retrieval of pre-filtered listeners.
+	 * &lt;p&gt;An instance of this helper gets cached per event type and source type.
+	 */
+	private class ListenerRetriever {
+
+<span class="fc" id="L368">		public final Set&lt;ApplicationListener&lt;?&gt;&gt; applicationListeners = new LinkedHashSet&lt;&gt;();</span>
+
+<span class="fc" id="L370">		public final Set&lt;String&gt; applicationListenerBeans = new LinkedHashSet&lt;&gt;();</span>
+
+		private final boolean preFiltered;
+
+<span class="fc" id="L374">		public ListenerRetriever(boolean preFiltered) {</span>
+<span class="fc" id="L375">			this.preFiltered = preFiltered;</span>
+<span class="fc" id="L376">		}</span>
+
+		public Collection&lt;ApplicationListener&lt;?&gt;&gt; getApplicationListeners() {
+<span class="fc" id="L379">			List&lt;ApplicationListener&lt;?&gt;&gt; allListeners = new ArrayList&lt;&gt;(</span>
+<span class="fc" id="L380">					this.applicationListeners.size() + this.applicationListenerBeans.size());</span>
+<span class="fc" id="L381">			allListeners.addAll(this.applicationListeners);</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">			if (!this.applicationListenerBeans.isEmpty()) {</span>
+<span class="fc" id="L383">				BeanFactory beanFactory = getBeanFactory();</span>
+<span class="fc bfc" id="L384" title="All 2 branches covered.">				for (String listenerBeanName : this.applicationListenerBeans) {</span>
+					try {
+<span class="fc" id="L386">						ApplicationListener&lt;?&gt; listener = beanFactory.getBean(listenerBeanName, ApplicationListener.class);</span>
+<span class="pc bpc" id="L387" title="1 of 4 branches missed.">						if (this.preFiltered || !allListeners.contains(listener)) {</span>
+<span class="fc" id="L388">							allListeners.add(listener);</span>
+						}
+					}
+<span class="nc" id="L391">					catch (NoSuchBeanDefinitionException ex) {</span>
+						// Singleton listener instance (without backing bean definition) disappeared -
+						// probably in the middle of the destruction phase
+<span class="fc" id="L394">					}</span>
+<span class="fc" id="L395">				}</span>
+			}
+<span class="fc bfc" id="L397" title="All 4 branches covered.">			if (!this.preFiltered || !this.applicationListenerBeans.isEmpty()) {</span>
+<span class="fc" id="L398">				AnnotationAwareOrderComparator.sort(allListeners);</span>
+			}
+<span class="fc" id="L400">			return allListeners;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

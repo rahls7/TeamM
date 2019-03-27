@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SimpleNamingContextBuilder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.mock.jndi</a> &gt; <span class="el_source">SimpleNamingContextBuilder.java</span></div><h1>SimpleNamingContextBuilder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.mock.jndi;
+
+import java.util.Hashtable;
+import javax.naming.Context;
+import javax.naming.NamingException;
+import javax.naming.spi.InitialContextFactory;
+import javax.naming.spi.InitialContextFactoryBuilder;
+import javax.naming.spi.NamingManager;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Simple implementation of a JNDI naming context builder.
+ *
+ * &lt;p&gt;Mainly targeted at test environments, where each test case can
+ * configure JNDI appropriately, so that {@code new InitialContext()}
+ * will expose the required objects. Also usable for standalone applications,
+ * e.g. for binding a JDBC DataSource to a well-known JNDI location, to be
+ * able to use traditional Java EE data access code outside of a Java EE
+ * container.
+ *
+ * &lt;p&gt;There are various choices for DataSource implementations:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code SingleConnectionDataSource} (using the same Connection for all getConnection calls)
+ * &lt;li&gt;{@code DriverManagerDataSource} (creating a new Connection on each getConnection call)
+ * &lt;li&gt;Apache's Commons DBCP offers {@code org.apache.commons.dbcp.BasicDataSource} (a real pool)
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Typical usage in bootstrap code:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * SimpleNamingContextBuilder builder = new SimpleNamingContextBuilder();
+ * DataSource ds = new DriverManagerDataSource(...);
+ * builder.bind(&quot;java:comp/env/jdbc/myds&quot;, ds);
+ * builder.activate();&lt;/pre&gt;
+ *
+ * Note that it's impossible to activate multiple builders within the same JVM,
+ * due to JNDI restrictions. Thus to configure a fresh builder repeatedly, use
+ * the following code to get a reference to either an already activated builder
+ * or a newly activated one:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * SimpleNamingContextBuilder builder = SimpleNamingContextBuilder.emptyActivatedContextBuilder();
+ * DataSource ds = new DriverManagerDataSource(...);
+ * builder.bind(&quot;java:comp/env/jdbc/myds&quot;, ds);&lt;/pre&gt;
+ *
+ * Note that you &lt;i&gt;should not&lt;/i&gt; call {@code activate()} on a builder from
+ * this factory method, as there will already be an activated one in any case.
+ *
+ * &lt;p&gt;An instance of this class is only necessary at setup time.
+ * An application does not need to keep a reference to it after activation.
+ *
+ * @author Juergen Hoeller
+ * @author Rod Johnson
+ * @see #emptyActivatedContextBuilder()
+ * @see #bind(String, Object)
+ * @see #activate()
+ * @see SimpleNamingContext
+ * @see org.springframework.jdbc.datasource.SingleConnectionDataSource
+ * @see org.springframework.jdbc.datasource.DriverManagerDataSource
+ */
+<span class="nc" id="L84">public class SimpleNamingContextBuilder implements InitialContextFactoryBuilder {</span>
+
+	/** An instance of this class bound to JNDI. */
+	@Nullable
+	private static volatile SimpleNamingContextBuilder activated;
+
+<span class="nc" id="L90">	private static boolean initialized = false;</span>
+
+<span class="nc" id="L92">	private static final Object initializationLock = new Object();</span>
+
+
+	/**
+	 * Checks if a SimpleNamingContextBuilder is active.
+	 * @return the current SimpleNamingContextBuilder instance,
+	 * or {@code null} if none
+	 */
+	@Nullable
+	public static SimpleNamingContextBuilder getCurrentContextBuilder() {
+<span class="nc" id="L102">		return activated;</span>
+	}
+
+	/**
+	 * If no SimpleNamingContextBuilder is already configuring JNDI,
+	 * create and activate one. Otherwise take the existing activated
+	 * SimpleNamingContextBuilder, clear it and return it.
+	 * &lt;p&gt;This is mainly intended for test suites that want to
+	 * reinitialize JNDI bindings from scratch repeatedly.
+	 * @return an empty SimpleNamingContextBuilder that can be used
+	 * to control JNDI bindings
+	 */
+	public static SimpleNamingContextBuilder emptyActivatedContextBuilder() throws NamingException {
+<span class="nc" id="L115">		SimpleNamingContextBuilder builder = activated;</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">		if (builder != null) {</span>
+			// Clear already activated context builder.
+<span class="nc" id="L118">			builder.clear();</span>
+		}
+		else {
+			// Create and activate new context builder.
+<span class="nc" id="L122">			builder = new SimpleNamingContextBuilder();</span>
+			// The activate() call will cause an assignment to the activated variable.
+<span class="nc" id="L124">			builder.activate();</span>
+		}
+<span class="nc" id="L126">		return builder;</span>
+	}
+
+
+<span class="nc" id="L130">	private final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="nc" id="L132">	private final Hashtable&lt;String,Object&gt; boundObjects = new Hashtable&lt;&gt;();</span>
+
+
+	/**
+	 * Register the context builder by registering it with the JNDI NamingManager.
+	 * Note that once this has been done, {@code new InitialContext()} will always
+	 * return a context from this factory. Use the {@code emptyActivatedContextBuilder()}
+	 * static method to get an empty context (for example, in test methods).
+	 * @throws IllegalStateException if there's already a naming context builder
+	 * registered with the JNDI NamingManager
+	 */
+	public void activate() throws IllegalStateException, NamingException {
+<span class="nc" id="L144">		logger.info(&quot;Activating simple JNDI environment&quot;);</span>
+<span class="nc" id="L145">		synchronized (initializationLock) {</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">			if (!initialized) {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">				Assert.state(!NamingManager.hasInitialContextFactoryBuilder(),</span>
+							&quot;Cannot activate SimpleNamingContextBuilder: there is already a JNDI provider registered. &quot; +
+							&quot;Note that JNDI is a JVM-wide service, shared at the JVM system class loader level, &quot; +
+							&quot;with no reset option. As a consequence, a JNDI provider must only be registered once per JVM.&quot;);
+<span class="nc" id="L151">				NamingManager.setInitialContextFactoryBuilder(this);</span>
+<span class="nc" id="L152">				initialized = true;</span>
+			}
+<span class="nc" id="L154">		}</span>
+<span class="nc" id="L155">		activated = this;</span>
+<span class="nc" id="L156">	}</span>
+
+	/**
+	 * Temporarily deactivate this context builder. It will remain registered with
+	 * the JNDI NamingManager but will delegate to the standard JNDI InitialContextFactory
+	 * (if configured) instead of exposing its own bound objects.
+	 * &lt;p&gt;Call {@code activate()} again in order to expose this context builder's own
+	 * bound objects again. Such activate/deactivate sequences can be applied any number
+	 * of times (e.g. within a larger integration test suite running in the same VM).
+	 * @see #activate()
+	 */
+	public void deactivate() {
+<span class="nc" id="L168">		logger.info(&quot;Deactivating simple JNDI environment&quot;);</span>
+<span class="nc" id="L169">		activated = null;</span>
+<span class="nc" id="L170">	}</span>
+
+	/**
+	 * Clear all bindings in this context builder, while keeping it active.
+	 */
+	public void clear() {
+<span class="nc" id="L176">		this.boundObjects.clear();</span>
+<span class="nc" id="L177">	}</span>
+
+	/**
+	 * Bind the given object under the given name, for all naming contexts
+	 * that this context builder will generate.
+	 * @param name the JNDI name of the object (e.g. &quot;java:comp/env/jdbc/myds&quot;)
+	 * @param obj the object to bind (e.g. a DataSource implementation)
+	 */
+	public void bind(String name, Object obj) {
+<span class="nc bnc" id="L186" title="All 2 branches missed.">		if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L187">			logger.info(&quot;Static JNDI binding: [&quot; + name + &quot;] = [&quot; + obj + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L189">		this.boundObjects.put(name, obj);</span>
+<span class="nc" id="L190">	}</span>
+
+
+	/**
+	 * Simple InitialContextFactoryBuilder implementation,
+	 * creating a new SimpleNamingContext instance.
+	 * @see SimpleNamingContext
+	 */
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public InitialContextFactory createInitialContextFactory(@Nullable Hashtable&lt;?,?&gt; environment) {
+<span class="nc bnc" id="L201" title="All 4 branches missed.">		if (activated == null &amp;&amp; environment != null) {</span>
+<span class="nc" id="L202">			Object icf = environment.get(Context.INITIAL_CONTEXT_FACTORY);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">			if (icf != null) {</span>
+				Class&lt;?&gt; icfClass;
+<span class="nc bnc" id="L205" title="All 2 branches missed.">				if (icf instanceof Class) {</span>
+<span class="nc" id="L206">					icfClass = (Class&lt;?&gt;) icf;</span>
+				}
+<span class="nc bnc" id="L208" title="All 2 branches missed.">				else if (icf instanceof String) {</span>
+<span class="nc" id="L209">					icfClass = ClassUtils.resolveClassName((String) icf, getClass().getClassLoader());</span>
+				}
+				else {
+<span class="nc" id="L212">					throw new IllegalArgumentException(&quot;Invalid value type for environment key [&quot; +</span>
+<span class="nc" id="L213">							Context.INITIAL_CONTEXT_FACTORY + &quot;]: &quot; + icf.getClass().getName());</span>
+				}
+<span class="nc bnc" id="L215" title="All 2 branches missed.">				if (!InitialContextFactory.class.isAssignableFrom(icfClass)) {</span>
+<span class="nc" id="L216">					throw new IllegalArgumentException(</span>
+<span class="nc" id="L217">							&quot;Specified class does not implement [&quot; + InitialContextFactory.class.getName() + &quot;]: &quot; + icf);</span>
+				}
+				try {
+<span class="nc" id="L220">					return (InitialContextFactory) ReflectionUtils.accessibleConstructor(icfClass).newInstance();</span>
+				}
+<span class="nc" id="L222">				catch (Throwable ex) {</span>
+<span class="nc" id="L223">					throw new IllegalStateException(&quot;Unable to instantiate specified InitialContextFactory: &quot; + icf, ex);</span>
+				}
+			}
+		}
+
+		// Default case...
+<span class="nc" id="L229">		return env -&gt; new SimpleNamingContext(&quot;&quot;, this.boundObjects, (Hashtable&lt;String, Object&gt;) env);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

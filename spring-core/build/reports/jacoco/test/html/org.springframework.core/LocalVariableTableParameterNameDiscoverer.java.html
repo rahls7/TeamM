@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalVariableTableParameterNameDiscoverer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core</a> &gt; <span class="el_source">LocalVariableTableParameterNameDiscoverer.java</span></div><h1>LocalVariableTableParameterNameDiscoverer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.asm.ClassReader;
+import org.springframework.asm.ClassVisitor;
+import org.springframework.asm.Label;
+import org.springframework.asm.MethodVisitor;
+import org.springframework.asm.Opcodes;
+import org.springframework.asm.SpringAsmInfo;
+import org.springframework.asm.Type;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Implementation of {@link ParameterNameDiscoverer} that uses the LocalVariableTable
+ * information in the method attributes to discover parameter names. Returns
+ * {@code null} if the class file was compiled without debug information.
+ *
+ * &lt;p&gt;Uses ObjectWeb's ASM library for analyzing class files. Each discoverer instance
+ * caches the ASM discovered information for each introspected Class, in a thread-safe
+ * manner. It is recommended to reuse ParameterNameDiscoverer instances as far as possible.
+ *
+ * @author Adrian Colyer
+ * @author Costin Leau
+ * @author Juergen Hoeller
+ * @author Chris Beams
+ * @since 2.0
+ */
+<span class="fc" id="L56">public class LocalVariableTableParameterNameDiscoverer implements ParameterNameDiscoverer {</span>
+
+<span class="fc" id="L58">	private static final Log logger = LogFactory.getLog(LocalVariableTableParameterNameDiscoverer.class);</span>
+
+	// marker object for classes that do not have any debug info
+<span class="fc" id="L61">	private static final Map&lt;Member, String[]&gt; NO_DEBUG_INFO_MAP = Collections.emptyMap();</span>
+
+	// the cache uses a nested index (value is a map) to keep the top level cache relatively small in size
+<span class="fc" id="L64">	private final Map&lt;Class&lt;?&gt;, Map&lt;Member, String[]&gt;&gt; parameterNamesCache = new ConcurrentHashMap&lt;&gt;(32);</span>
+
+
+	@Override
+	@Nullable
+	public String[] getParameterNames(Method method) {
+<span class="fc" id="L70">		Method originalMethod = BridgeMethodResolver.findBridgedMethod(method);</span>
+<span class="fc" id="L71">		Class&lt;?&gt; declaringClass = originalMethod.getDeclaringClass();</span>
+<span class="fc" id="L72">		Map&lt;Member, String[]&gt; map = this.parameterNamesCache.get(declaringClass);</span>
+<span class="fc bfc" id="L73" title="All 2 branches covered.">		if (map == null) {</span>
+<span class="fc" id="L74">			map = inspectClass(declaringClass);</span>
+<span class="fc" id="L75">			this.parameterNamesCache.put(declaringClass, map);</span>
+		}
+<span class="pc bpc" id="L77" title="1 of 2 branches missed.">		if (map != NO_DEBUG_INFO_MAP) {</span>
+<span class="fc" id="L78">			return map.get(originalMethod);</span>
+		}
+<span class="nc" id="L80">		return null;</span>
+	}
+
+	@Override
+	@Nullable
+	public String[] getParameterNames(Constructor&lt;?&gt; ctor) {
+<span class="fc" id="L86">		Class&lt;?&gt; declaringClass = ctor.getDeclaringClass();</span>
+<span class="fc" id="L87">		Map&lt;Member, String[]&gt; map = this.parameterNamesCache.get(declaringClass);</span>
+<span class="fc bfc" id="L88" title="All 2 branches covered.">		if (map == null) {</span>
+<span class="fc" id="L89">			map = inspectClass(declaringClass);</span>
+<span class="fc" id="L90">			this.parameterNamesCache.put(declaringClass, map);</span>
+		}
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">		if (map != NO_DEBUG_INFO_MAP) {</span>
+<span class="fc" id="L93">			return map.get(ctor);</span>
+		}
+<span class="nc" id="L95">		return null;</span>
+	}
+
+	/**
+	 * Inspects the target class. Exceptions will be logged and a maker map returned
+	 * to indicate the lack of debug information.
+	 */
+	private Map&lt;Member, String[]&gt; inspectClass(Class&lt;?&gt; clazz) {
+<span class="fc" id="L103">		InputStream is = clazz.getResourceAsStream(ClassUtils.getClassFileName(clazz));</span>
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">		if (is == null) {</span>
+			// We couldn't load the class file, which is not fatal as it
+			// simply means this method of discovering parameter names won't work.
+<span class="nc bnc" id="L107" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L108">				logger.debug(&quot;Cannot find '.class' file for class [&quot; + clazz +</span>
+						&quot;] - unable to determine constructor/method parameter names&quot;);
+			}
+<span class="nc" id="L111">			return NO_DEBUG_INFO_MAP;</span>
+		}
+		try {
+<span class="fc" id="L114">			ClassReader classReader = new ClassReader(is);</span>
+<span class="fc" id="L115">			Map&lt;Member, String[]&gt; map = new ConcurrentHashMap&lt;&gt;(32);</span>
+<span class="fc" id="L116">			classReader.accept(new ParameterNameDiscoveringVisitor(clazz, map), 0);</span>
+<span class="fc" id="L117">			return map;</span>
+		}
+<span class="nc" id="L119">		catch (IOException ex) {</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L121">				logger.debug(&quot;Exception thrown while reading '.class' file for class [&quot; + clazz +</span>
+						&quot;] - unable to determine constructor/method parameter names&quot;, ex);
+			}
+		}
+<span class="nc" id="L125">		catch (IllegalArgumentException ex) {</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L127">				logger.debug(&quot;ASM ClassReader failed to parse class file [&quot; + clazz +</span>
+						&quot;], probably due to a new Java class file version that isn't supported yet &quot; +
+						&quot;- unable to determine constructor/method parameter names&quot;, ex);
+			}
+		}
+		finally {
+			try {
+<span class="fc" id="L134">				is.close();</span>
+			}
+<span class="nc" id="L136">			catch (IOException ex) {</span>
+				// ignore
+<span class="fc" id="L138">			}</span>
+		}
+<span class="nc" id="L140">		return NO_DEBUG_INFO_MAP;</span>
+	}
+
+
+	/**
+	 * Helper class that inspects all methods (constructor included) and then
+	 * attempts to find the parameter names for that member.
+	 */
+	private static class ParameterNameDiscoveringVisitor extends ClassVisitor {
+
+		private static final String STATIC_CLASS_INIT = &quot;&lt;clinit&gt;&quot;;
+
+		private final Class&lt;?&gt; clazz;
+
+		private final Map&lt;Member, String[]&gt; memberMap;
+
+		public ParameterNameDiscoveringVisitor(Class&lt;?&gt; clazz, Map&lt;Member, String[]&gt; memberMap) {
+<span class="fc" id="L157">			super(SpringAsmInfo.ASM_VERSION);</span>
+<span class="fc" id="L158">			this.clazz = clazz;</span>
+<span class="fc" id="L159">			this.memberMap = memberMap;</span>
+<span class="fc" id="L160">		}</span>
+
+		@Override
+		@Nullable
+		public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
+			// exclude synthetic + bridged &amp;&amp; static class initialization
+<span class="pc bpc" id="L166" title="1 of 4 branches missed.">			if (!isSyntheticOrBridged(access) &amp;&amp; !STATIC_CLASS_INIT.equals(name)) {</span>
+<span class="fc" id="L167">				return new LocalVariableTableVisitor(this.clazz, this.memberMap, name, desc, isStatic(access));</span>
+			}
+<span class="fc" id="L169">			return null;</span>
+		}
+
+		private static boolean isSyntheticOrBridged(int access) {
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">			return (((access &amp; Opcodes.ACC_SYNTHETIC) | (access &amp; Opcodes.ACC_BRIDGE)) &gt; 0);</span>
+		}
+
+		private static boolean isStatic(int access) {
+<span class="fc bfc" id="L177" title="All 2 branches covered.">			return ((access &amp; Opcodes.ACC_STATIC) &gt; 0);</span>
+		}
+	}
+
+
+	private static class LocalVariableTableVisitor extends MethodVisitor {
+
+		private static final String CONSTRUCTOR = &quot;&lt;init&gt;&quot;;
+
+		private final Class&lt;?&gt; clazz;
+
+		private final Map&lt;Member, String[]&gt; memberMap;
+
+		private final String name;
+
+		private final Type[] args;
+
+		private final String[] parameterNames;
+
+		private final boolean isStatic;
+
+<span class="fc" id="L198">		private boolean hasLvtInfo = false;</span>
+
+		/*
+		 * The nth entry contains the slot index of the LVT table entry holding the
+		 * argument name for the nth parameter.
+		 */
+		private final int[] lvtSlotIndex;
+
+		public LocalVariableTableVisitor(Class&lt;?&gt; clazz, Map&lt;Member, String[]&gt; map, String name, String desc, boolean isStatic) {
+<span class="fc" id="L207">			super(SpringAsmInfo.ASM_VERSION);</span>
+<span class="fc" id="L208">			this.clazz = clazz;</span>
+<span class="fc" id="L209">			this.memberMap = map;</span>
+<span class="fc" id="L210">			this.name = name;</span>
+<span class="fc" id="L211">			this.args = Type.getArgumentTypes(desc);</span>
+<span class="fc" id="L212">			this.parameterNames = new String[this.args.length];</span>
+<span class="fc" id="L213">			this.isStatic = isStatic;</span>
+<span class="fc" id="L214">			this.lvtSlotIndex = computeLvtSlotIndices(isStatic, this.args);</span>
+<span class="fc" id="L215">		}</span>
+
+		@Override
+		public void visitLocalVariable(String name, String description, String signature, Label start, Label end, int index) {
+<span class="fc" id="L219">			this.hasLvtInfo = true;</span>
+<span class="fc bfc" id="L220" title="All 2 branches covered.">			for (int i = 0; i &lt; this.lvtSlotIndex.length; i++) {</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">				if (this.lvtSlotIndex[i] == index) {</span>
+<span class="fc" id="L222">					this.parameterNames[i] = name;</span>
+				}
+			}
+<span class="fc" id="L225">		}</span>
+
+		@Override
+		public void visitEnd() {
+<span class="pc bpc" id="L229" title="1 of 6 branches missed.">			if (this.hasLvtInfo || (this.isStatic &amp;&amp; this.parameterNames.length == 0)) {</span>
+				// visitLocalVariable will never be called for static no args methods
+				// which doesn't use any local variables.
+				// This means that hasLvtInfo could be false for that kind of methods
+				// even if the class has local variable info.
+<span class="fc" id="L234">				this.memberMap.put(resolveMember(), this.parameterNames);</span>
+			}
+<span class="fc" id="L236">		}</span>
+
+		private Member resolveMember() {
+<span class="fc" id="L239">			ClassLoader loader = this.clazz.getClassLoader();</span>
+<span class="fc" id="L240">			Class&lt;?&gt;[] argTypes = new Class&lt;?&gt;[this.args.length];</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">			for (int i = 0; i &lt; this.args.length; i++) {</span>
+<span class="fc" id="L242">				argTypes[i] = ClassUtils.resolveClassName(this.args[i].getClassName(), loader);</span>
+			}
+			try {
+<span class="fc bfc" id="L245" title="All 2 branches covered.">				if (CONSTRUCTOR.equals(this.name)) {</span>
+<span class="fc" id="L246">					return this.clazz.getDeclaredConstructor(argTypes);</span>
+				}
+<span class="fc" id="L248">				return this.clazz.getDeclaredMethod(this.name, argTypes);</span>
+			}
+<span class="nc" id="L250">			catch (NoSuchMethodException ex) {</span>
+<span class="nc" id="L251">				throw new IllegalStateException(&quot;Method [&quot; + this.name +</span>
+						&quot;] was discovered in the .class file but cannot be resolved in the class object&quot;, ex);
+			}
+		}
+
+		private static int[] computeLvtSlotIndices(boolean isStatic, Type[] paramTypes) {
+<span class="fc" id="L257">			int[] lvtIndex = new int[paramTypes.length];</span>
+<span class="fc bfc" id="L258" title="All 2 branches covered.">			int nextIndex = (isStatic ? 0 : 1);</span>
+<span class="fc bfc" id="L259" title="All 2 branches covered.">			for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="fc" id="L260">				lvtIndex[i] = nextIndex;</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">				if (isWideType(paramTypes[i])) {</span>
+<span class="fc" id="L262">					nextIndex += 2;</span>
+				}
+				else {
+<span class="fc" id="L265">					nextIndex++;</span>
+				}
+			}
+<span class="fc" id="L268">			return lvtIndex;</span>
+		}
+
+		private static boolean isWideType(Type aType) {
+			// float is not a wide type
+<span class="fc bfc" id="L273" title="All 4 branches covered.">			return (aType == Type.LONG_TYPE || aType == Type.DOUBLE_TYPE);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

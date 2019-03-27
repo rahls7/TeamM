@@ -1,0 +1,449 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JndiRmiClientInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.remoting.rmi</a> &gt; <span class="el_source">JndiRmiClientInterceptor.java</span></div><h1>JndiRmiClientInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.remoting.rmi;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.rmi.RemoteException;
+import javax.naming.Context;
+import javax.naming.NamingException;
+
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
+
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.jndi.JndiObjectLocator;
+import org.springframework.lang.Nullable;
+import org.springframework.remoting.RemoteConnectFailureException;
+import org.springframework.remoting.RemoteInvocationFailureException;
+import org.springframework.remoting.RemoteLookupFailureException;
+import org.springframework.remoting.support.DefaultRemoteInvocationFactory;
+import org.springframework.remoting.support.RemoteInvocation;
+import org.springframework.remoting.support.RemoteInvocationFactory;
+import org.springframework.util.Assert;
+
+/**
+ * {@link org.aopalliance.intercept.MethodInterceptor} for accessing RMI services
+ * from JNDI. Typically used for RMI-IIOP but can also be used for EJB home objects
+ * (for example, a Stateful Session Bean home). In contrast to a plain JNDI lookup,
+ * this accessor also performs narrowing through PortableRemoteObject.
+ *
+ * &lt;p&gt;With conventional RMI services, this invoker is typically used with the RMI
+ * service interface. Alternatively, this invoker can also proxy a remote RMI service
+ * with a matching non-RMI business interface, i.e. an interface that mirrors the RMI
+ * service methods but does not declare RemoteExceptions. In the latter case,
+ * RemoteExceptions thrown by the RMI stub will automatically get converted to
+ * Spring's unchecked RemoteAccessException.
+ *
+ * &lt;p&gt;The JNDI environment can be specified as &quot;jndiEnvironment&quot; property,
+ * or be configured in a {@code jndi.properties} file or as system properties.
+ * For example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;&amp;lt;property name=&quot;jndiEnvironment&quot;&amp;gt;
+ * 	 &amp;lt;props&gt;
+ *		 &amp;lt;prop key=&quot;java.naming.factory.initial&quot;&amp;gt;com.sun.jndi.cosnaming.CNCtxFactory&amp;lt;/prop&amp;gt;
+ *		 &amp;lt;prop key=&quot;java.naming.provider.url&quot;&amp;gt;iiop://localhost:1050&amp;lt;/prop&amp;gt;
+ *	 &amp;lt;/props&amp;gt;
+ * &amp;lt;/property&amp;gt;&lt;/pre&gt;
+ *
+ * @author Juergen Hoeller
+ * @since 1.1
+ * @see #setJndiTemplate
+ * @see #setJndiEnvironment
+ * @see #setJndiName
+ * @see JndiRmiServiceExporter
+ * @see JndiRmiProxyFactoryBean
+ * @see org.springframework.remoting.RemoteAccessException
+ * @see java.rmi.RemoteException
+ * @see java.rmi.Remote
+ */
+<span class="nc" id="L75">public class JndiRmiClientInterceptor extends JndiObjectLocator implements MethodInterceptor, InitializingBean {</span>
+
+	private Class&lt;?&gt; serviceInterface;
+
+<span class="nc" id="L79">	private RemoteInvocationFactory remoteInvocationFactory = new DefaultRemoteInvocationFactory();</span>
+
+<span class="nc" id="L81">	private boolean lookupStubOnStartup = true;</span>
+
+<span class="nc" id="L83">	private boolean cacheStub = true;</span>
+
+<span class="nc" id="L85">	private boolean refreshStubOnConnectFailure = false;</span>
+
+<span class="nc" id="L87">	private boolean exposeAccessContext = false;</span>
+
+	private Object cachedStub;
+
+<span class="nc" id="L91">	private final Object stubMonitor = new Object();</span>
+
+
+	/**
+	 * Set the interface of the service to access.
+	 * The interface must be suitable for the particular service and remoting tool.
+	 * &lt;p&gt;Typically required to be able to create a suitable service proxy,
+	 * but can also be optional if the lookup returns a typed stub.
+	 */
+	public void setServiceInterface(Class&lt;?&gt; serviceInterface) {
+<span class="nc" id="L101">		Assert.notNull(serviceInterface, &quot;'serviceInterface' must not be null&quot;);</span>
+<span class="nc" id="L102">		Assert.isTrue(serviceInterface.isInterface(), &quot;'serviceInterface' must be an interface&quot;);</span>
+<span class="nc" id="L103">		this.serviceInterface = serviceInterface;</span>
+<span class="nc" id="L104">	}</span>
+
+	/**
+	 * Return the interface of the service to access.
+	 */
+	public Class&lt;?&gt; getServiceInterface() {
+<span class="nc" id="L110">		return this.serviceInterface;</span>
+	}
+
+	/**
+	 * Set the RemoteInvocationFactory to use for this accessor.
+	 * Default is a {@link DefaultRemoteInvocationFactory}.
+	 * &lt;p&gt;A custom invocation factory can add further context information
+	 * to the invocation, for example user credentials.
+	 */
+	public void setRemoteInvocationFactory(RemoteInvocationFactory remoteInvocationFactory) {
+<span class="nc" id="L120">		this.remoteInvocationFactory = remoteInvocationFactory;</span>
+<span class="nc" id="L121">	}</span>
+
+	/**
+	 * Return the RemoteInvocationFactory used by this accessor.
+	 */
+	public RemoteInvocationFactory getRemoteInvocationFactory() {
+<span class="nc" id="L127">		return this.remoteInvocationFactory;</span>
+	}
+
+	/**
+	 * Set whether to look up the RMI stub on startup. Default is &quot;true&quot;.
+	 * &lt;p&gt;Can be turned off to allow for late start of the RMI server.
+	 * In this case, the RMI stub will be fetched on first access.
+	 * @see #setCacheStub
+	 */
+	public void setLookupStubOnStartup(boolean lookupStubOnStartup) {
+<span class="nc" id="L137">		this.lookupStubOnStartup = lookupStubOnStartup;</span>
+<span class="nc" id="L138">	}</span>
+
+	/**
+	 * Set whether to cache the RMI stub once it has been located.
+	 * Default is &quot;true&quot;.
+	 * &lt;p&gt;Can be turned off to allow for hot restart of the RMI server.
+	 * In this case, the RMI stub will be fetched for each invocation.
+	 * @see #setLookupStubOnStartup
+	 */
+	public void setCacheStub(boolean cacheStub) {
+<span class="nc" id="L148">		this.cacheStub = cacheStub;</span>
+<span class="nc" id="L149">	}</span>
+
+	/**
+	 * Set whether to refresh the RMI stub on connect failure.
+	 * Default is &quot;false&quot;.
+	 * &lt;p&gt;Can be turned on to allow for hot restart of the RMI server.
+	 * If a cached RMI stub throws an RMI exception that indicates a
+	 * remote connect failure, a fresh proxy will be fetched and the
+	 * invocation will be retried.
+	 * @see java.rmi.ConnectException
+	 * @see java.rmi.ConnectIOException
+	 * @see java.rmi.NoSuchObjectException
+	 */
+	public void setRefreshStubOnConnectFailure(boolean refreshStubOnConnectFailure) {
+<span class="nc" id="L163">		this.refreshStubOnConnectFailure = refreshStubOnConnectFailure;</span>
+<span class="nc" id="L164">	}</span>
+
+	/**
+	 * Set whether to expose the JNDI environment context for all access to the target
+	 * RMI stub, i.e. for all method invocations on the exposed object reference.
+	 * &lt;p&gt;Default is &quot;false&quot;, i.e. to only expose the JNDI context for object lookup.
+	 * Switch this flag to &quot;true&quot; in order to expose the JNDI environment (including
+	 * the authorization context) for each RMI invocation, as needed by WebLogic
+	 * for RMI stubs with authorization requirements.
+	 */
+	public void setExposeAccessContext(boolean exposeAccessContext) {
+<span class="nc" id="L175">		this.exposeAccessContext = exposeAccessContext;</span>
+<span class="nc" id="L176">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() throws NamingException {
+<span class="nc" id="L181">		super.afterPropertiesSet();</span>
+<span class="nc" id="L182">		prepare();</span>
+<span class="nc" id="L183">	}</span>
+
+	/**
+	 * Fetches the RMI stub on startup, if necessary.
+	 * @throws RemoteLookupFailureException if RMI stub creation failed
+	 * @see #setLookupStubOnStartup
+	 * @see #lookupStub
+	 */
+	public void prepare() throws RemoteLookupFailureException {
+		// Cache RMI stub on initialization?
+<span class="nc bnc" id="L193" title="All 2 branches missed.">		if (this.lookupStubOnStartup) {</span>
+<span class="nc" id="L194">			Object remoteObj = lookupStub();</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">				if (remoteObj instanceof RmiInvocationHandler) {</span>
+<span class="nc" id="L197">					logger.debug(&quot;JNDI RMI object [&quot; + getJndiName() + &quot;] is an RMI invoker&quot;);</span>
+				}
+<span class="nc bnc" id="L199" title="All 2 branches missed.">				else if (getServiceInterface() != null) {</span>
+<span class="nc" id="L200">					boolean isImpl = getServiceInterface().isInstance(remoteObj);</span>
+<span class="nc" id="L201">					logger.debug(&quot;Using service interface [&quot; + getServiceInterface().getName() +</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">							&quot;] for JNDI RMI object [&quot; + getJndiName() + &quot;] - &quot; +</span>
+							(!isImpl ? &quot;not &quot; : &quot;&quot;) + &quot;directly implemented&quot;);
+				}
+			}
+<span class="nc bnc" id="L206" title="All 2 branches missed.">			if (this.cacheStub) {</span>
+<span class="nc" id="L207">				this.cachedStub = remoteObj;</span>
+			}
+		}
+<span class="nc" id="L210">	}</span>
+
+	/**
+	 * Create the RMI stub, typically by looking it up.
+	 * &lt;p&gt;Called on interceptor initialization if &quot;cacheStub&quot; is &quot;true&quot;;
+	 * else called for each invocation by {@link #getStub()}.
+	 * &lt;p&gt;The default implementation retrieves the service from the
+	 * JNDI environment. This can be overridden in subclasses.
+	 * @return the RMI stub to store in this interceptor
+	 * @throws RemoteLookupFailureException if RMI stub creation failed
+	 * @see #setCacheStub
+	 * @see #lookup
+	 */
+	protected Object lookupStub() throws RemoteLookupFailureException {
+		try {
+<span class="nc" id="L225">			return lookup();</span>
+		}
+<span class="nc" id="L227">		catch (NamingException ex) {</span>
+<span class="nc" id="L228">			throw new RemoteLookupFailureException(&quot;JNDI lookup for RMI service [&quot; + getJndiName() + &quot;] failed&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Return the RMI stub to use. Called for each invocation.
+	 * &lt;p&gt;The default implementation returns the stub created on initialization,
+	 * if any. Else, it invokes {@link #lookupStub} to get a new stub for
+	 * each invocation. This can be overridden in subclasses, for example in
+	 * order to cache a stub for a given amount of time before recreating it,
+	 * or to test the stub whether it is still alive.
+	 * @return the RMI stub to use for an invocation
+	 * @throws NamingException if stub creation failed
+	 * @throws RemoteLookupFailureException if RMI stub creation failed
+	 */
+	protected Object getStub() throws NamingException, RemoteLookupFailureException {
+<span class="nc bnc" id="L244" title="All 6 branches missed.">		if (!this.cacheStub || (this.lookupStubOnStartup &amp;&amp; !this.refreshStubOnConnectFailure)) {</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">			return (this.cachedStub != null ? this.cachedStub : lookupStub());</span>
+		}
+		else {
+<span class="nc" id="L248">			synchronized (this.stubMonitor) {</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">				if (this.cachedStub == null) {</span>
+<span class="nc" id="L250">					this.cachedStub = lookupStub();</span>
+				}
+<span class="nc" id="L252">				return this.cachedStub;</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Fetches an RMI stub and delegates to {@link #doInvoke}.
+	 * If configured to refresh on connect failure, it will call
+	 * {@link #refreshAndRetry} on corresponding RMI exceptions.
+	 * @see #getStub
+	 * @see #doInvoke
+	 * @see #refreshAndRetry
+	 * @see java.rmi.ConnectException
+	 * @see java.rmi.ConnectIOException
+	 * @see java.rmi.NoSuchObjectException
+	 */
+	@Override
+	public Object invoke(MethodInvocation invocation) throws Throwable {
+		Object stub;
+		try {
+<span class="nc" id="L273">			stub = getStub();</span>
+		}
+<span class="nc" id="L275">		catch (NamingException ex) {</span>
+<span class="nc" id="L276">			throw new RemoteLookupFailureException(&quot;JNDI lookup for RMI service [&quot; + getJndiName() + &quot;] failed&quot;, ex);</span>
+<span class="nc" id="L277">		}</span>
+
+<span class="nc bnc" id="L279" title="All 2 branches missed.">		Context ctx = (this.exposeAccessContext ? getJndiTemplate().getContext() : null);</span>
+		try {
+<span class="nc" id="L281">			return doInvoke(invocation, stub);</span>
+		}
+<span class="nc" id="L283">		catch (RemoteConnectFailureException ex) {</span>
+<span class="nc" id="L284">			return handleRemoteConnectFailure(invocation, ex);</span>
+		}
+<span class="nc" id="L286">		catch (RemoteException ex) {</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">			if (isConnectFailure(ex)) {</span>
+<span class="nc" id="L288">				return handleRemoteConnectFailure(invocation, ex);</span>
+			}
+			else {
+<span class="nc" id="L291">				throw ex;</span>
+			}
+		}
+		finally {
+<span class="nc" id="L295">			getJndiTemplate().releaseContext(ctx);</span>
+		}
+	}
+
+	/**
+	 * Determine whether the given RMI exception indicates a connect failure.
+	 * &lt;p&gt;The default implementation delegates to
+	 * {@link RmiClientInterceptorUtils#isConnectFailure}.
+	 * @param ex the RMI exception to check
+	 * @return whether the exception should be treated as connect failure
+	 */
+	protected boolean isConnectFailure(RemoteException ex) {
+<span class="nc" id="L307">		return RmiClientInterceptorUtils.isConnectFailure(ex);</span>
+	}
+
+	/**
+	 * Refresh the stub and retry the remote invocation if necessary.
+	 * &lt;p&gt;If not configured to refresh on connect failure, this method
+	 * simply rethrows the original exception.
+	 * @param invocation the invocation that failed
+	 * @param ex the exception raised on remote invocation
+	 * @return the result value of the new invocation, if succeeded
+	 * @throws Throwable an exception raised by the new invocation, if failed too.
+	 */
+	private Object handleRemoteConnectFailure(MethodInvocation invocation, Exception ex) throws Throwable {
+<span class="nc bnc" id="L320" title="All 2 branches missed.">		if (this.refreshStubOnConnectFailure) {</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L322">				logger.debug(&quot;Could not connect to RMI service [&quot; + getJndiName() + &quot;] - retrying&quot;, ex);</span>
+			}
+<span class="nc bnc" id="L324" title="All 2 branches missed.">			else if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L325">				logger.info(&quot;Could not connect to RMI service [&quot; + getJndiName() + &quot;] - retrying&quot;);</span>
+			}
+<span class="nc" id="L327">			return refreshAndRetry(invocation);</span>
+		}
+		else {
+<span class="nc" id="L330">			throw ex;</span>
+		}
+	}
+
+	/**
+	 * Refresh the RMI stub and retry the given invocation.
+	 * Called by invoke on connect failure.
+	 * @param invocation the AOP method invocation
+	 * @return the invocation result, if any
+	 * @throws Throwable in case of invocation failure
+	 * @see #invoke
+	 */
+	@Nullable
+	protected Object refreshAndRetry(MethodInvocation invocation) throws Throwable {
+		Object freshStub;
+<span class="nc" id="L345">		synchronized (this.stubMonitor) {</span>
+<span class="nc" id="L346">			this.cachedStub = null;</span>
+<span class="nc" id="L347">			freshStub = lookupStub();</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">			if (this.cacheStub) {</span>
+<span class="nc" id="L349">				this.cachedStub = freshStub;</span>
+			}
+<span class="nc" id="L351">		}</span>
+<span class="nc" id="L352">		return doInvoke(invocation, freshStub);</span>
+	}
+
+
+	/**
+	 * Perform the given invocation on the given RMI stub.
+	 * @param invocation the AOP method invocation
+	 * @param stub the RMI stub to invoke
+	 * @return the invocation result, if any
+	 * @throws Throwable in case of invocation failure
+	 */
+	@Nullable
+	protected Object doInvoke(MethodInvocation invocation, Object stub) throws Throwable {
+<span class="nc bnc" id="L365" title="All 2 branches missed.">		if (stub instanceof RmiInvocationHandler) {</span>
+			// RMI invoker
+			try {
+<span class="nc" id="L368">				return doInvoke(invocation, (RmiInvocationHandler) stub);</span>
+			}
+<span class="nc" id="L370">			catch (RemoteException ex) {</span>
+<span class="nc" id="L371">				throw convertRmiAccessException(ex, invocation.getMethod());</span>
+			}
+<span class="nc" id="L373">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L374">				throw ex.getTargetException();</span>
+			}
+<span class="nc" id="L376">			catch (Throwable ex) {</span>
+<span class="nc" id="L377">				throw new RemoteInvocationFailureException(&quot;Invocation of method [&quot; + invocation.getMethod() +</span>
+<span class="nc" id="L378">						&quot;] failed in RMI service [&quot; + getJndiName() + &quot;]&quot;, ex);</span>
+			}
+		}
+		else {
+			// traditional RMI stub
+			try {
+<span class="nc" id="L384">				return RmiClientInterceptorUtils.invokeRemoteMethod(invocation, stub);</span>
+			}
+<span class="nc" id="L386">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L387">				Throwable targetEx = ex.getTargetException();</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">				if (targetEx instanceof RemoteException) {</span>
+<span class="nc" id="L389">					throw convertRmiAccessException((RemoteException) targetEx, invocation.getMethod());</span>
+				}
+				else {
+<span class="nc" id="L392">					throw targetEx;</span>
+				}
+			}
+		}
+	}
+
+	/**
+	 * Apply the given AOP method invocation to the given {@link RmiInvocationHandler}.
+	 * &lt;p&gt;The default implementation delegates to {@link #createRemoteInvocation}.
+	 * @param methodInvocation the current AOP method invocation
+	 * @param invocationHandler the RmiInvocationHandler to apply the invocation to
+	 * @return the invocation result
+	 * @throws RemoteException in case of communication errors
+	 * @throws NoSuchMethodException if the method name could not be resolved
+	 * @throws IllegalAccessException if the method could not be accessed
+	 * @throws InvocationTargetException if the method invocation resulted in an exception
+	 * @see org.springframework.remoting.support.RemoteInvocation
+	 */
+	protected Object doInvoke(MethodInvocation methodInvocation, RmiInvocationHandler invocationHandler)
+			throws RemoteException, NoSuchMethodException, IllegalAccessException, InvocationTargetException {
+
+<span class="nc bnc" id="L413" title="All 2 branches missed.">		if (AopUtils.isToStringMethod(methodInvocation.getMethod())) {</span>
+<span class="nc" id="L414">			return &quot;RMI invoker proxy for service URL [&quot; + getJndiName() + &quot;]&quot;;</span>
+		}
+
+<span class="nc" id="L417">		return invocationHandler.invoke(createRemoteInvocation(methodInvocation));</span>
+	}
+
+	/**
+	 * Create a new RemoteInvocation object for the given AOP method invocation.
+	 * &lt;p&gt;The default implementation delegates to the configured
+	 * {@link #setRemoteInvocationFactory RemoteInvocationFactory}.
+	 * This can be overridden in subclasses in order to provide custom RemoteInvocation
+	 * subclasses, containing additional invocation parameters (e.g. user credentials).
+	 * &lt;p&gt;Note that it is preferable to build a custom RemoteInvocationFactory
+	 * as a reusable strategy, instead of overriding this method.
+	 * @param methodInvocation the current AOP method invocation
+	 * @return the RemoteInvocation object
+	 * @see RemoteInvocationFactory#createRemoteInvocation
+	 */
+	protected RemoteInvocation createRemoteInvocation(MethodInvocation methodInvocation) {
+<span class="nc" id="L433">		return getRemoteInvocationFactory().createRemoteInvocation(methodInvocation);</span>
+	}
+
+	/**
+	 * Convert the given RMI RemoteException that happened during remote access
+	 * to Spring's RemoteAccessException if the method signature does not declare
+	 * RemoteException. Else, return the original RemoteException.
+	 * @param method the invoked method
+	 * @param ex the RemoteException that happened
+	 * @return the exception to be thrown to the caller
+	 */
+	private Exception convertRmiAccessException(RemoteException ex, Method method) {
+<span class="nc" id="L445">		return RmiClientInterceptorUtils.convertRmiAccessException(method, ex, isConnectFailure(ex), getJndiName());</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,373 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PersistenceUnitReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.jpa.persistenceunit</a> &gt; <span class="el_source">PersistenceUnitReader.java</span></div><h1>PersistenceUnitReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.jpa.persistenceunit;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import java.util.LinkedList;
+import java.util.List;
+import javax.persistence.SharedCacheMode;
+import javax.persistence.ValidationMode;
+import javax.persistence.spi.PersistenceUnitTransactionType;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.xml.sax.ErrorHandler;
+import org.xml.sax.SAXException;
+
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.jdbc.datasource.lookup.DataSourceLookup;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ResourceUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.util.xml.DomUtils;
+import org.springframework.util.xml.SimpleSaxErrorHandler;
+
+/**
+ * Internal helper class for reading JPA-compliant {@code persistence.xml} files.
+ *
+ * @author Costin Leau
+ * @author Juergen Hoeller
+ * @since 2.0
+ */
+final class PersistenceUnitReader {
+
+	private static final String PERSISTENCE_VERSION = &quot;version&quot;;
+
+	private static final String PERSISTENCE_UNIT = &quot;persistence-unit&quot;;
+
+	private static final String UNIT_NAME = &quot;name&quot;;
+
+	private static final String MAPPING_FILE_NAME = &quot;mapping-file&quot;;
+
+	private static final String JAR_FILE_URL = &quot;jar-file&quot;;
+
+	private static final String MANAGED_CLASS_NAME = &quot;class&quot;;
+
+	private static final String PROPERTIES = &quot;properties&quot;;
+
+	private static final String PROVIDER = &quot;provider&quot;;
+
+	private static final String TRANSACTION_TYPE = &quot;transaction-type&quot;;
+
+	private static final String JTA_DATA_SOURCE = &quot;jta-data-source&quot;;
+
+	private static final String NON_JTA_DATA_SOURCE = &quot;non-jta-data-source&quot;;
+
+	private static final String EXCLUDE_UNLISTED_CLASSES = &quot;exclude-unlisted-classes&quot;;
+
+	private static final String SHARED_CACHE_MODE = &quot;shared-cache-mode&quot;;
+
+	private static final String VALIDATION_MODE = &quot;validation-mode&quot;;
+
+	private static final String META_INF = &quot;META-INF&quot;;
+
+
+<span class="fc" id="L88">	private static final Log logger = LogFactory.getLog(PersistenceUnitReader.class);</span>
+
+	private final ResourcePatternResolver resourcePatternResolver;
+
+	private final DataSourceLookup dataSourceLookup;
+
+
+	/**
+	 * Create a new PersistenceUnitReader.
+	 * @param resourcePatternResolver the ResourcePatternResolver to use for loading resources
+	 * @param dataSourceLookup the DataSourceLookup to resolve DataSource names in
+	 * {@code persistence.xml} files against
+	 */
+<span class="fc" id="L101">	public PersistenceUnitReader(ResourcePatternResolver resourcePatternResolver, DataSourceLookup dataSourceLookup) {</span>
+<span class="fc" id="L102">		Assert.notNull(resourcePatternResolver, &quot;ResourceLoader must not be null&quot;);</span>
+<span class="fc" id="L103">		Assert.notNull(dataSourceLookup, &quot;DataSourceLookup must not be null&quot;);</span>
+<span class="fc" id="L104">		this.resourcePatternResolver = resourcePatternResolver;</span>
+<span class="fc" id="L105">		this.dataSourceLookup = dataSourceLookup;</span>
+<span class="fc" id="L106">	}</span>
+
+
+	/**
+	 * Parse and build all persistence unit infos defined in the specified XML file(s).
+	 * @param persistenceXmlLocation the resource location (can be a pattern)
+	 * @return the resulting PersistenceUnitInfo instances
+	 */
+	public SpringPersistenceUnitInfo[] readPersistenceUnitInfos(String persistenceXmlLocation) {
+<span class="fc" id="L115">		return readPersistenceUnitInfos(new String[] {persistenceXmlLocation});</span>
+	}
+
+	/**
+	 * Parse and build all persistence unit infos defined in the given XML files.
+	 * @param persistenceXmlLocations the resource locations (can be patterns)
+	 * @return the resulting PersistenceUnitInfo instances
+	 */
+	public SpringPersistenceUnitInfo[] readPersistenceUnitInfos(String[] persistenceXmlLocations) {
+<span class="fc" id="L124">		ErrorHandler handler = new SimpleSaxErrorHandler(logger);</span>
+<span class="fc" id="L125">		List&lt;SpringPersistenceUnitInfo&gt; infos = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L126">		String resourceLocation = null;</span>
+		try {
+<span class="fc bfc" id="L128" title="All 2 branches covered.">			for (String location : persistenceXmlLocations) {</span>
+<span class="fc" id="L129">				Resource[] resources = this.resourcePatternResolver.getResources(location);</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">				for (Resource resource : resources) {</span>
+<span class="fc" id="L131">					resourceLocation = resource.toString();</span>
+<span class="fc" id="L132">					InputStream stream = resource.getInputStream();</span>
+					try {
+<span class="fc" id="L134">						Document document = buildDocument(handler, stream);</span>
+<span class="fc" id="L135">						parseDocument(resource, document, infos);</span>
+					}
+					finally {
+<span class="fc" id="L138">						stream.close();</span>
+					}
+				}
+			}
+		}
+<span class="nc" id="L143">		catch (IOException ex) {</span>
+<span class="nc" id="L144">			throw new IllegalArgumentException(&quot;Cannot parse persistence unit from &quot; + resourceLocation, ex);</span>
+		}
+<span class="nc" id="L146">		catch (SAXException ex) {</span>
+<span class="nc" id="L147">			throw new IllegalArgumentException(&quot;Invalid XML in persistence unit from &quot; + resourceLocation, ex);</span>
+		}
+<span class="nc" id="L149">		catch (ParserConfigurationException ex) {</span>
+<span class="nc" id="L150">			throw new IllegalArgumentException(&quot;Internal error parsing persistence unit from &quot; + resourceLocation);</span>
+<span class="fc" id="L151">		}</span>
+
+<span class="fc" id="L153">		return infos.toArray(new SpringPersistenceUnitInfo[0]);</span>
+	}
+
+
+	/**
+	 * Validate the given stream and return a valid DOM document for parsing.
+	 */
+	protected Document buildDocument(ErrorHandler handler, InputStream stream)
+			throws ParserConfigurationException, SAXException, IOException {
+
+<span class="fc" id="L163">		DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();</span>
+<span class="fc" id="L164">		dbf.setNamespaceAware(true);</span>
+<span class="fc" id="L165">		DocumentBuilder parser = dbf.newDocumentBuilder();</span>
+<span class="fc" id="L166">		parser.setErrorHandler(handler);</span>
+<span class="fc" id="L167">		return parser.parse(stream);</span>
+	}
+
+
+	/**
+	 * Parse the validated document and add entries to the given unit info list.
+	 */
+	protected List&lt;SpringPersistenceUnitInfo&gt; parseDocument(
+			Resource resource, Document document, List&lt;SpringPersistenceUnitInfo&gt; infos) throws IOException {
+
+<span class="fc" id="L177">		Element persistence = document.getDocumentElement();</span>
+<span class="fc" id="L178">		String version = persistence.getAttribute(PERSISTENCE_VERSION);</span>
+<span class="fc" id="L179">		URL rootUrl = determinePersistenceUnitRootUrl(resource);</span>
+
+<span class="fc" id="L181">		List&lt;Element&gt; units = DomUtils.getChildElementsByTagName(persistence, PERSISTENCE_UNIT);</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">		for (Element unit : units) {</span>
+<span class="fc" id="L183">			infos.add(parsePersistenceUnitInfo(unit, version, rootUrl));</span>
+<span class="fc" id="L184">		}</span>
+
+<span class="fc" id="L186">		return infos;</span>
+	}
+
+	/**
+	 * Parse the unit info DOM element.
+	 */
+	protected SpringPersistenceUnitInfo parsePersistenceUnitInfo(
+			Element persistenceUnit, String version, @Nullable URL rootUrl) throws IOException {
+
+<span class="fc" id="L195">		SpringPersistenceUnitInfo unitInfo = new SpringPersistenceUnitInfo();</span>
+
+		// set JPA version (1.0 or 2.0)
+<span class="fc" id="L198">		unitInfo.setPersistenceXMLSchemaVersion(version);</span>
+
+		// set persistence unit root URL
+<span class="fc" id="L201">		unitInfo.setPersistenceUnitRootUrl(rootUrl);</span>
+
+		// set unit name
+<span class="fc" id="L204">		unitInfo.setPersistenceUnitName(persistenceUnit.getAttribute(UNIT_NAME).trim());</span>
+
+		// set transaction type
+<span class="fc" id="L207">		String txType = persistenceUnit.getAttribute(TRANSACTION_TYPE).trim();</span>
+<span class="fc bfc" id="L208" title="All 2 branches covered.">		if (StringUtils.hasText(txType)) {</span>
+<span class="fc" id="L209">			unitInfo.setTransactionType(PersistenceUnitTransactionType.valueOf(txType));</span>
+		}
+
+		// evaluate data sources
+<span class="fc" id="L213">		String jtaDataSource = DomUtils.getChildElementValueByTagName(persistenceUnit, JTA_DATA_SOURCE);</span>
+<span class="fc bfc" id="L214" title="All 2 branches covered.">		if (StringUtils.hasText(jtaDataSource)) {</span>
+<span class="fc" id="L215">			unitInfo.setJtaDataSource(this.dataSourceLookup.getDataSource(jtaDataSource.trim()));</span>
+		}
+
+<span class="fc" id="L218">		String nonJtaDataSource = DomUtils.getChildElementValueByTagName(persistenceUnit, NON_JTA_DATA_SOURCE);</span>
+<span class="fc bfc" id="L219" title="All 2 branches covered.">		if (StringUtils.hasText(nonJtaDataSource)) {</span>
+<span class="fc" id="L220">			unitInfo.setNonJtaDataSource(this.dataSourceLookup.getDataSource(nonJtaDataSource.trim()));</span>
+		}
+
+		// provider
+<span class="fc" id="L224">		String provider = DomUtils.getChildElementValueByTagName(persistenceUnit, PROVIDER);</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		if (StringUtils.hasText(provider)) {</span>
+<span class="fc" id="L226">			unitInfo.setPersistenceProviderClassName(provider.trim());</span>
+		}
+
+		// exclude unlisted classes
+<span class="fc" id="L230">		Element excludeUnlistedClasses = DomUtils.getChildElementByTagName(persistenceUnit, EXCLUDE_UNLISTED_CLASSES);</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">		if (excludeUnlistedClasses != null) {</span>
+<span class="fc" id="L232">			String excludeText = DomUtils.getTextValue(excludeUnlistedClasses);</span>
+<span class="fc bfc" id="L233" title="All 4 branches covered.">			unitInfo.setExcludeUnlistedClasses(!StringUtils.hasText(excludeText) || Boolean.valueOf(excludeText));</span>
+		}
+
+		// set JPA 2.0 shared cache mode
+<span class="fc" id="L237">		String cacheMode = DomUtils.getChildElementValueByTagName(persistenceUnit, SHARED_CACHE_MODE);</span>
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">		if (StringUtils.hasText(cacheMode)) {</span>
+<span class="nc" id="L239">			unitInfo.setSharedCacheMode(SharedCacheMode.valueOf(cacheMode));</span>
+		}
+
+		// set JPA 2.0 validation mode
+<span class="fc" id="L243">		String validationMode = DomUtils.getChildElementValueByTagName(persistenceUnit, VALIDATION_MODE);</span>
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">		if (StringUtils.hasText(validationMode)) {</span>
+<span class="nc" id="L245">			unitInfo.setValidationMode(ValidationMode.valueOf(validationMode));</span>
+		}
+
+<span class="fc" id="L248">		parseProperties(persistenceUnit, unitInfo);</span>
+<span class="fc" id="L249">		parseManagedClasses(persistenceUnit, unitInfo);</span>
+<span class="fc" id="L250">		parseMappingFiles(persistenceUnit, unitInfo);</span>
+<span class="fc" id="L251">		parseJarFiles(persistenceUnit, unitInfo);</span>
+
+<span class="fc" id="L253">		return unitInfo;</span>
+	}
+
+	/**
+	 * Parse the {@code property} XML elements.
+	 */
+	protected void parseProperties(Element persistenceUnit, SpringPersistenceUnitInfo unitInfo) {
+<span class="fc" id="L260">		Element propRoot = DomUtils.getChildElementByTagName(persistenceUnit, PROPERTIES);</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">		if (propRoot == null) {</span>
+<span class="fc" id="L262">			return;</span>
+		}
+<span class="fc" id="L264">		List&lt;Element&gt; properties = DomUtils.getChildElementsByTagName(propRoot, &quot;property&quot;);</span>
+<span class="fc bfc" id="L265" title="All 2 branches covered.">		for (Element property : properties) {</span>
+<span class="fc" id="L266">			String name = property.getAttribute(&quot;name&quot;);</span>
+<span class="fc" id="L267">			String value = property.getAttribute(&quot;value&quot;);</span>
+<span class="fc" id="L268">			unitInfo.addProperty(name, value);</span>
+<span class="fc" id="L269">		}</span>
+<span class="fc" id="L270">	}</span>
+
+	/**
+	 * Parse the {@code class} XML elements.
+	 */
+	protected void parseManagedClasses(Element persistenceUnit, SpringPersistenceUnitInfo unitInfo) {
+<span class="fc" id="L276">		List&lt;Element&gt; classes = DomUtils.getChildElementsByTagName(persistenceUnit, MANAGED_CLASS_NAME);</span>
+<span class="fc bfc" id="L277" title="All 2 branches covered.">		for (Element element : classes) {</span>
+<span class="fc" id="L278">			String value = DomUtils.getTextValue(element).trim();</span>
+<span class="pc bpc" id="L279" title="1 of 2 branches missed.">			if (StringUtils.hasText(value)) {</span>
+<span class="fc" id="L280">				unitInfo.addManagedClassName(value);</span>
+			}
+<span class="fc" id="L282">		}</span>
+<span class="fc" id="L283">	}</span>
+
+	/**
+	 * Parse the {@code mapping-file} XML elements.
+	 */
+	protected void parseMappingFiles(Element persistenceUnit, SpringPersistenceUnitInfo unitInfo) {
+<span class="fc" id="L289">		List&lt;Element&gt; files = DomUtils.getChildElementsByTagName(persistenceUnit, MAPPING_FILE_NAME);</span>
+<span class="fc bfc" id="L290" title="All 2 branches covered.">		for (Element element : files) {</span>
+<span class="fc" id="L291">			String value = DomUtils.getTextValue(element).trim();</span>
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">			if (StringUtils.hasText(value)) {</span>
+<span class="fc" id="L293">				unitInfo.addMappingFileName(value);</span>
+			}
+<span class="fc" id="L295">		}</span>
+<span class="fc" id="L296">	}</span>
+
+	/**
+	 * Parse the {@code jar-file} XML elements.
+	 */
+	protected void parseJarFiles(Element persistenceUnit, SpringPersistenceUnitInfo unitInfo) throws IOException {
+<span class="fc" id="L302">		List&lt;Element&gt; jars = DomUtils.getChildElementsByTagName(persistenceUnit, JAR_FILE_URL);</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">		for (Element element : jars) {</span>
+<span class="fc" id="L304">			String value = DomUtils.getTextValue(element).trim();</span>
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">			if (StringUtils.hasText(value)) {</span>
+<span class="fc" id="L306">				Resource[] resources = this.resourcePatternResolver.getResources(value);</span>
+<span class="fc" id="L307">				boolean found = false;</span>
+<span class="fc bfc" id="L308" title="All 2 branches covered.">				for (Resource resource : resources) {</span>
+<span class="fc bfc" id="L309" title="All 2 branches covered.">					if (resource.exists()) {</span>
+<span class="fc" id="L310">						found = true;</span>
+<span class="fc" id="L311">						unitInfo.addJarFileUrl(resource.getURL());</span>
+					}
+				}
+<span class="fc bfc" id="L314" title="All 2 branches covered.">				if (!found) {</span>
+					// relative to the persistence unit root, according to the JPA spec
+<span class="fc" id="L316">					URL rootUrl = unitInfo.getPersistenceUnitRootUrl();</span>
+<span class="fc bfc" id="L317" title="All 2 branches covered.">					if (rootUrl != null) {</span>
+<span class="fc" id="L318">						unitInfo.addJarFileUrl(new URL(rootUrl, value));</span>
+					}
+					else {
+<span class="fc" id="L321">						logger.warn(&quot;Cannot resolve jar-file entry [&quot; + value + &quot;] in persistence unit '&quot; +</span>
+<span class="fc" id="L322">								unitInfo.getPersistenceUnitName() + &quot;' without root URL&quot;);</span>
+					}
+				}
+			}
+<span class="fc" id="L326">		}</span>
+<span class="fc" id="L327">	}</span>
+
+
+	/**
+	 * Determine the persistence unit root URL based on the given resource
+	 * (which points to the {@code persistence.xml} file we're reading).
+	 * @param resource the resource to check
+	 * @return the corresponding persistence unit root URL
+	 * @throws IOException if the checking failed
+	 */
+	@Nullable
+	static URL determinePersistenceUnitRootUrl(Resource resource) throws IOException {
+<span class="fc" id="L339">		URL originalURL = resource.getURL();</span>
+
+		// If we get an archive, simply return the jar URL (section 6.2 from the JPA spec)
+<span class="fc bfc" id="L342" title="All 2 branches covered.">		if (ResourceUtils.isJarURL(originalURL)) {</span>
+<span class="fc" id="L343">			return ResourceUtils.extractJarFileURL(originalURL);</span>
+		}
+
+		// Check META-INF folder
+<span class="fc" id="L347">		String urlToString = originalURL.toExternalForm();</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">		if (!urlToString.contains(META_INF)) {</span>
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L350">				logger.info(resource.getFilename() +</span>
+						&quot; should be located inside META-INF directory; cannot determine persistence unit root URL for &quot; +
+						resource);
+			}
+<span class="fc" id="L354">			return null;</span>
+		}
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">		if (urlToString.lastIndexOf(META_INF) == urlToString.lastIndexOf('/') - (1 + META_INF.length())) {</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L358">				logger.info(resource.getFilename() +</span>
+						&quot; is not located in the root of META-INF directory; cannot determine persistence unit root URL for &quot; +
+						resource);
+			}
+<span class="nc" id="L362">			return null;</span>
+		}
+
+<span class="fc" id="L365">		String persistenceUnitRoot = urlToString.substring(0, urlToString.lastIndexOf(META_INF));</span>
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">		if (persistenceUnitRoot.endsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L367">			persistenceUnitRoot = persistenceUnitRoot.substring(0, persistenceUnitRoot.length() - 1);</span>
+		}
+<span class="fc" id="L369">		return new URL(persistenceUnitRoot);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

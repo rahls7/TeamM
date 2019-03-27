@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HttpWebHandlerAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.server.adapter</a> &gt; <span class="el_source">HttpWebHandlerAdapter.java</span></div><h1>HttpWebHandlerAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.server.adapter;
+
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import reactor.core.publisher.Mono;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.NestedExceptionUtils;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.codec.LoggingCodecSupport;
+import org.springframework.http.codec.ServerCodecConfigurer;
+import org.springframework.http.server.reactive.HttpHandler;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.WebHandler;
+import org.springframework.web.server.handler.WebHandlerDecorator;
+import org.springframework.web.server.i18n.AcceptHeaderLocaleContextResolver;
+import org.springframework.web.server.i18n.LocaleContextResolver;
+import org.springframework.web.server.session.DefaultWebSessionManager;
+import org.springframework.web.server.session.WebSessionManager;
+
+/**
+ * Default adapter of {@link WebHandler} to the {@link HttpHandler} contract.
+ *
+ * &lt;p&gt;By default creates and configures a {@link DefaultServerWebExchange} and
+ * then invokes the target {@code WebHandler}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @since 5.0
+ */
+public class HttpWebHandlerAdapter extends WebHandlerDecorator implements HttpHandler {
+
+	/**
+	 * Dedicated log category for disconnected client exceptions.
+	 * &lt;p&gt;Servlet containers dn't expose a a client disconnected callback, see
+	 * &lt;a href=&quot;https://github.com/eclipse-ee4j/servlet-api/issues/44&quot;&gt;eclipse-ee4j/servlet-api#44&lt;/a&gt;.
+	 * &lt;p&gt;To avoid filling logs with unnecessary stack traces, we make an
+	 * effort to identify such network failures on a per-server basis, and then
+	 * log under a separate log category a simple one-line message at DEBUG level
+	 * or a full stack trace only at TRACE level.
+	 */
+	private static final String DISCONNECTED_CLIENT_LOG_CATEGORY =
+			&quot;org.springframework.web.server.DisconnectedClient&quot;;
+
+	 // Similar declaration exists in AbstractSockJsSession..
+<span class="fc" id="L73">	private static final Set&lt;String&gt; DISCONNECTED_CLIENT_EXCEPTIONS = new HashSet&lt;&gt;(</span>
+<span class="fc" id="L74">			Arrays.asList(&quot;AbortedException&quot;, &quot;ClientAbortException&quot;, &quot;EOFException&quot;, &quot;EofException&quot;));</span>
+
+
+<span class="fc" id="L77">	private static final Log logger = LogFactory.getLog(HttpWebHandlerAdapter.class);</span>
+
+<span class="fc" id="L79">	private static final Log lostClientLogger = LogFactory.getLog(DISCONNECTED_CLIENT_LOG_CATEGORY);</span>
+
+
+<span class="fc" id="L82">	private WebSessionManager sessionManager = new DefaultWebSessionManager();</span>
+
+<span class="fc" id="L84">	private ServerCodecConfigurer codecConfigurer = ServerCodecConfigurer.create();</span>
+
+<span class="fc" id="L86">	private LocaleContextResolver localeContextResolver = new AcceptHeaderLocaleContextResolver();</span>
+
+	@Nullable
+	private ForwardedHeaderTransformer forwardedHeaderTransformer;
+
+	@Nullable
+	private ApplicationContext applicationContext;
+
+	/** Whether to log potentially sensitive info (form data at DEBUG, headers at TRACE). */
+<span class="fc" id="L95">	private boolean enableLoggingRequestDetails = false;</span>
+
+
+	public HttpWebHandlerAdapter(WebHandler delegate) {
+<span class="fc" id="L99">		super(delegate);</span>
+<span class="fc" id="L100">	}</span>
+
+
+	/**
+	 * Configure a custom {@link WebSessionManager} to use for managing web
+	 * sessions. The provided instance is set on each created
+	 * {@link DefaultServerWebExchange}.
+	 * &lt;p&gt;By default this is set to {@link DefaultWebSessionManager}.
+	 * @param sessionManager the session manager to use
+	 */
+	public void setSessionManager(WebSessionManager sessionManager) {
+<span class="fc" id="L111">		Assert.notNull(sessionManager, &quot;WebSessionManager must not be null&quot;);</span>
+<span class="fc" id="L112">		this.sessionManager = sessionManager;</span>
+<span class="fc" id="L113">	}</span>
+
+	/**
+	 * Return the configured {@link WebSessionManager}.
+	 */
+	public WebSessionManager getSessionManager() {
+<span class="nc" id="L119">		return this.sessionManager;</span>
+	}
+
+	/**
+	 * Configure a custom {@link ServerCodecConfigurer}. The provided instance is set on
+	 * each created {@link DefaultServerWebExchange}.
+	 * &lt;p&gt;By default this is set to {@link ServerCodecConfigurer#create()}.
+	 * @param codecConfigurer the codec configurer to use
+	 */
+	public void setCodecConfigurer(ServerCodecConfigurer codecConfigurer) {
+<span class="nc" id="L129">		Assert.notNull(codecConfigurer, &quot;ServerCodecConfigurer is required&quot;);</span>
+<span class="nc" id="L130">		this.codecConfigurer = codecConfigurer;</span>
+
+<span class="nc" id="L132">		this.enableLoggingRequestDetails = false;</span>
+<span class="nc" id="L133">		this.codecConfigurer.getReaders().stream()</span>
+<span class="nc" id="L134">				.filter(LoggingCodecSupport.class::isInstance)</span>
+<span class="nc" id="L135">				.forEach(reader -&gt; {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">					if (((LoggingCodecSupport) reader).isEnableLoggingRequestDetails()) {</span>
+<span class="nc" id="L137">						this.enableLoggingRequestDetails = true;</span>
+					}
+<span class="nc" id="L139">				});</span>
+<span class="nc" id="L140">	}</span>
+
+	/**
+	 * Return the configured {@link ServerCodecConfigurer}.
+	 */
+	public ServerCodecConfigurer getCodecConfigurer() {
+<span class="fc" id="L146">		return this.codecConfigurer;</span>
+	}
+
+	/**
+	 * Configure a custom {@link LocaleContextResolver}. The provided instance is set on
+	 * each created {@link DefaultServerWebExchange}.
+	 * &lt;p&gt;By default this is set to
+	 * {@link org.springframework.web.server.i18n.AcceptHeaderLocaleContextResolver}.
+	 * @param resolver the locale context resolver to use
+	 */
+	public void setLocaleContextResolver(LocaleContextResolver resolver) {
+<span class="nc" id="L157">		Assert.notNull(resolver, &quot;LocaleContextResolver is required&quot;);</span>
+<span class="nc" id="L158">		this.localeContextResolver = resolver;</span>
+<span class="nc" id="L159">	}</span>
+
+	/**
+	 * Return the configured {@link LocaleContextResolver}.
+	 */
+	public LocaleContextResolver getLocaleContextResolver() {
+<span class="fc" id="L165">		return this.localeContextResolver;</span>
+	}
+
+	/**
+	 * Enable processing of forwarded headers, either extracting and removing,
+	 * or remove only.
+	 * &lt;p&gt;By default this is not set.
+	 * @param transformer the transformer to use
+	 * @since 5.1
+	 */
+	public void setForwardedHeaderTransformer(ForwardedHeaderTransformer transformer) {
+<span class="nc" id="L176">		Assert.notNull(transformer, &quot;ForwardedHeaderTransformer is required&quot;);</span>
+<span class="nc" id="L177">		this.forwardedHeaderTransformer = transformer;</span>
+<span class="nc" id="L178">	}</span>
+
+	/**
+	 * Return the configured {@link ForwardedHeaderTransformer}.
+	 * @since 5.1
+	 */
+	@Nullable
+	public ForwardedHeaderTransformer getForwardedHeaderTransformer() {
+<span class="nc" id="L186">		return this.forwardedHeaderTransformer;</span>
+	}
+
+	/**
+	 * Configure the {@code ApplicationContext} associated with the web application,
+	 * if it was initialized with one via
+	 * {@link org.springframework.web.server.adapter.WebHttpHandlerBuilder#applicationContext(ApplicationContext)}.
+	 * @param applicationContext the context
+	 * @since 5.0.3
+	 */
+	public void setApplicationContext(ApplicationContext applicationContext) {
+<span class="fc" id="L197">		this.applicationContext = applicationContext;</span>
+<span class="fc" id="L198">	}</span>
+
+	/**
+	 * Return the configured {@code ApplicationContext}, if any.
+	 * @since 5.0.3
+	 */
+	@Nullable
+	public ApplicationContext getApplicationContext() {
+<span class="fc" id="L206">		return this.applicationContext;</span>
+	}
+
+	/**
+	 * This method must be invoked after all properties have been set to
+	 * complete initialization.
+	 */
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">			String value = this.enableLoggingRequestDetails ?</span>
+					&quot;shown which may lead to unsafe logging of potentially sensitive data&quot; :
+					&quot;masked to prevent unsafe logging of potentially sensitive data&quot;;
+<span class="fc" id="L218">			logger.debug(&quot;enableLoggingRequestDetails='&quot; + this.enableLoggingRequestDetails +</span>
+					&quot;': form data and headers will be &quot; + value);
+		}
+<span class="fc" id="L221">	}</span>
+
+
+	@Override
+	public Mono&lt;Void&gt; handle(ServerHttpRequest request, ServerHttpResponse response) {
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">		if (this.forwardedHeaderTransformer != null) {</span>
+<span class="nc" id="L227">			request = this.forwardedHeaderTransformer.apply(request);</span>
+		}
+<span class="fc" id="L229">		ServerWebExchange exchange = createExchange(request, response);</span>
+
+<span class="fc" id="L231">		LogFormatUtils.traceDebug(logger, traceOn -&gt;</span>
+<span class="fc" id="L232">				exchange.getLogPrefix() + formatRequest(exchange.getRequest()) +</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">						(traceOn ? &quot;, headers=&quot; + formatHeaders(exchange.getRequest().getHeaders()) : &quot;&quot;));</span>
+
+<span class="fc" id="L235">		return getDelegate().handle(exchange)</span>
+<span class="fc" id="L236">				.doOnSuccess(aVoid -&gt; logResponse(exchange))</span>
+<span class="fc" id="L237">				.onErrorResume(ex -&gt; handleUnresolvedError(exchange, ex))</span>
+<span class="fc" id="L238">				.then(Mono.defer(response::setComplete));</span>
+	}
+
+	protected ServerWebExchange createExchange(ServerHttpRequest request, ServerHttpResponse response) {
+<span class="fc" id="L242">		return new DefaultServerWebExchange(request, response, this.sessionManager,</span>
+<span class="fc" id="L243">				getCodecConfigurer(), getLocaleContextResolver(), this.applicationContext);</span>
+	}
+
+	private String formatRequest(ServerHttpRequest request) {
+<span class="fc" id="L247">		String rawQuery = request.getURI().getRawQuery();</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">		String query = StringUtils.hasText(rawQuery) ? &quot;?&quot; + rawQuery : &quot;&quot;;</span>
+<span class="fc" id="L249">		return &quot;HTTP &quot; + request.getMethod() + &quot; \&quot;&quot; + request.getPath() + query + &quot;\&quot;&quot;;</span>
+	}
+
+	private void logResponse(ServerWebExchange exchange) {
+<span class="fc" id="L253">		LogFormatUtils.traceDebug(logger, traceOn -&gt; {</span>
+<span class="fc" id="L254">			HttpStatus status = exchange.getResponse().getStatusCode();</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">			return exchange.getLogPrefix() + &quot;Completed &quot; + (status != null ? status : &quot;200 OK&quot;) +</span>
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">					(traceOn ? &quot;, headers=&quot; + formatHeaders(exchange.getResponse().getHeaders()) : &quot;&quot;);</span>
+		});
+<span class="fc" id="L258">	}</span>
+
+	private String formatHeaders(HttpHeaders responseHeaders) {
+<span class="nc bnc" id="L261" title="All 2 branches missed.">		return this.enableLoggingRequestDetails ?</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">				responseHeaders.toString() : responseHeaders.isEmpty() ? &quot;{}&quot; : &quot;{masked}&quot;;</span>
+	}
+
+	private Mono&lt;Void&gt; handleUnresolvedError(ServerWebExchange exchange, Throwable ex) {
+<span class="fc" id="L266">		ServerHttpRequest request = exchange.getRequest();</span>
+<span class="fc" id="L267">		ServerHttpResponse response = exchange.getResponse();</span>
+<span class="fc" id="L268">		String logPrefix = exchange.getLogPrefix();</span>
+
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">		if (isDisconnectedClientError(ex)) {</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">			if (lostClientLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L272">				lostClientLogger.trace(logPrefix + &quot;Client went away&quot;, ex);</span>
+			}
+<span class="nc bnc" id="L274" title="All 2 branches missed.">			else if (lostClientLogger.isDebugEnabled()) {</span>
+<span class="nc" id="L275">				lostClientLogger.debug(logPrefix + &quot;Client went away: &quot; + ex +</span>
+						&quot; (stacktrace at TRACE level for '&quot; + DISCONNECTED_CLIENT_LOG_CATEGORY + &quot;')&quot;);
+			}
+<span class="nc" id="L278">			return Mono.empty();</span>
+		}
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">		else if (response.setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR)) {</span>
+<span class="fc" id="L281">			logger.error(logPrefix + &quot;500 Server Error for &quot; + formatRequest(request), ex);</span>
+<span class="fc" id="L282">			return Mono.empty();</span>
+		}
+		else {
+			// After the response is committed, propagate errors to the server...
+<span class="nc" id="L286">			logger.error(logPrefix + &quot;Error [&quot; + ex + &quot;] for &quot; + formatRequest(request) +</span>
+<span class="nc" id="L287">					&quot;, but ServerHttpResponse already committed (&quot; + response.getStatusCode() + &quot;)&quot;);</span>
+<span class="nc" id="L288">			return Mono.error(ex);</span>
+		}
+	}
+
+	private boolean isDisconnectedClientError(Throwable ex) {
+<span class="fc" id="L293">		String message = NestedExceptionUtils.getMostSpecificCause(ex).getMessage();</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">		if (message != null) {</span>
+<span class="fc" id="L295">			String text = message.toLowerCase();</span>
+<span class="pc bpc" id="L296" title="2 of 4 branches missed.">			if (text.contains(&quot;broken pipe&quot;) || text.contains(&quot;connection reset by peer&quot;)) {</span>
+<span class="nc" id="L297">				return true;</span>
+			}
+		}
+<span class="fc" id="L300">		return DISCONNECTED_CLIENT_EXCEPTIONS.contains(ex.getClass().getSimpleName());</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

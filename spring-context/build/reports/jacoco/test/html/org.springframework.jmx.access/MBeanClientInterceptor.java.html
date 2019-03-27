@@ -1,0 +1,698 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MBeanClientInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jmx.access</a> &gt; <span class="el_source">MBeanClientInterceptor.java</span></div><h1>MBeanClientInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jmx.access;
+
+import java.beans.PropertyDescriptor;
+import java.io.IOException;
+import java.lang.reflect.Array;
+import java.lang.reflect.Method;
+import java.net.MalformedURLException;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import javax.management.Attribute;
+import javax.management.InstanceNotFoundException;
+import javax.management.IntrospectionException;
+import javax.management.JMException;
+import javax.management.JMX;
+import javax.management.MBeanAttributeInfo;
+import javax.management.MBeanException;
+import javax.management.MBeanInfo;
+import javax.management.MBeanOperationInfo;
+import javax.management.MBeanServerConnection;
+import javax.management.MBeanServerInvocationHandler;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+import javax.management.OperationsException;
+import javax.management.ReflectionException;
+import javax.management.RuntimeErrorException;
+import javax.management.RuntimeMBeanException;
+import javax.management.RuntimeOperationsException;
+import javax.management.openmbean.CompositeData;
+import javax.management.openmbean.TabularData;
+import javax.management.remote.JMXServiceURL;
+
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.core.CollectionFactory;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
+import org.springframework.jmx.support.JmxUtils;
+import org.springframework.jmx.support.ObjectNameManager;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link org.aopalliance.intercept.MethodInterceptor} that routes calls to an
+ * MBean running on the supplied {@code MBeanServerConnection}.
+ * Works for both local and remote {@code MBeanServerConnection}s.
+ *
+ * &lt;p&gt;By default, the {@code MBeanClientInterceptor} will connect to the
+ * {@code MBeanServer} and cache MBean metadata at startup. This can
+ * be undesirable when running against a remote {@code MBeanServer}
+ * that may not be running when the application starts. Through setting the
+ * {@link #setConnectOnStartup(boolean) connectOnStartup} property to &quot;false&quot;,
+ * you can defer this process until the first invocation against the proxy.
+ *
+ * &lt;p&gt;This functionality is usually used through {@link MBeanProxyFactoryBean}.
+ * See the javadoc of that class for more information.
+ *
+ * @author Rob Harrop
+ * @author Juergen Hoeller
+ * @since 1.2
+ * @see MBeanProxyFactoryBean
+ * @see #setConnectOnStartup
+ */
+<span class="fc" id="L92">public class MBeanClientInterceptor</span>
+		implements MethodInterceptor, BeanClassLoaderAware, InitializingBean, DisposableBean {
+
+	/** Logger available to subclasses. */
+<span class="fc" id="L96">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private MBeanServerConnection server;
+
+	@Nullable
+	private JMXServiceURL serviceUrl;
+
+	@Nullable
+	private Map&lt;String, ?&gt; environment;
+
+	@Nullable
+	private String agentId;
+
+<span class="fc" id="L110">	private boolean connectOnStartup = true;</span>
+
+<span class="fc" id="L112">	private boolean refreshOnConnectFailure = false;</span>
+
+	@Nullable
+	private ObjectName objectName;
+
+<span class="fc" id="L117">	private boolean useStrictCasing = true;</span>
+
+	@Nullable
+	private Class&lt;?&gt; managementInterface;
+
+<span class="fc" id="L122">	@Nullable</span>
+<span class="fc" id="L123">	private ClassLoader beanClassLoader = ClassUtils.getDefaultClassLoader();</span>
+
+<span class="fc" id="L125">	private final ConnectorDelegate connector = new ConnectorDelegate();</span>
+
+	@Nullable
+	private MBeanServerConnection serverToUse;
+
+	@Nullable
+	private MBeanServerInvocationHandler invocationHandler;
+
+<span class="fc" id="L133">	private Map&lt;String, MBeanAttributeInfo&gt; allowedAttributes = Collections.emptyMap();</span>
+
+<span class="fc" id="L135">	private Map&lt;MethodCacheKey, MBeanOperationInfo&gt; allowedOperations = Collections.emptyMap();</span>
+
+<span class="fc" id="L137">	private final Map&lt;Method, String[]&gt; signatureCache = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L139">	private final Object preparationMonitor = new Object();</span>
+
+
+	/**
+	 * Set the {@code MBeanServerConnection} used to connect to the
+	 * MBean which all invocations are routed to.
+	 */
+	public void setServer(MBeanServerConnection server) {
+<span class="fc" id="L147">		this.server = server;</span>
+<span class="fc" id="L148">	}</span>
+
+	/**
+	 * Set the service URL of the remote {@code MBeanServer}.
+	 */
+	public void setServiceUrl(String url) throws MalformedURLException {
+<span class="nc" id="L154">		this.serviceUrl = new JMXServiceURL(url);</span>
+<span class="nc" id="L155">	}</span>
+
+	/**
+	 * Specify the environment for the JMX connector.
+	 * @see javax.management.remote.JMXConnectorFactory#connect(javax.management.remote.JMXServiceURL, java.util.Map)
+	 */
+	public void setEnvironment(@Nullable Map&lt;String, ?&gt; environment) {
+<span class="nc" id="L162">		this.environment = environment;</span>
+<span class="nc" id="L163">	}</span>
+
+	/**
+	 * Allow Map access to the environment to be set for the connector,
+	 * with the option to add or override specific entries.
+	 * &lt;p&gt;Useful for specifying entries directly, for example via
+	 * &quot;environment[myKey]&quot;. This is particularly useful for
+	 * adding or overriding entries in child bean definitions.
+	 */
+	@Nullable
+	public Map&lt;String, ?&gt; getEnvironment() {
+<span class="nc" id="L174">		return this.environment;</span>
+	}
+
+	/**
+	 * Set the agent id of the {@code MBeanServer} to locate.
+	 * &lt;p&gt;Default is none. If specified, this will result in an
+	 * attempt being made to locate the attendant MBeanServer, unless
+	 * the {@link #setServiceUrl &quot;serviceUrl&quot;} property has been set.
+	 * @see javax.management.MBeanServerFactory#findMBeanServer(String)
+	 * &lt;p&gt;Specifying the empty String indicates the platform MBeanServer.
+	 */
+	public void setAgentId(String agentId) {
+<span class="nc" id="L186">		this.agentId = agentId;</span>
+<span class="nc" id="L187">	}</span>
+
+	/**
+	 * Set whether or not the proxy should connect to the {@code MBeanServer}
+	 * at creation time (&quot;true&quot;) or the first time it is invoked (&quot;false&quot;).
+	 * Default is &quot;true&quot;.
+	 */
+	public void setConnectOnStartup(boolean connectOnStartup) {
+<span class="nc" id="L195">		this.connectOnStartup = connectOnStartup;</span>
+<span class="nc" id="L196">	}</span>
+
+	/**
+	 * Set whether to refresh the MBeanServer connection on connect failure.
+	 * Default is &quot;false&quot;.
+	 * &lt;p&gt;Can be turned on to allow for hot restart of the JMX server,
+	 * automatically reconnecting and retrying in case of an IOException.
+	 */
+	public void setRefreshOnConnectFailure(boolean refreshOnConnectFailure) {
+<span class="nc" id="L205">		this.refreshOnConnectFailure = refreshOnConnectFailure;</span>
+<span class="nc" id="L206">	}</span>
+
+	/**
+	 * Set the {@code ObjectName} of the MBean which calls are routed to,
+	 * as {@code ObjectName} instance or as {@code String}.
+	 */
+	public void setObjectName(Object objectName) throws MalformedObjectNameException {
+<span class="fc" id="L213">		this.objectName = ObjectNameManager.getInstance(objectName);</span>
+<span class="fc" id="L214">	}</span>
+
+	/**
+	 * Set whether to use strict casing for attributes. Enabled by default.
+	 * &lt;p&gt;When using strict casing, a JavaBean property with a getter such as
+	 * {@code getFoo()} translates to an attribute called {@code Foo}.
+	 * With strict casing disabled, {@code getFoo()} would translate to just
+	 * {@code foo}.
+	 */
+	public void setUseStrictCasing(boolean useStrictCasing) {
+<span class="nc" id="L224">		this.useStrictCasing = useStrictCasing;</span>
+<span class="nc" id="L225">	}</span>
+
+	/**
+	 * Set the management interface of the target MBean, exposing bean property
+	 * setters and getters for MBean attributes and conventional Java methods
+	 * for MBean operations.
+	 */
+	public void setManagementInterface(@Nullable Class&lt;?&gt; managementInterface) {
+<span class="fc" id="L233">		this.managementInterface = managementInterface;</span>
+<span class="fc" id="L234">	}</span>
+
+	/**
+	 * Return the management interface of the target MBean,
+	 * or {@code null} if none specified.
+	 */
+	@Nullable
+	protected final Class&lt;?&gt; getManagementInterface() {
+<span class="fc" id="L242">		return this.managementInterface;</span>
+	}
+
+	@Override
+	public void setBeanClassLoader(ClassLoader beanClassLoader) {
+<span class="nc" id="L247">		this.beanClassLoader = beanClassLoader;</span>
+<span class="nc" id="L248">	}</span>
+
+
+	/**
+	 * Prepares the {@code MBeanServerConnection} if the &quot;connectOnStartup&quot;
+	 * is turned on (which it is by default).
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L257" title="2 of 4 branches missed.">		if (this.server != null &amp;&amp; this.refreshOnConnectFailure) {</span>
+<span class="nc" id="L258">			throw new IllegalArgumentException(&quot;'refreshOnConnectFailure' does not work when setting &quot; +</span>
+					&quot;a 'server' reference. Prefer 'serviceUrl' etc instead.&quot;);
+		}
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">		if (this.connectOnStartup) {</span>
+<span class="fc" id="L262">			prepare();</span>
+		}
+<span class="fc" id="L264">	}</span>
+
+	/**
+	 * Ensures that an {@code MBeanServerConnection} is configured and attempts
+	 * to detect a local connection if one is not supplied.
+	 */
+	public void prepare() {
+<span class="fc" id="L271">		synchronized (this.preparationMonitor) {</span>
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">			if (this.server != null) {</span>
+<span class="fc" id="L273">				this.serverToUse = this.server;</span>
+			}
+			else {
+<span class="nc" id="L276">				this.serverToUse = null;</span>
+<span class="nc" id="L277">				this.serverToUse = this.connector.connect(this.serviceUrl, this.environment, this.agentId);</span>
+			}
+<span class="fc" id="L279">			this.invocationHandler = null;</span>
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">			if (this.useStrictCasing) {</span>
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">				Assert.state(this.objectName != null, &quot;No ObjectName set&quot;);</span>
+				// Use the JDK's own MBeanServerInvocationHandler, in particular for native MXBean support.
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">				this.invocationHandler = new MBeanServerInvocationHandler(this.serverToUse, this.objectName,</span>
+<span class="pc bnc" id="L284" title="All 2 branches missed.">						(this.managementInterface != null &amp;&amp; JMX.isMXBeanInterface(this.managementInterface)));</span>
+			}
+			else {
+				// Non-strict casing can only be achieved through custom invocation handling.
+				// Only partial MXBean support available!
+<span class="nc" id="L289">				retrieveMBeanInfo(this.serverToUse);</span>
+			}
+<span class="fc" id="L291">		}</span>
+<span class="fc" id="L292">	}</span>
+	/**
+	 * Loads the management interface info for the configured MBean into the caches.
+	 * This information is used by the proxy when determining whether an invocation matches
+	 * a valid operation or attribute on the management interface of the managed resource.
+	 */
+	private void retrieveMBeanInfo(MBeanServerConnection server) throws MBeanInfoRetrievalException {
+		try {
+<span class="nc" id="L300">			MBeanInfo info = server.getMBeanInfo(this.objectName);</span>
+
+<span class="nc" id="L302">			MBeanAttributeInfo[] attributeInfo = info.getAttributes();</span>
+<span class="nc" id="L303">			this.allowedAttributes = new HashMap&lt;&gt;(attributeInfo.length);</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">			for (MBeanAttributeInfo infoEle : attributeInfo) {</span>
+<span class="nc" id="L305">				this.allowedAttributes.put(infoEle.getName(), infoEle);</span>
+			}
+
+<span class="nc" id="L308">			MBeanOperationInfo[] operationInfo = info.getOperations();</span>
+<span class="nc" id="L309">			this.allowedOperations = new HashMap&lt;&gt;(operationInfo.length);</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">			for (MBeanOperationInfo infoEle : operationInfo) {</span>
+<span class="nc" id="L311">				Class&lt;?&gt;[] paramTypes = JmxUtils.parameterInfoToTypes(infoEle.getSignature(), this.beanClassLoader);</span>
+<span class="nc" id="L312">				this.allowedOperations.put(new MethodCacheKey(infoEle.getName(), paramTypes), infoEle);</span>
+			}
+		}
+<span class="nc" id="L315">		catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L316">			throw new MBeanInfoRetrievalException(&quot;Unable to locate class specified in method signature&quot;, ex);</span>
+		}
+<span class="nc" id="L318">		catch (IntrospectionException ex) {</span>
+<span class="nc" id="L319">			throw new MBeanInfoRetrievalException(&quot;Unable to obtain MBean info for bean [&quot; + this.objectName + &quot;]&quot;, ex);</span>
+		}
+<span class="nc" id="L321">		catch (InstanceNotFoundException ex) {</span>
+			// if we are this far this shouldn't happen, but...
+<span class="nc" id="L323">			throw new MBeanInfoRetrievalException(&quot;Unable to obtain MBean info for bean [&quot; + this.objectName +</span>
+					&quot;]: it is likely that this bean was unregistered during the proxy creation process&quot;,
+					ex);
+		}
+<span class="nc" id="L327">		catch (ReflectionException ex) {</span>
+<span class="nc" id="L328">			throw new MBeanInfoRetrievalException(&quot;Unable to read MBean info for bean [ &quot; + this.objectName + &quot;]&quot;, ex);</span>
+		}
+<span class="nc" id="L330">		catch (IOException ex) {</span>
+<span class="nc" id="L331">			throw new MBeanInfoRetrievalException(&quot;An IOException occurred when communicating with the &quot; +</span>
+					&quot;MBeanServer. It is likely that you are communicating with a remote MBeanServer. &quot; +
+					&quot;Check the inner exception for exact details.&quot;, ex);
+<span class="nc" id="L334">		}</span>
+<span class="nc" id="L335">	}</span>
+
+	/**
+	 * Return whether this client interceptor has already been prepared,
+	 * i.e. has already looked up the server and cached all metadata.
+	 */
+	protected boolean isPrepared() {
+<span class="fc" id="L342">		synchronized (this.preparationMonitor) {</span>
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">			return (this.serverToUse != null);</span>
+		}
+	}
+
+
+	/**
+	 * Route the invocation to the configured managed resource..
+	 * @param invocation the {@code MethodInvocation} to re-route
+	 * @return the value returned as a result of the re-routed invocation
+	 * @throws Throwable an invocation error propagated to the user
+	 * @see #doInvoke
+	 * @see #handleConnectFailure
+	 */
+	@Override
+	@Nullable
+	public Object invoke(MethodInvocation invocation) throws Throwable {
+		// Lazily connect to MBeanServer if necessary.
+<span class="fc" id="L360">		synchronized (this.preparationMonitor) {</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">			if (!isPrepared()) {</span>
+<span class="nc" id="L362">				prepare();</span>
+			}
+<span class="fc" id="L364">		}</span>
+		try {
+<span class="fc" id="L366">			return doInvoke(invocation);</span>
+		}
+<span class="fc" id="L368">		catch (MBeanConnectFailureException | IOException ex) {</span>
+<span class="nc" id="L369">			return handleConnectFailure(invocation, ex);</span>
+		}
+	}
+
+	/**
+	 * Refresh the connection and retry the MBean invocation if possible.
+	 * &lt;p&gt;If not configured to refresh on connect failure, this method
+	 * simply rethrows the original exception.
+	 * @param invocation the invocation that failed
+	 * @param ex the exception raised on remote invocation
+	 * @return the result value of the new invocation, if succeeded
+	 * @throws Throwable an exception raised by the new invocation,
+	 * if it failed as well
+	 * @see #setRefreshOnConnectFailure
+	 * @see #doInvoke
+	 */
+	@Nullable
+	protected Object handleConnectFailure(MethodInvocation invocation, Exception ex) throws Throwable {
+<span class="pc bpc" id="L387" title="1 of 2 branches missed.">		if (this.refreshOnConnectFailure) {</span>
+<span class="nc" id="L388">			String msg = &quot;Could not connect to JMX server - retrying&quot;;</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L390">				logger.warn(msg, ex);</span>
+			}
+<span class="nc bnc" id="L392" title="All 2 branches missed.">			else if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L393">				logger.warn(msg);</span>
+			}
+<span class="nc" id="L395">			prepare();</span>
+<span class="nc" id="L396">			return doInvoke(invocation);</span>
+		}
+		else {
+<span class="fc" id="L399">			throw ex;</span>
+		}
+	}
+
+	/**
+	 * Route the invocation to the configured managed resource. Correctly routes JavaBean property
+	 * access to {@code MBeanServerConnection.get/setAttribute} and method invocation to
+	 * {@code MBeanServerConnection.invoke}.
+	 * @param invocation the {@code MethodInvocation} to re-route
+	 * @return the value returned as a result of the re-routed invocation
+	 * @throws Throwable an invocation error propagated to the user
+	 */
+	@Nullable
+	protected Object doInvoke(MethodInvocation invocation) throws Throwable {
+<span class="fc" id="L413">		Method method = invocation.getMethod();</span>
+		try {
+			Object result;
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">			if (this.invocationHandler != null) {</span>
+<span class="fc" id="L417">				result = this.invocationHandler.invoke(invocation.getThis(), method, invocation.getArguments());</span>
+			}
+			else {
+<span class="nc" id="L420">				PropertyDescriptor pd = BeanUtils.findPropertyForMethod(method);</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">				if (pd != null) {</span>
+<span class="nc" id="L422">					result = invokeAttribute(pd, invocation);</span>
+				}
+				else {
+<span class="nc" id="L425">					result = invokeOperation(method, invocation.getArguments());</span>
+				}
+			}
+<span class="fc" id="L428">			return convertResultValueIfNecessary(result, new MethodParameter(method, -1));</span>
+		}
+<span class="nc" id="L430">		catch (MBeanException ex) {</span>
+<span class="nc" id="L431">			throw ex.getTargetException();</span>
+		}
+<span class="nc" id="L433">		catch (RuntimeMBeanException ex) {</span>
+<span class="nc" id="L434">			throw ex.getTargetException();</span>
+		}
+<span class="nc" id="L436">		catch (RuntimeErrorException ex) {</span>
+<span class="nc" id="L437">			throw ex.getTargetError();</span>
+		}
+<span class="nc" id="L439">		catch (RuntimeOperationsException ex) {</span>
+			// This one is only thrown by the JMX 1.2 RI, not by the JDK 1.5 JMX code.
+<span class="nc" id="L441">			RuntimeException rex = ex.getTargetException();</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">			if (rex instanceof RuntimeMBeanException) {</span>
+<span class="nc" id="L443">				throw ((RuntimeMBeanException) rex).getTargetException();</span>
+			}
+<span class="nc bnc" id="L445" title="All 2 branches missed.">			else if (rex instanceof RuntimeErrorException) {</span>
+<span class="nc" id="L446">				throw ((RuntimeErrorException) rex).getTargetError();</span>
+			}
+			else {
+<span class="nc" id="L449">				throw rex;</span>
+			}
+		}
+<span class="fc" id="L452">		catch (OperationsException ex) {</span>
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">			if (ReflectionUtils.declaresException(method, ex.getClass())) {</span>
+<span class="nc" id="L454">				throw ex;</span>
+			}
+			else {
+<span class="fc" id="L457">				throw new InvalidInvocationException(ex.getMessage());</span>
+			}
+		}
+<span class="nc" id="L460">		catch (JMException ex) {</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">			if (ReflectionUtils.declaresException(method, ex.getClass())) {</span>
+<span class="nc" id="L462">				throw ex;</span>
+			}
+			else {
+<span class="nc" id="L465">				throw new InvocationFailureException(&quot;JMX access failed&quot;, ex);</span>
+			}
+		}
+<span class="fc" id="L468">		catch (IOException ex) {</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">			if (ReflectionUtils.declaresException(method, ex.getClass())) {</span>
+<span class="fc" id="L470">				throw ex;</span>
+			}
+			else {
+<span class="nc" id="L473">				throw new MBeanConnectFailureException(&quot;I/O failure during JMX access&quot;, ex);</span>
+			}
+		}
+	}
+
+	@Nullable
+	private Object invokeAttribute(PropertyDescriptor pd, MethodInvocation invocation)
+			throws JMException, IOException {
+
+<span class="nc bnc" id="L482" title="All 2 branches missed.">		Assert.state(this.serverToUse != null, &quot;No MBeanServerConnection available&quot;);</span>
+
+<span class="nc" id="L484">		String attributeName = JmxUtils.getAttributeName(pd, this.useStrictCasing);</span>
+<span class="nc" id="L485">		MBeanAttributeInfo inf = this.allowedAttributes.get(attributeName);</span>
+		// If no attribute is returned, we know that it is not defined in the
+		// management interface.
+<span class="nc bnc" id="L488" title="All 2 branches missed.">		if (inf == null) {</span>
+<span class="nc" id="L489">			throw new InvalidInvocationException(</span>
+<span class="nc" id="L490">					&quot;Attribute '&quot; + pd.getName() + &quot;' is not exposed on the management interface&quot;);</span>
+		}
+
+<span class="nc bnc" id="L493" title="All 2 branches missed.">		if (invocation.getMethod().equals(pd.getReadMethod())) {</span>
+<span class="nc bnc" id="L494" title="All 2 branches missed.">			if (inf.isReadable()) {</span>
+<span class="nc" id="L495">				return this.serverToUse.getAttribute(this.objectName, attributeName);</span>
+			}
+			else {
+<span class="nc" id="L498">				throw new InvalidInvocationException(&quot;Attribute '&quot; + attributeName + &quot;' is not readable&quot;);</span>
+			}
+		}
+<span class="nc bnc" id="L501" title="All 2 branches missed.">		else if (invocation.getMethod().equals(pd.getWriteMethod())) {</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">			if (inf.isWritable()) {</span>
+<span class="nc" id="L503">				this.serverToUse.setAttribute(this.objectName, new Attribute(attributeName, invocation.getArguments()[0]));</span>
+<span class="nc" id="L504">				return null;</span>
+			}
+			else {
+<span class="nc" id="L507">				throw new InvalidInvocationException(&quot;Attribute '&quot; + attributeName + &quot;' is not writable&quot;);</span>
+			}
+		}
+		else {
+<span class="nc" id="L511">			throw new IllegalStateException(</span>
+<span class="nc" id="L512">					&quot;Method [&quot; + invocation.getMethod() + &quot;] is neither a bean property getter nor a setter&quot;);</span>
+		}
+	}
+
+	/**
+	 * Routes a method invocation (not a property get/set) to the corresponding
+	 * operation on the managed resource.
+	 * @param method the method corresponding to operation on the managed resource.
+	 * @param args the invocation arguments
+	 * @return the value returned by the method invocation.
+	 */
+	private Object invokeOperation(Method method, Object[] args) throws JMException, IOException {
+<span class="nc bnc" id="L524" title="All 2 branches missed.">		Assert.state(this.serverToUse != null, &quot;No MBeanServerConnection available&quot;);</span>
+
+<span class="nc" id="L526">		MethodCacheKey key = new MethodCacheKey(method.getName(), method.getParameterTypes());</span>
+<span class="nc" id="L527">		MBeanOperationInfo info = this.allowedOperations.get(key);</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">		if (info == null) {</span>
+<span class="nc" id="L529">			throw new InvalidInvocationException(&quot;Operation '&quot; + method.getName() +</span>
+					&quot;' is not exposed on the management interface&quot;);
+		}
+
+		String[] signature;
+<span class="nc" id="L534">		synchronized (this.signatureCache) {</span>
+<span class="nc" id="L535">			signature = this.signatureCache.get(method);</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">			if (signature == null) {</span>
+<span class="nc" id="L537">				signature = JmxUtils.getMethodSignature(method);</span>
+<span class="nc" id="L538">				this.signatureCache.put(method, signature);</span>
+			}
+<span class="nc" id="L540">		}</span>
+
+<span class="nc" id="L542">		return this.serverToUse.invoke(this.objectName, method.getName(), args, signature);</span>
+	}
+
+	/**
+	 * Convert the given result object (from attribute access or operation invocation)
+	 * to the specified target class for returning from the proxy method.
+	 * @param result the result object as returned by the {@code MBeanServer}
+	 * @param parameter the method parameter of the proxy method that's been invoked
+	 * @return the converted result object, or the passed-in object if no conversion
+	 * is necessary
+	 */
+	@Nullable
+	protected Object convertResultValueIfNecessary(@Nullable Object result, MethodParameter parameter) {
+<span class="fc" id="L555">		Class&lt;?&gt; targetClass = parameter.getParameterType();</span>
+		try {
+<span class="fc bfc" id="L557" title="All 2 branches covered.">			if (result == null) {</span>
+<span class="fc" id="L558">				return null;</span>
+			}
+<span class="pc bpc" id="L560" title="1 of 2 branches missed.">			if (ClassUtils.isAssignableValue(targetClass, result)) {</span>
+<span class="fc" id="L561">				return result;</span>
+			}
+<span class="nc bnc" id="L563" title="All 2 branches missed.">			if (result instanceof CompositeData) {</span>
+<span class="nc" id="L564">				Method fromMethod = targetClass.getMethod(&quot;from&quot;, CompositeData.class);</span>
+<span class="nc" id="L565">				return ReflectionUtils.invokeMethod(fromMethod, null, result);</span>
+			}
+<span class="nc bnc" id="L567" title="All 2 branches missed.">			else if (result instanceof CompositeData[]) {</span>
+<span class="nc" id="L568">				CompositeData[] array = (CompositeData[]) result;</span>
+<span class="nc bnc" id="L569" title="All 2 branches missed.">				if (targetClass.isArray()) {</span>
+<span class="nc" id="L570">					return convertDataArrayToTargetArray(array, targetClass);</span>
+				}
+<span class="nc bnc" id="L572" title="All 2 branches missed.">				else if (Collection.class.isAssignableFrom(targetClass)) {</span>
+<span class="nc" id="L573">					Class&lt;?&gt; elementType =</span>
+<span class="nc" id="L574">							ResolvableType.forMethodParameter(parameter).asCollection().resolveGeneric();</span>
+<span class="nc bnc" id="L575" title="All 2 branches missed.">					if (elementType != null) {</span>
+<span class="nc" id="L576">						return convertDataArrayToTargetCollection(array, targetClass, elementType);</span>
+					}
+				}
+<span class="nc" id="L579">			}</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">			else if (result instanceof TabularData) {</span>
+<span class="nc" id="L581">				Method fromMethod = targetClass.getMethod(&quot;from&quot;, TabularData.class);</span>
+<span class="nc" id="L582">				return ReflectionUtils.invokeMethod(fromMethod, null, result);</span>
+			}
+<span class="nc bnc" id="L584" title="All 2 branches missed.">			else if (result instanceof TabularData[]) {</span>
+<span class="nc" id="L585">				TabularData[] array = (TabularData[]) result;</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">				if (targetClass.isArray()) {</span>
+<span class="nc" id="L587">					return convertDataArrayToTargetArray(array, targetClass);</span>
+				}
+<span class="nc bnc" id="L589" title="All 2 branches missed.">				else if (Collection.class.isAssignableFrom(targetClass)) {</span>
+<span class="nc" id="L590">					Class&lt;?&gt; elementType =</span>
+<span class="nc" id="L591">							ResolvableType.forMethodParameter(parameter).asCollection().resolveGeneric();</span>
+<span class="nc bnc" id="L592" title="All 2 branches missed.">					if (elementType != null) {</span>
+<span class="nc" id="L593">						return convertDataArrayToTargetCollection(array, targetClass, elementType);</span>
+					}
+				}
+			}
+<span class="nc" id="L597">			throw new InvocationFailureException(</span>
+<span class="nc" id="L598">					&quot;Incompatible result value [&quot; + result + &quot;] for target type [&quot; + targetClass.getName() + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L600">		catch (NoSuchMethodException ex) {</span>
+<span class="nc" id="L601">			throw new InvocationFailureException(</span>
+					&quot;Could not obtain 'from(CompositeData)' / 'from(TabularData)' method on target type [&quot; +
+<span class="nc" id="L603">							targetClass.getName() + &quot;] for conversion of MXBean data structure [&quot; + result + &quot;]&quot;);</span>
+		}
+	}
+
+	private Object convertDataArrayToTargetArray(Object[] array, Class&lt;?&gt; targetClass) throws NoSuchMethodException {
+<span class="nc" id="L608">		Class&lt;?&gt; targetType = targetClass.getComponentType();</span>
+<span class="nc" id="L609">		Method fromMethod = targetType.getMethod(&quot;from&quot;, array.getClass().getComponentType());</span>
+<span class="nc" id="L610">		Object resultArray = Array.newInstance(targetType, array.length);</span>
+<span class="nc bnc" id="L611" title="All 2 branches missed.">		for (int i = 0; i &lt; array.length; i++) {</span>
+<span class="nc" id="L612">			Array.set(resultArray, i, ReflectionUtils.invokeMethod(fromMethod, null, array[i]));</span>
+		}
+<span class="nc" id="L614">		return resultArray;</span>
+	}
+
+	private Collection&lt;?&gt; convertDataArrayToTargetCollection(Object[] array, Class&lt;?&gt; collectionType, Class&lt;?&gt; elementType)
+			throws NoSuchMethodException {
+
+<span class="nc" id="L620">		Method fromMethod = elementType.getMethod(&quot;from&quot;, array.getClass().getComponentType());</span>
+<span class="nc" id="L621">		Collection&lt;Object&gt; resultColl = CollectionFactory.createCollection(collectionType, Array.getLength(array));</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">		for (int i = 0; i &lt; array.length; i++) {</span>
+<span class="nc" id="L623">			resultColl.add(ReflectionUtils.invokeMethod(fromMethod, null, array[i]));</span>
+		}
+<span class="nc" id="L625">		return resultColl;</span>
+	}
+
+
+	@Override
+	public void destroy() {
+<span class="nc" id="L631">		this.connector.close();</span>
+<span class="nc" id="L632">	}</span>
+
+
+	/**
+	 * Simple wrapper class around a method name and its signature.
+	 * Used as the key when caching methods.
+	 */
+	private static final class MethodCacheKey implements Comparable&lt;MethodCacheKey&gt; {
+
+		private final String name;
+
+		private final Class&lt;?&gt;[] parameterTypes;
+
+		/**
+		 * Create a new instance of {@code MethodCacheKey} with the supplied
+		 * method name and parameter list.
+		 * @param name the name of the method
+		 * @param parameterTypes the arguments in the method signature
+		 */
+<span class="nc" id="L651">		public MethodCacheKey(String name, @Nullable Class&lt;?&gt;[] parameterTypes) {</span>
+<span class="nc" id="L652">			this.name = name;</span>
+<span class="nc bnc" id="L653" title="All 2 branches missed.">			this.parameterTypes = (parameterTypes != null ? parameterTypes : new Class&lt;?&gt;[0]);</span>
+<span class="nc" id="L654">		}</span>
+
+		@Override
+		public boolean equals(Object other) {
+<span class="nc bnc" id="L658" title="All 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L659">				return true;</span>
+			}
+<span class="nc" id="L661">			MethodCacheKey otherKey = (MethodCacheKey) other;</span>
+<span class="nc bnc" id="L662" title="All 4 branches missed.">			return (this.name.equals(otherKey.name) &amp;&amp; Arrays.equals(this.parameterTypes, otherKey.parameterTypes));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L667">			return this.name.hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L672">			return this.name + &quot;(&quot; + StringUtils.arrayToCommaDelimitedString(this.parameterTypes) + &quot;)&quot;;</span>
+		}
+
+		@Override
+		public int compareTo(MethodCacheKey other) {
+<span class="nc" id="L677">			int result = this.name.compareTo(other.name);</span>
+<span class="nc bnc" id="L678" title="All 2 branches missed.">			if (result != 0) {</span>
+<span class="nc" id="L679">				return result;</span>
+			}
+<span class="nc bnc" id="L681" title="All 2 branches missed.">			if (this.parameterTypes.length &lt; other.parameterTypes.length) {</span>
+<span class="nc" id="L682">				return -1;</span>
+			}
+<span class="nc bnc" id="L684" title="All 2 branches missed.">			if (this.parameterTypes.length &gt; other.parameterTypes.length) {</span>
+<span class="nc" id="L685">				return 1;</span>
+			}
+<span class="nc bnc" id="L687" title="All 2 branches missed.">			for (int i = 0; i &lt; this.parameterTypes.length; i++) {</span>
+<span class="nc" id="L688">				result = this.parameterTypes[i].getName().compareTo(other.parameterTypes[i].getName());</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">				if (result != 0) {</span>
+<span class="nc" id="L690">					return result;</span>
+				}
+			}
+<span class="nc" id="L693">			return 0;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

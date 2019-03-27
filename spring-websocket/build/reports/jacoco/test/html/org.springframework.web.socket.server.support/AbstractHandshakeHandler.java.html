@@ -1,0 +1,425 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractHandshakeHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-websocket</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.server.support</a> &gt; <span class="el_source">AbstractHandshakeHandler.java</span></div><h1>AbstractHandshakeHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.server.support;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.Principal;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.context.Lifecycle;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.server.ServerHttpRequest;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.socket.SubProtocolCapable;
+import org.springframework.web.socket.WebSocketExtension;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.WebSocketHttpHeaders;
+import org.springframework.web.socket.handler.WebSocketHandlerDecorator;
+import org.springframework.web.socket.server.HandshakeFailureException;
+import org.springframework.web.socket.server.HandshakeHandler;
+import org.springframework.web.socket.server.RequestUpgradeStrategy;
+
+/**
+ * A base class for {@link HandshakeHandler} implementations, independent from the Servlet API.
+ *
+ * &lt;p&gt;Performs initial validation of the WebSocket handshake request - possibly rejecting it
+ * through the appropriate HTTP status code - while also allowing its subclasses to override
+ * various parts of the negotiation process (e.g. origin validation, sub-protocol negotiation,
+ * extensions negotiation, etc).
+ *
+ * &lt;p&gt;If the negotiation succeeds, the actual upgrade is delegated to a server-specific
+ * {@link org.springframework.web.socket.server.RequestUpgradeStrategy}, which will update
+ * the response as necessary and initialize the WebSocket. Currently supported servers are
+ * Jetty 9.0-9.3, Tomcat 7.0.47+ and 8.x, Undertow 1.0-1.3, GlassFish 4.1+, WebLogic 12.1.3+.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 4.2
+ * @see org.springframework.web.socket.server.jetty.JettyRequestUpgradeStrategy
+ * @see org.springframework.web.socket.server.standard.TomcatRequestUpgradeStrategy
+ * @see org.springframework.web.socket.server.standard.UndertowRequestUpgradeStrategy
+ * @see org.springframework.web.socket.server.standard.GlassFishRequestUpgradeStrategy
+ * @see org.springframework.web.socket.server.standard.WebLogicRequestUpgradeStrategy
+ */
+public abstract class AbstractHandshakeHandler implements HandshakeHandler, Lifecycle {
+
+	private static final boolean jettyWsPresent;
+
+	private static final boolean tomcatWsPresent;
+
+	private static final boolean undertowWsPresent;
+
+	private static final boolean glassfishWsPresent;
+
+	private static final boolean weblogicWsPresent;
+
+	private static final boolean websphereWsPresent;
+
+	static {
+<span class="fc" id="L87">		ClassLoader classLoader = AbstractHandshakeHandler.class.getClassLoader();</span>
+<span class="fc" id="L88">		jettyWsPresent = ClassUtils.isPresent(</span>
+				&quot;org.eclipse.jetty.websocket.server.WebSocketServerFactory&quot;, classLoader);
+<span class="fc" id="L90">		tomcatWsPresent = ClassUtils.isPresent(</span>
+				&quot;org.apache.tomcat.websocket.server.WsHttpUpgradeHandler&quot;, classLoader);
+<span class="fc" id="L92">		undertowWsPresent = ClassUtils.isPresent(</span>
+				&quot;io.undertow.websockets.jsr.ServerWebSocketContainer&quot;, classLoader);
+<span class="fc" id="L94">		glassfishWsPresent = ClassUtils.isPresent(</span>
+				&quot;org.glassfish.tyrus.servlet.TyrusHttpUpgradeHandler&quot;, classLoader);
+<span class="fc" id="L96">		weblogicWsPresent = ClassUtils.isPresent(</span>
+				&quot;weblogic.websocket.tyrus.TyrusServletWriter&quot;, classLoader);
+<span class="fc" id="L98">		websphereWsPresent = ClassUtils.isPresent(</span>
+				&quot;com.ibm.websphere.wsoc.WsWsocServerContainer&quot;, classLoader);
+
+<span class="fc" id="L101">	}</span>
+
+
+<span class="fc" id="L104">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	private final RequestUpgradeStrategy requestUpgradeStrategy;
+
+<span class="fc" id="L108">	private final List&lt;String&gt; supportedProtocols = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L110">	private volatile boolean running = false;</span>
+
+
+	/**
+	 * Default constructor that auto-detects and instantiates a
+	 * {@link RequestUpgradeStrategy} suitable for the runtime container.
+	 * @throws IllegalStateException if no {@link RequestUpgradeStrategy} can be found.
+	 */
+	protected AbstractHandshakeHandler() {
+<span class="fc" id="L119">		this(initRequestUpgradeStrategy());</span>
+<span class="fc" id="L120">	}</span>
+
+	/**
+	 * A constructor that accepts a runtime-specific {@link RequestUpgradeStrategy}.
+	 * @param requestUpgradeStrategy the upgrade strategy to use
+	 */
+<span class="fc" id="L126">	protected AbstractHandshakeHandler(RequestUpgradeStrategy requestUpgradeStrategy) {</span>
+<span class="fc" id="L127">		Assert.notNull(requestUpgradeStrategy, &quot;RequestUpgradeStrategy must not be null&quot;);</span>
+<span class="fc" id="L128">		this.requestUpgradeStrategy = requestUpgradeStrategy;</span>
+<span class="fc" id="L129">	}</span>
+
+
+	private static RequestUpgradeStrategy initRequestUpgradeStrategy() {
+		String className;
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">		if (tomcatWsPresent) {</span>
+<span class="fc" id="L135">			className = &quot;org.springframework.web.socket.server.standard.TomcatRequestUpgradeStrategy&quot;;</span>
+		}
+<span class="nc bnc" id="L137" title="All 2 branches missed.">		else if (jettyWsPresent) {</span>
+<span class="nc" id="L138">			className = &quot;org.springframework.web.socket.server.jetty.JettyRequestUpgradeStrategy&quot;;</span>
+		}
+<span class="nc bnc" id="L140" title="All 2 branches missed.">		else if (undertowWsPresent) {</span>
+<span class="nc" id="L141">			className = &quot;org.springframework.web.socket.server.standard.UndertowRequestUpgradeStrategy&quot;;</span>
+		}
+<span class="nc bnc" id="L143" title="All 2 branches missed.">		else if (glassfishWsPresent) {</span>
+<span class="nc" id="L144">			className = &quot;org.springframework.web.socket.server.standard.GlassFishRequestUpgradeStrategy&quot;;</span>
+		}
+<span class="nc bnc" id="L146" title="All 2 branches missed.">		else if (weblogicWsPresent) {</span>
+<span class="nc" id="L147">			className = &quot;org.springframework.web.socket.server.standard.WebLogicRequestUpgradeStrategy&quot;;</span>
+		}
+<span class="nc bnc" id="L149" title="All 2 branches missed.">		else if (websphereWsPresent) {</span>
+<span class="nc" id="L150">			className = &quot;org.springframework.web.socket.server.standard.WebSphereRequestUpgradeStrategy&quot;;</span>
+		}
+		else {
+<span class="nc" id="L153">			throw new IllegalStateException(&quot;No suitable default RequestUpgradeStrategy found&quot;);</span>
+		}
+
+		try {
+<span class="fc" id="L157">			Class&lt;?&gt; clazz = ClassUtils.forName(className, AbstractHandshakeHandler.class.getClassLoader());</span>
+<span class="fc" id="L158">			return (RequestUpgradeStrategy) ReflectionUtils.accessibleConstructor(clazz).newInstance();</span>
+		}
+<span class="nc" id="L160">		catch (Throwable ex) {</span>
+<span class="nc" id="L161">			throw new IllegalStateException(</span>
+					&quot;Failed to instantiate RequestUpgradeStrategy: &quot; + className, ex);
+		}
+	}
+
+
+	/**
+	 * Return the {@link RequestUpgradeStrategy} for WebSocket requests.
+	 */
+	public RequestUpgradeStrategy getRequestUpgradeStrategy() {
+<span class="fc" id="L171">		return this.requestUpgradeStrategy;</span>
+	}
+
+	/**
+	 * Use this property to configure the list of supported sub-protocols.
+	 * The first configured sub-protocol that matches a client-requested sub-protocol
+	 * is accepted. If there are no matches the response will not contain a
+	 * {@literal Sec-WebSocket-Protocol} header.
+	 * &lt;p&gt;Note that if the WebSocketHandler passed in at runtime is an instance of
+	 * {@link SubProtocolCapable} then there is not need to explicitly configure
+	 * this property. That is certainly the case with the built-in STOMP over
+	 * WebSocket support. Therefore this property should be configured explicitly
+	 * only if the WebSocketHandler does not implement {@code SubProtocolCapable}.
+	 */
+	public void setSupportedProtocols(String... protocols) {
+<span class="fc" id="L186">		this.supportedProtocols.clear();</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">		for (String protocol : protocols) {</span>
+<span class="fc" id="L188">			this.supportedProtocols.add(protocol.toLowerCase());</span>
+		}
+<span class="fc" id="L190">	}</span>
+
+	/**
+	 * Return the list of supported sub-protocols.
+	 */
+	public String[] getSupportedProtocols() {
+<span class="nc" id="L196">		return StringUtils.toStringArray(this.supportedProtocols);</span>
+	}
+
+
+	@Override
+	public void start() {
+<span class="fc bfc" id="L202" title="All 2 branches covered.">		if (!isRunning()) {</span>
+<span class="fc" id="L203">			this.running = true;</span>
+<span class="fc" id="L204">			doStart();</span>
+		}
+<span class="fc" id="L206">	}</span>
+
+	protected void doStart() {
+<span class="fc bfc" id="L209" title="All 2 branches covered.">		if (this.requestUpgradeStrategy instanceof Lifecycle) {</span>
+<span class="fc" id="L210">			((Lifecycle) this.requestUpgradeStrategy).start();</span>
+		}
+<span class="fc" id="L212">	}</span>
+
+	@Override
+	public void stop() {
+<span class="fc bfc" id="L216" title="All 2 branches covered.">		if (isRunning()) {</span>
+<span class="fc" id="L217">			this.running = false;</span>
+<span class="fc" id="L218">			doStop();</span>
+		}
+<span class="fc" id="L220">	}</span>
+
+	protected void doStop() {
+<span class="fc bfc" id="L223" title="All 2 branches covered.">		if (this.requestUpgradeStrategy instanceof Lifecycle) {</span>
+<span class="fc" id="L224">			((Lifecycle) this.requestUpgradeStrategy).stop();</span>
+		}
+<span class="fc" id="L226">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="fc" id="L230">		return this.running;</span>
+	}
+
+
+	@Override
+	public final boolean doHandshake(ServerHttpRequest request, ServerHttpResponse response,
+			WebSocketHandler wsHandler, Map&lt;String, Object&gt; attributes) throws HandshakeFailureException {
+
+<span class="fc" id="L238">		WebSocketHttpHeaders headers = new WebSocketHttpHeaders(request.getHeaders());</span>
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L240">			logger.trace(&quot;Processing request &quot; + request.getURI() + &quot; with headers=&quot; + headers);</span>
+		}
+		try {
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">			if (HttpMethod.GET != request.getMethod()) {</span>
+<span class="nc" id="L244">				response.setStatusCode(HttpStatus.METHOD_NOT_ALLOWED);</span>
+<span class="nc" id="L245">				response.getHeaders().setAllow(Collections.singleton(HttpMethod.GET));</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">				if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L247">					logger.error(&quot;Handshake failed due to unexpected HTTP method: &quot; + request.getMethod());</span>
+				}
+<span class="nc" id="L249">				return false;</span>
+			}
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">			if (!&quot;WebSocket&quot;.equalsIgnoreCase(headers.getUpgrade())) {</span>
+<span class="nc" id="L252">				handleInvalidUpgradeHeader(request, response);</span>
+<span class="nc" id="L253">				return false;</span>
+			}
+<span class="pc bpc" id="L255" title="1 of 4 branches missed.">			if (!headers.getConnection().contains(&quot;Upgrade&quot;) &amp;&amp; !headers.getConnection().contains(&quot;upgrade&quot;)) {</span>
+<span class="nc" id="L256">				handleInvalidConnectHeader(request, response);</span>
+<span class="nc" id="L257">				return false;</span>
+			}
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">			if (!isWebSocketVersionSupported(headers)) {</span>
+<span class="nc" id="L260">				handleWebSocketVersionNotSupported(request, response);</span>
+<span class="nc" id="L261">				return false;</span>
+			}
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">			if (!isValidOrigin(request)) {</span>
+<span class="nc" id="L264">				response.setStatusCode(HttpStatus.FORBIDDEN);</span>
+<span class="nc" id="L265">				return false;</span>
+			}
+<span class="fc" id="L267">			String wsKey = headers.getSecWebSocketKey();</span>
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">			if (wsKey == null) {</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">				if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L270">					logger.error(&quot;Missing \&quot;Sec-WebSocket-Key\&quot; header&quot;);</span>
+				}
+<span class="nc" id="L272">				response.setStatusCode(HttpStatus.BAD_REQUEST);</span>
+<span class="nc" id="L273">				return false;</span>
+			}
+		}
+<span class="nc" id="L276">		catch (IOException ex) {</span>
+<span class="nc" id="L277">			throw new HandshakeFailureException(</span>
+<span class="nc" id="L278">					&quot;Response update failed during upgrade to WebSocket: &quot; + request.getURI(), ex);</span>
+<span class="fc" id="L279">		}</span>
+
+<span class="fc" id="L281">		String subProtocol = selectProtocol(headers.getSecWebSocketProtocol(), wsHandler);</span>
+<span class="fc" id="L282">		List&lt;WebSocketExtension&gt; requested = headers.getSecWebSocketExtensions();</span>
+<span class="fc" id="L283">		List&lt;WebSocketExtension&gt; supported = this.requestUpgradeStrategy.getSupportedExtensions(request);</span>
+<span class="fc" id="L284">		List&lt;WebSocketExtension&gt; extensions = filterRequestedExtensions(request, requested, supported);</span>
+<span class="fc" id="L285">		Principal user = determineUser(request, wsHandler, attributes);</span>
+
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L288">			logger.trace(&quot;Upgrading to WebSocket, subProtocol=&quot; + subProtocol + &quot;, extensions=&quot; + extensions);</span>
+		}
+<span class="fc" id="L290">		this.requestUpgradeStrategy.upgrade(request, response, subProtocol, extensions, user, wsHandler, attributes);</span>
+<span class="fc" id="L291">		return true;</span>
+	}
+
+	protected void handleInvalidUpgradeHeader(ServerHttpRequest request, ServerHttpResponse response) throws IOException {
+<span class="nc bnc" id="L295" title="All 2 branches missed.">		if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L296">			logger.error(&quot;Handshake failed due to invalid Upgrade header: &quot; + request.getHeaders().getUpgrade());</span>
+		}
+<span class="nc" id="L298">		response.setStatusCode(HttpStatus.BAD_REQUEST);</span>
+<span class="nc" id="L299">		response.getBody().write(&quot;Can \&quot;Upgrade\&quot; only to \&quot;WebSocket\&quot;.&quot;.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L300">	}</span>
+
+	protected void handleInvalidConnectHeader(ServerHttpRequest request, ServerHttpResponse response) throws IOException {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">		if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L304">			logger.error(&quot;Handshake failed due to invalid Connection header &quot; + request.getHeaders().getConnection());</span>
+		}
+<span class="nc" id="L306">		response.setStatusCode(HttpStatus.BAD_REQUEST);</span>
+<span class="nc" id="L307">		response.getBody().write(&quot;\&quot;Connection\&quot; must be \&quot;upgrade\&quot;.&quot;.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L308">	}</span>
+
+	protected boolean isWebSocketVersionSupported(WebSocketHttpHeaders httpHeaders) {
+<span class="fc" id="L311">		String version = httpHeaders.getSecWebSocketVersion();</span>
+<span class="fc" id="L312">		String[] supportedVersions = getSupportedVersions();</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">		for (String supportedVersion : supportedVersions) {</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">			if (supportedVersion.trim().equals(version)) {</span>
+<span class="fc" id="L315">				return true;</span>
+			}
+		}
+<span class="nc" id="L318">		return false;</span>
+	}
+
+	protected String[] getSupportedVersions() {
+<span class="fc" id="L322">		return this.requestUpgradeStrategy.getSupportedVersions();</span>
+	}
+
+	protected void handleWebSocketVersionNotSupported(ServerHttpRequest request, ServerHttpResponse response) {
+<span class="nc bnc" id="L326" title="All 2 branches missed.">		if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L327">			String version = request.getHeaders().getFirst(&quot;Sec-WebSocket-Version&quot;);</span>
+<span class="nc" id="L328">			logger.error(&quot;Handshake failed due to unsupported WebSocket version: &quot; + version +</span>
+<span class="nc" id="L329">					&quot;. Supported versions: &quot; + Arrays.toString(getSupportedVersions()));</span>
+		}
+<span class="nc" id="L331">		response.setStatusCode(HttpStatus.UPGRADE_REQUIRED);</span>
+<span class="nc" id="L332">		response.getHeaders().set(WebSocketHttpHeaders.SEC_WEBSOCKET_VERSION,</span>
+<span class="nc" id="L333">				StringUtils.arrayToCommaDelimitedString(getSupportedVersions()));</span>
+<span class="nc" id="L334">	}</span>
+
+	/**
+	 * Return whether the request {@code Origin} header value is valid or not.
+	 * By default, all origins as considered as valid. Consider using an
+	 * {@link OriginHandshakeInterceptor} for filtering origins if needed.
+	 */
+	protected boolean isValidOrigin(ServerHttpRequest request) {
+<span class="fc" id="L342">		return true;</span>
+	}
+
+	/**
+	 * Perform the sub-protocol negotiation based on requested and supported sub-protocols.
+	 * For the list of supported sub-protocols, this method first checks if the target
+	 * WebSocketHandler is a {@link SubProtocolCapable} and then also checks if any
+	 * sub-protocols have been explicitly configured with
+	 * {@link #setSupportedProtocols(String...)}.
+	 * @param requestedProtocols the requested sub-protocols
+	 * @param webSocketHandler the WebSocketHandler that will be used
+	 * @return the selected protocols or {@code null}
+	 * @see #determineHandlerSupportedProtocols(WebSocketHandler)
+	 */
+	@Nullable
+	protected String selectProtocol(List&lt;String&gt; requestedProtocols, WebSocketHandler webSocketHandler) {
+<span class="fc" id="L358">		List&lt;String&gt; handlerProtocols = determineHandlerSupportedProtocols(webSocketHandler);</span>
+<span class="fc bfc" id="L359" title="All 2 branches covered.">		for (String protocol : requestedProtocols) {</span>
+<span class="fc bfc" id="L360" title="All 2 branches covered.">			if (handlerProtocols.contains(protocol.toLowerCase())) {</span>
+<span class="fc" id="L361">				return protocol;</span>
+			}
+<span class="fc bfc" id="L363" title="All 2 branches covered.">			if (this.supportedProtocols.contains(protocol.toLowerCase())) {</span>
+<span class="fc" id="L364">				return protocol;</span>
+			}
+<span class="fc" id="L366">		}</span>
+<span class="fc" id="L367">		return null;</span>
+	}
+
+	/**
+	 * Determine the sub-protocols supported by the given WebSocketHandler by
+	 * checking whether it is an instance of {@link SubProtocolCapable}.
+	 * @param handler the handler to check
+	 * @return a list of supported protocols, or an empty list if none available
+	 */
+	protected final List&lt;String&gt; determineHandlerSupportedProtocols(WebSocketHandler handler) {
+<span class="fc" id="L377">		WebSocketHandler handlerToCheck = WebSocketHandlerDecorator.unwrap(handler);</span>
+<span class="fc" id="L378">		List&lt;String&gt; subProtocols = null;</span>
+<span class="fc bfc" id="L379" title="All 2 branches covered.">		if (handlerToCheck instanceof SubProtocolCapable) {</span>
+<span class="fc" id="L380">			subProtocols = ((SubProtocolCapable) handlerToCheck).getSubProtocols();</span>
+		}
+<span class="fc bfc" id="L382" title="All 2 branches covered.">		return (subProtocols != null ? subProtocols : Collections.emptyList());</span>
+	}
+
+	/**
+	 * Filter the list of requested WebSocket extensions.
+	 * &lt;p&gt;As of 4.1, the default implementation of this method filters the list to
+	 * leave only extensions that are both requested and supported.
+	 * @param request the current request
+	 * @param requestedExtensions the list of extensions requested by the client
+	 * @param supportedExtensions the list of extensions supported by the server
+	 * @return the selected extensions or an empty list
+	 */
+	protected List&lt;WebSocketExtension&gt; filterRequestedExtensions(ServerHttpRequest request,
+			List&lt;WebSocketExtension&gt; requestedExtensions, List&lt;WebSocketExtension&gt; supportedExtensions) {
+
+<span class="fc" id="L397">		List&lt;WebSocketExtension&gt; result = new ArrayList&lt;&gt;(requestedExtensions.size());</span>
+<span class="fc bfc" id="L398" title="All 2 branches covered.">		for (WebSocketExtension extension : requestedExtensions) {</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">			if (supportedExtensions.contains(extension)) {</span>
+<span class="fc" id="L400">				result.add(extension);</span>
+			}
+<span class="fc" id="L402">		}</span>
+<span class="fc" id="L403">		return result;</span>
+	}
+
+	/**
+	 * A method that can be used to associate a user with the WebSocket session
+	 * in the process of being established. The default implementation calls
+	 * {@link ServerHttpRequest#getPrincipal()}
+	 * &lt;p&gt;Subclasses can provide custom logic for associating a user with a session,
+	 * for example for assigning a name to anonymous users (i.e. not fully authenticated).
+	 * @param request the handshake request
+	 * @param wsHandler the WebSocket handler that will handle messages
+	 * @param attributes handshake attributes to pass to the WebSocket session
+	 * @return the user for the WebSocket session, or {@code null} if not available
+	 */
+	@Nullable
+	protected Principal determineUser(
+			ServerHttpRequest request, WebSocketHandler wsHandler, Map&lt;String, Object&gt; attributes) {
+
+<span class="fc" id="L421">		return request.getPrincipal();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

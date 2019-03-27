@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleConnectionFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jca.cci.connection</a> &gt; <span class="el_source">SingleConnectionFactory.java</span></div><h1>SingleConnectionFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jca.cci.connection;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import javax.resource.NotSupportedException;
+import javax.resource.ResourceException;
+import javax.resource.cci.Connection;
+import javax.resource.cci.ConnectionFactory;
+import javax.resource.cci.ConnectionSpec;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+
+/**
+ * A CCI ConnectionFactory adapter that returns the same Connection on all
+ * {@code getConnection} calls, and ignores calls to
+ * {@code Connection.close()}.
+ *
+ * &lt;p&gt;Useful for testing and standalone environments, to keep using the same
+ * Connection for multiple CciTemplate calls, without having a pooling
+ * ConnectionFactory, also spanning any number of transactions.
+ *
+ * &lt;p&gt;You can either pass in a CCI Connection directly, or let this
+ * factory lazily create a Connection via a given target ConnectionFactory.
+ *
+ * @author Juergen Hoeller
+ * @since 1.2
+ * @see #getConnection()
+ * @see javax.resource.cci.Connection#close()
+ * @see org.springframework.jca.cci.core.CciTemplate
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class SingleConnectionFactory extends DelegatingConnectionFactory implements DisposableBean {
+
+<span class="nc" id="L57">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	/** Wrapped Connection. */
+	@Nullable
+	private Connection target;
+
+	/** Proxy Connection. */
+	@Nullable
+	private Connection connection;
+
+	/** Synchronization monitor for the shared Connection. */
+<span class="nc" id="L68">	private final Object connectionMonitor = new Object();</span>
+
+
+	/**
+	 * Create a new SingleConnectionFactory for bean-style usage.
+	 * @see #setTargetConnectionFactory
+	 */
+<span class="nc" id="L75">	public SingleConnectionFactory() {</span>
+<span class="nc" id="L76">	}</span>
+
+	/**
+	 * Create a new SingleConnectionFactory that always returns the
+	 * given Connection.
+	 * @param target the single Connection
+	 */
+<span class="nc" id="L83">	public SingleConnectionFactory(Connection target) {</span>
+<span class="nc" id="L84">		Assert.notNull(target, &quot;Target Connection must not be null&quot;);</span>
+<span class="nc" id="L85">		this.target = target;</span>
+<span class="nc" id="L86">		this.connection = getCloseSuppressingConnectionProxy(target);</span>
+<span class="nc" id="L87">	}</span>
+
+	/**
+	 * Create a new SingleConnectionFactory that always returns a single
+	 * Connection which it will lazily create via the given target
+	 * ConnectionFactory.
+	 * @param targetConnectionFactory the target ConnectionFactory
+	 */
+<span class="nc" id="L95">	public SingleConnectionFactory(ConnectionFactory targetConnectionFactory) {</span>
+<span class="nc" id="L96">		Assert.notNull(targetConnectionFactory, &quot;Target ConnectionFactory must not be null&quot;);</span>
+<span class="nc" id="L97">		setTargetConnectionFactory(targetConnectionFactory);</span>
+<span class="nc" id="L98">	}</span>
+
+
+	/**
+	 * Make sure a Connection or ConnectionFactory has been set.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="nc bnc" id="L106" title="All 4 branches missed.">		if (this.connection == null &amp;&amp; getTargetConnectionFactory() == null) {</span>
+<span class="nc" id="L107">			throw new IllegalArgumentException(&quot;Connection or 'targetConnectionFactory' is required&quot;);</span>
+		}
+<span class="nc" id="L109">	}</span>
+
+
+	@Override
+	public Connection getConnection() throws ResourceException {
+<span class="nc" id="L114">		synchronized (this.connectionMonitor) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">			if (this.connection == null) {</span>
+<span class="nc" id="L116">				initConnection();</span>
+			}
+<span class="nc" id="L118">			return this.connection;</span>
+		}
+	}
+
+	@Override
+	public Connection getConnection(ConnectionSpec connectionSpec) throws ResourceException {
+<span class="nc" id="L124">		throw new NotSupportedException(</span>
+				&quot;SingleConnectionFactory does not support custom ConnectionSpec&quot;);
+	}
+
+	/**
+	 * Close the underlying Connection.
+	 * The provider of this ConnectionFactory needs to care for proper shutdown.
+	 * &lt;p&gt;As this bean implements DisposableBean, a bean factory will
+	 * automatically invoke this on destruction of its cached singletons.
+	 */
+	@Override
+	public void destroy() {
+<span class="nc" id="L136">		resetConnection();</span>
+<span class="nc" id="L137">	}</span>
+
+
+	/**
+	 * Initialize the single underlying Connection.
+	 * &lt;p&gt;Closes and reinitializes the Connection if an underlying
+	 * Connection is present already.
+	 * @throws javax.resource.ResourceException if thrown by CCI API methods
+	 */
+	public void initConnection() throws ResourceException {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">		if (getTargetConnectionFactory() == null) {</span>
+<span class="nc" id="L148">			throw new IllegalStateException(</span>
+					&quot;'targetConnectionFactory' is required for lazily initializing a Connection&quot;);
+		}
+<span class="nc" id="L151">		synchronized (this.connectionMonitor) {</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">			if (this.target != null) {</span>
+<span class="nc" id="L153">				closeConnection(this.target);</span>
+			}
+<span class="nc" id="L155">			this.target = doCreateConnection();</span>
+<span class="nc" id="L156">			prepareConnection(this.target);</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L158">				logger.debug(&quot;Established shared CCI Connection: &quot; + this.target);</span>
+			}
+<span class="nc" id="L160">			this.connection = getCloseSuppressingConnectionProxy(this.target);</span>
+<span class="nc" id="L161">		}</span>
+<span class="nc" id="L162">	}</span>
+
+	/**
+	 * Reset the underlying shared Connection, to be reinitialized on next access.
+	 */
+	public void resetConnection() {
+<span class="nc" id="L168">		synchronized (this.connectionMonitor) {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">			if (this.target != null) {</span>
+<span class="nc" id="L170">				closeConnection(this.target);</span>
+			}
+<span class="nc" id="L172">			this.target = null;</span>
+<span class="nc" id="L173">			this.connection = null;</span>
+<span class="nc" id="L174">		}</span>
+<span class="nc" id="L175">	}</span>
+
+	/**
+	 * Create a CCI Connection via this template's ConnectionFactory.
+	 * @return the new CCI Connection
+	 * @throws javax.resource.ResourceException if thrown by CCI API methods
+	 */
+	protected Connection doCreateConnection() throws ResourceException {
+<span class="nc" id="L183">		ConnectionFactory connectionFactory = getTargetConnectionFactory();</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">		Assert.state(connectionFactory != null, &quot;No 'targetConnectionFactory' set&quot;);</span>
+<span class="nc" id="L185">		return connectionFactory.getConnection();</span>
+	}
+
+	/**
+	 * Prepare the given Connection before it is exposed.
+	 * &lt;p&gt;The default implementation is empty. Can be overridden in subclasses.
+	 * @param con the Connection to prepare
+	 */
+	protected void prepareConnection(Connection con) throws ResourceException {
+<span class="nc" id="L194">	}</span>
+
+	/**
+	 * Close the given Connection.
+	 * @param con the Connection to close
+	 */
+	protected void closeConnection(Connection con) {
+		try {
+<span class="nc" id="L202">			con.close();</span>
+		}
+<span class="nc" id="L204">		catch (Throwable ex) {</span>
+<span class="nc" id="L205">			logger.warn(&quot;Could not close shared CCI Connection&quot;, ex);</span>
+<span class="nc" id="L206">		}</span>
+<span class="nc" id="L207">	}</span>
+
+	/**
+	 * Wrap the given Connection with a proxy that delegates every method call to it
+	 * but suppresses close calls. This is useful for allowing application code to
+	 * handle a special framework Connection just like an ordinary Connection from a
+	 * CCI ConnectionFactory.
+	 * @param target the original Connection to wrap
+	 * @return the wrapped Connection
+	 */
+	protected Connection getCloseSuppressingConnectionProxy(Connection target) {
+<span class="nc" id="L218">		return (Connection) Proxy.newProxyInstance(</span>
+<span class="nc" id="L219">				Connection.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {Connection.class},
+				new CloseSuppressingInvocationHandler(target));
+	}
+
+
+	/**
+	 * Invocation handler that suppresses close calls on CCI Connections.
+	 */
+	private static final class CloseSuppressingInvocationHandler implements InvocationHandler {
+
+		private final Connection target;
+
+<span class="nc" id="L232">		private CloseSuppressingInvocationHandler(Connection target) {</span>
+<span class="nc" id="L233">			this.target = target;</span>
+<span class="nc" id="L234">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+<span class="nc bnc" id="L239" title="All 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L241" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="nc bnc" id="L243" title="All 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L245">				return System.identityHashCode(proxy);</span>
+			}
+<span class="nc bnc" id="L247" title="All 2 branches missed.">			else if (method.getName().equals(&quot;close&quot;)) {</span>
+				// Handle close method: don't pass the call on.
+<span class="nc" id="L249">				return null;</span>
+			}
+			try {
+<span class="nc" id="L252">				return method.invoke(this.target, args);</span>
+			}
+<span class="nc" id="L254">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L255">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceRegionEncoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.codec</a> &gt; <span class="el_source">ResourceRegionEncoder.java</span></div><h1>ResourceRegionEncoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.codec;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.OptionalLong;
+
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.support.ResourceRegion;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.StreamUtils;
+
+/**
+ * Encoder for {@link ResourceRegion ResourceRegions}.
+ *
+ * @author Brian Clozel
+ * @since 5.0
+ */
+public class ResourceRegionEncoder extends AbstractEncoder&lt;ResourceRegion&gt; {
+
+	/**
+	 * The default buffer size used by the encoder.
+	 */
+	public static final int DEFAULT_BUFFER_SIZE = StreamUtils.BUFFER_SIZE;
+
+	/**
+	 * The hint key that contains the boundary string.
+	 */
+<span class="fc" id="L57">	public static final String BOUNDARY_STRING_HINT = ResourceRegionEncoder.class.getName() + &quot;.boundaryString&quot;;</span>
+
+	private final int bufferSize;
+
+
+	public ResourceRegionEncoder() {
+<span class="fc" id="L63">		this(DEFAULT_BUFFER_SIZE);</span>
+<span class="fc" id="L64">	}</span>
+
+	public ResourceRegionEncoder(int bufferSize) {
+<span class="fc" id="L67">		super(MimeTypeUtils.APPLICATION_OCTET_STREAM, MimeTypeUtils.ALL);</span>
+<span class="pc bpc" id="L68" title="1 of 2 branches missed.">		Assert.isTrue(bufferSize &gt; 0, &quot;'bufferSize' must be larger than 0&quot;);</span>
+<span class="fc" id="L69">		this.bufferSize = bufferSize;</span>
+<span class="fc" id="L70">	}</span>
+
+	@Override
+	public boolean canEncode(ResolvableType elementType, @Nullable MimeType mimeType) {
+<span class="pc bpc" id="L74" title="1 of 2 branches missed.">		return super.canEncode(elementType, mimeType)</span>
+<span class="fc bfc" id="L75" title="All 2 branches covered.">				&amp;&amp; ResourceRegion.class.isAssignableFrom(elementType.toClass());</span>
+	}
+
+	@Override
+	public Flux&lt;DataBuffer&gt; encode(Publisher&lt;? extends ResourceRegion&gt; inputStream,
+			DataBufferFactory bufferFactory, ResolvableType elementType, @Nullable MimeType mimeType,
+			@Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L83">		Assert.notNull(inputStream, &quot;'inputStream' must not be null&quot;);</span>
+<span class="fc" id="L84">		Assert.notNull(bufferFactory, &quot;'bufferFactory' must not be null&quot;);</span>
+<span class="fc" id="L85">		Assert.notNull(elementType, &quot;'elementType' must not be null&quot;);</span>
+
+<span class="fc bfc" id="L87" title="All 2 branches covered.">		if (inputStream instanceof Mono) {</span>
+<span class="fc" id="L88">			return Mono.from(inputStream)</span>
+<span class="fc" id="L89">					.flatMapMany(region -&gt; {</span>
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">						if (!region.getResource().isReadable()) {</span>
+<span class="nc" id="L91">							return Flux.error(new EncodingException(</span>
+<span class="nc" id="L92">									&quot;Resource &quot; + region.getResource() + &quot; is not readable&quot;));</span>
+						}
+<span class="fc" id="L94">						return writeResourceRegion(region, bufferFactory, hints);</span>
+					});
+		}
+		else {
+<span class="fc" id="L98">			final String boundaryString = Hints.getRequiredHint(hints, BOUNDARY_STRING_HINT);</span>
+<span class="fc" id="L99">			byte[] startBoundary = getAsciiBytes(&quot;\r\n--&quot; + boundaryString + &quot;\r\n&quot;);</span>
+<span class="pc bpc" id="L100" title="1 of 2 branches missed.">			byte[] contentType = mimeType != null ? getAsciiBytes(&quot;Content-Type: &quot; + mimeType + &quot;\r\n&quot;) : new byte[0];</span>
+
+<span class="fc" id="L102">			return Flux.from(inputStream).</span>
+<span class="fc" id="L103">					concatMap(region -&gt; {</span>
+<span class="fc bfc" id="L104" title="All 2 branches covered.">						if (!region.getResource().isReadable()) {</span>
+<span class="fc" id="L105">							return Flux.error(new EncodingException(</span>
+<span class="fc" id="L106">									&quot;Resource &quot; + region.getResource() + &quot; is not readable&quot;));</span>
+						}
+						else {
+<span class="fc" id="L109">							return Flux.concat(</span>
+<span class="fc" id="L110">									getRegionPrefix(bufferFactory, startBoundary, contentType, region),</span>
+<span class="fc" id="L111">									writeResourceRegion(region, bufferFactory, hints));</span>
+						}
+					})
+<span class="fc" id="L114">					.concatWith(getRegionSuffix(bufferFactory, boundaryString));</span>
+		}
+	}
+
+	private Flux&lt;DataBuffer&gt; getRegionPrefix(DataBufferFactory bufferFactory, byte[] startBoundary,
+			byte[] contentType, ResourceRegion region) {
+
+<span class="fc" id="L121">		return Flux.just(</span>
+<span class="fc" id="L122">				bufferFactory.wrap(startBoundary),</span>
+<span class="fc" id="L123">				bufferFactory.wrap(contentType),</span>
+<span class="fc" id="L124">				bufferFactory.wrap(getContentRangeHeader(region))); // only wrapping, no allocation</span>
+	}
+
+	private Flux&lt;DataBuffer&gt; writeResourceRegion(
+			ResourceRegion region, DataBufferFactory bufferFactory, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L130">		Resource resource = region.getResource();</span>
+<span class="fc" id="L131">		long position = region.getPosition();</span>
+<span class="fc" id="L132">		long count = region.getCount();</span>
+
+<span class="pc bpc" id="L134" title="3 of 4 branches missed.">		if (logger.isDebugEnabled() &amp;&amp; !Hints.isLoggingSuppressed(hints)) {</span>
+<span class="nc" id="L135">			logger.debug(Hints.getLogPrefix(hints) +</span>
+					&quot;Writing region &quot; + position + &quot;-&quot; + (position + count) + &quot; of [&quot; + resource + &quot;]&quot;);
+		}
+
+<span class="fc" id="L139">		Flux&lt;DataBuffer&gt; in = DataBufferUtils.read(resource, position, bufferFactory, this.bufferSize);</span>
+<span class="fc" id="L140">		return DataBufferUtils.takeUntilByteCount(in, count);</span>
+	}
+
+	private Flux&lt;DataBuffer&gt; getRegionSuffix(DataBufferFactory bufferFactory, String boundaryString) {
+<span class="fc" id="L144">		byte[] endBoundary = getAsciiBytes(&quot;\r\n--&quot; + boundaryString + &quot;--&quot;);</span>
+<span class="fc" id="L145">		return Flux.just(bufferFactory.wrap(endBoundary));</span>
+	}
+
+	private byte[] getAsciiBytes(String in) {
+<span class="fc" id="L149">		return in.getBytes(StandardCharsets.US_ASCII);</span>
+	}
+
+	private byte[] getContentRangeHeader(ResourceRegion region) {
+<span class="fc" id="L153">		long start = region.getPosition();</span>
+<span class="fc" id="L154">		long end = start + region.getCount() - 1;</span>
+<span class="fc" id="L155">		OptionalLong contentLength = contentLength(region.getResource());</span>
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">		if (contentLength.isPresent()) {</span>
+<span class="fc" id="L157">			long length = contentLength.getAsLong();</span>
+<span class="fc" id="L158">			return getAsciiBytes(&quot;Content-Range: bytes &quot; + start + '-' + end + '/' + length + &quot;\r\n\r\n&quot;);</span>
+		}
+		else {
+<span class="nc" id="L161">			return getAsciiBytes(&quot;Content-Range: bytes &quot; + start + '-' + end + &quot;\r\n\r\n&quot;);</span>
+		}
+	}
+
+	/**
+	 * Determine, if possible, the contentLength of the given resource without reading it.
+	 * @param resource the resource instance
+	 * @return the contentLength of the resource
+	 */
+	private OptionalLong contentLength(Resource resource) {
+		// Don't try to determine contentLength on InputStreamResource - cannot be read afterwards...
+		// Note: custom InputStreamResource subclasses could provide a pre-calculated content length!
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">		if (InputStreamResource.class != resource.getClass()) {</span>
+			try {
+<span class="fc" id="L175">				return OptionalLong.of(resource.contentLength());</span>
+			}
+<span class="nc" id="L177">			catch (IOException ignored) {</span>
+			}
+		}
+<span class="nc" id="L180">		return OptionalLong.empty();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

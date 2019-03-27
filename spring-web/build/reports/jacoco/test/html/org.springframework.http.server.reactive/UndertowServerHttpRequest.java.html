@@ -1,0 +1,385 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UndertowServerHttpRequest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">UndertowServerHttpRequest.java</span></div><h1>UndertowServerHttpRequest.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
+import java.util.function.IntPredicate;
+import javax.net.ssl.SSLSession;
+
+import io.undertow.connector.ByteBufferPool;
+import io.undertow.connector.PooledByteBuffer;
+import io.undertow.server.HttpServerExchange;
+import io.undertow.server.handlers.Cookie;
+import org.xnio.channels.StreamSourceChannel;
+import reactor.core.publisher.Flux;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.PooledDataBuffer;
+import org.springframework.http.HttpCookie;
+import org.springframework.http.HttpHeaders;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Adapt {@link ServerHttpRequest} to the Undertow {@link HttpServerExchange}.
+ *
+ * @author Marek Hawrylczak
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+class UndertowServerHttpRequest extends AbstractServerHttpRequest {
+
+	private final HttpServerExchange exchange;
+
+	private final RequestBodyPublisher body;
+
+
+	public UndertowServerHttpRequest(HttpServerExchange exchange, DataBufferFactory bufferFactory)
+			throws URISyntaxException {
+
+<span class="fc" id="L67">		super(initUri(exchange), &quot;&quot;, initHeaders(exchange));</span>
+<span class="fc" id="L68">		this.exchange = exchange;</span>
+<span class="fc" id="L69">		this.body = new RequestBodyPublisher(exchange, bufferFactory);</span>
+<span class="fc" id="L70">		this.body.registerListeners(exchange);</span>
+<span class="fc" id="L71">	}</span>
+
+	private static URI initUri(HttpServerExchange exchange) throws URISyntaxException {
+<span class="fc" id="L74">		Assert.notNull(exchange, &quot;HttpServerExchange is required.&quot;);</span>
+<span class="fc" id="L75">		String requestURL = exchange.getRequestURL();</span>
+<span class="fc" id="L76">		String query = exchange.getQueryString();</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">		String requestUriAndQuery = StringUtils.isEmpty(query) ? requestURL : requestURL + &quot;?&quot; + query;</span>
+<span class="fc" id="L78">		return new URI(requestUriAndQuery);</span>
+	}
+
+	private static HttpHeaders initHeaders(HttpServerExchange exchange) {
+<span class="fc" id="L82">		UndertowHeadersAdapter headersMap =</span>
+<span class="fc" id="L83">				new UndertowHeadersAdapter(exchange.getRequestHeaders());</span>
+<span class="fc" id="L84">		return new HttpHeaders(headersMap);</span>
+	}
+
+	@Override
+	public String getMethodValue() {
+<span class="fc" id="L89">		return this.exchange.getRequestMethod().toString();</span>
+	}
+
+	@Override
+	protected MultiValueMap&lt;String, HttpCookie&gt; initCookies() {
+<span class="fc" id="L94">		MultiValueMap&lt;String, HttpCookie&gt; cookies = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">		for (String name : this.exchange.getRequestCookies().keySet()) {</span>
+<span class="fc" id="L96">			Cookie cookie = this.exchange.getRequestCookies().get(name);</span>
+<span class="fc" id="L97">			HttpCookie httpCookie = new HttpCookie(name, cookie.getValue());</span>
+<span class="fc" id="L98">			cookies.add(name, httpCookie);</span>
+<span class="fc" id="L99">		}</span>
+<span class="fc" id="L100">		return cookies;</span>
+	}
+
+	@Override
+	public InetSocketAddress getRemoteAddress() {
+<span class="fc" id="L105">		return this.exchange.getSourceAddress();</span>
+	}
+
+	@Nullable
+	@Override
+	protected SslInfo initSslInfo() {
+<span class="nc" id="L111">		SSLSession session = this.exchange.getConnection().getSslSession();</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">		if (session != null) {</span>
+<span class="nc" id="L113">			return new DefaultSslInfo(session);</span>
+		}
+<span class="nc" id="L115">		return null;</span>
+	}
+
+	@Override
+	public Flux&lt;DataBuffer&gt; getBody() {
+<span class="fc" id="L120">		return Flux.from(this.body);</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; T getNativeRequest() {
+<span class="nc" id="L126">		return (T) this.exchange;</span>
+	}
+
+	@Override
+	protected String initId() {
+<span class="fc" id="L131">		return ObjectUtils.getIdentityHexString(this.exchange.getConnection());</span>
+	}
+
+
+	private class RequestBodyPublisher extends AbstractListenerReadPublisher&lt;DataBuffer&gt; {
+
+		private final StreamSourceChannel channel;
+
+		private final DataBufferFactory bufferFactory;
+
+		private final ByteBufferPool byteBufferPool;
+
+<span class="fc" id="L143">		public RequestBodyPublisher(HttpServerExchange exchange, DataBufferFactory bufferFactory) {</span>
+<span class="fc" id="L144">			super(UndertowServerHttpRequest.this.getLogPrefix());</span>
+<span class="fc" id="L145">			this.channel = exchange.getRequestChannel();</span>
+<span class="fc" id="L146">			this.bufferFactory = bufferFactory;</span>
+<span class="fc" id="L147">			this.byteBufferPool = exchange.getConnection().getByteBufferPool();</span>
+<span class="fc" id="L148">		}</span>
+
+		private void registerListeners(HttpServerExchange exchange) {
+<span class="fc" id="L151">			exchange.addExchangeCompleteListener((ex, next) -&gt; {</span>
+<span class="fc" id="L152">				onAllDataRead();</span>
+<span class="fc" id="L153">				next.proceed();</span>
+<span class="fc" id="L154">			});</span>
+<span class="fc" id="L155">			this.channel.getReadSetter().set(c -&gt; onDataAvailable());</span>
+<span class="pc" id="L156">			this.channel.getCloseSetter().set(c -&gt; onAllDataRead());</span>
+<span class="fc" id="L157">			this.channel.resumeReads();</span>
+<span class="fc" id="L158">		}</span>
+
+		@Override
+		protected void checkOnDataAvailable() {
+<span class="fc" id="L162">			this.channel.resumeReads();</span>
+			// We are allowed to try, it will return null if data is not available
+<span class="fc" id="L164">			onDataAvailable();</span>
+<span class="fc" id="L165">		}</span>
+
+		@Override
+		protected void readingPaused() {
+<span class="fc" id="L169">			this.channel.suspendReads();</span>
+<span class="fc" id="L170">		}</span>
+
+		@Override
+		@Nullable
+		protected DataBuffer read() throws IOException {
+<span class="fc" id="L175">			PooledByteBuffer pooledByteBuffer = this.byteBufferPool.allocate();</span>
+<span class="fc" id="L176">			boolean release = true;</span>
+			try {
+<span class="fc" id="L178">				ByteBuffer byteBuffer = pooledByteBuffer.getBuffer();</span>
+<span class="fc" id="L179">				int read = this.channel.read(byteBuffer);</span>
+
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">				if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">					rsReadLogger.trace(getLogPrefix() + &quot;Read &quot; + read + (read != -1 ? &quot; bytes&quot; : &quot;&quot;));</span>
+				}
+
+<span class="fc bfc" id="L185" title="All 2 branches covered.">				if (read &gt; 0) {</span>
+<span class="fc" id="L186">					byteBuffer.flip();</span>
+<span class="fc" id="L187">					DataBuffer dataBuffer = this.bufferFactory.wrap(byteBuffer);</span>
+<span class="fc" id="L188">					release = false;</span>
+<span class="fc" id="L189">					return new UndertowDataBuffer(dataBuffer, pooledByteBuffer);</span>
+				}
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">				else if (read == -1) {</span>
+<span class="fc" id="L192">					onAllDataRead();</span>
+				}
+<span class="fc" id="L194">				return null;</span>
+			}
+			finally {
+<span class="pc bpc" id="L197" title="1 of 4 branches missed.">				if (release &amp;&amp; pooledByteBuffer.isOpen()) {</span>
+<span class="fc" id="L198">					pooledByteBuffer.close();</span>
+				}
+			}
+		}
+
+		@Override
+		protected void discardData() {
+			// Nothing to discard since we pass data buffers on immediately..
+<span class="nc" id="L206">		}</span>
+	}
+
+
+	private static class UndertowDataBuffer implements PooledDataBuffer {
+
+		private final DataBuffer dataBuffer;
+
+		private final PooledByteBuffer pooledByteBuffer;
+
+<span class="fc" id="L216">		public UndertowDataBuffer(DataBuffer dataBuffer, PooledByteBuffer pooledByteBuffer) {</span>
+<span class="fc" id="L217">			this.dataBuffer = dataBuffer;</span>
+<span class="fc" id="L218">			this.pooledByteBuffer = pooledByteBuffer;</span>
+<span class="fc" id="L219">		}</span>
+
+		@Override
+		public boolean isAllocated() {
+<span class="fc" id="L223">			return this.pooledByteBuffer.isOpen();</span>
+		}
+
+		@Override
+		public PooledDataBuffer retain() {
+<span class="nc" id="L228">			return this;</span>
+		}
+
+		@Override
+		public boolean release() {
+			boolean result;
+			try {
+<span class="fc" id="L235">				result = DataBufferUtils.release(this.dataBuffer);</span>
+			}
+			finally {
+<span class="fc" id="L238">				this.pooledByteBuffer.close();</span>
+			}
+<span class="pc bpc" id="L240" title="3 of 4 branches missed.">			return result &amp;&amp; this.pooledByteBuffer.isOpen();</span>
+		}
+
+		@Override
+		public DataBufferFactory factory() {
+<span class="nc" id="L245">			return this.dataBuffer.factory();</span>
+		}
+
+		@Override
+		public int indexOf(IntPredicate predicate, int fromIndex) {
+<span class="nc" id="L250">			return this.dataBuffer.indexOf(predicate, fromIndex);</span>
+		}
+
+		@Override
+		public int lastIndexOf(IntPredicate predicate, int fromIndex) {
+<span class="nc" id="L255">			return this.dataBuffer.lastIndexOf(predicate, fromIndex);</span>
+		}
+
+		@Override
+		public int readableByteCount() {
+<span class="fc" id="L260">			return this.dataBuffer.readableByteCount();</span>
+		}
+
+		@Override
+		public int writableByteCount() {
+<span class="nc" id="L265">			return this.dataBuffer.writableByteCount();</span>
+		}
+
+		@Override
+		public int readPosition() {
+<span class="nc" id="L270">			return this.dataBuffer.readPosition();</span>
+		}
+
+		@Override
+		public DataBuffer readPosition(int readPosition) {
+<span class="nc" id="L275">			return this.dataBuffer.readPosition(readPosition);</span>
+		}
+
+		@Override
+		public int writePosition() {
+<span class="nc" id="L280">			return this.dataBuffer.writePosition();</span>
+		}
+
+		@Override
+		public DataBuffer writePosition(int writePosition) {
+<span class="nc" id="L285">			return this.dataBuffer.writePosition(writePosition);</span>
+		}
+
+		@Override
+		public int capacity() {
+<span class="nc" id="L290">			return this.dataBuffer.capacity();</span>
+		}
+
+		@Override
+		public DataBuffer capacity(int newCapacity) {
+<span class="nc" id="L295">			return this.dataBuffer.capacity(newCapacity);</span>
+		}
+
+		@Override
+		public DataBuffer ensureCapacity(int capacity) {
+<span class="nc" id="L300">			return this.dataBuffer.ensureCapacity(capacity);</span>
+		}
+
+		@Override
+		public byte getByte(int index) {
+<span class="nc" id="L305">			return this.dataBuffer.getByte(index);</span>
+		}
+
+		@Override
+		public byte read() {
+<span class="nc" id="L310">			return this.dataBuffer.read();</span>
+		}
+
+		@Override
+		public DataBuffer read(byte[] destination) {
+<span class="fc" id="L315">			return this.dataBuffer.read(destination);</span>
+		}
+
+		@Override
+		public DataBuffer read(byte[] destination, int offset, int length) {
+<span class="nc" id="L320">			return this.dataBuffer.read(destination, offset, length);</span>
+		}
+
+		@Override
+		public DataBuffer write(byte b) {
+<span class="nc" id="L325">			return this.dataBuffer.write(b);</span>
+		}
+
+		@Override
+		public DataBuffer write(byte[] source) {
+<span class="nc" id="L330">			return this.dataBuffer.write(source);</span>
+		}
+
+		@Override
+		public DataBuffer write(byte[] source, int offset, int length) {
+<span class="nc" id="L335">			return this.dataBuffer.write(source, offset, length);</span>
+		}
+
+		@Override
+		public DataBuffer write(DataBuffer... buffers) {
+<span class="nc" id="L340">			return this.dataBuffer.write(buffers);</span>
+		}
+
+		@Override
+		public DataBuffer write(ByteBuffer... byteBuffers) {
+<span class="nc" id="L345">			return this.dataBuffer.write(byteBuffers);</span>
+		}
+
+		@Override
+		public DataBuffer write(CharSequence charSequence, Charset charset) {
+<span class="nc" id="L350">			return this.dataBuffer.write(charSequence, charset);</span>
+		}
+
+		@Override
+		public DataBuffer slice(int index, int length) {
+<span class="nc" id="L355">			return this.dataBuffer.slice(index, length);</span>
+		}
+
+		@Override
+		public ByteBuffer asByteBuffer() {
+<span class="fc" id="L360">			return this.dataBuffer.asByteBuffer();</span>
+		}
+
+		@Override
+		public ByteBuffer asByteBuffer(int index, int length) {
+<span class="nc" id="L365">			return this.dataBuffer.asByteBuffer(index, length);</span>
+		}
+
+		@Override
+		public InputStream asInputStream() {
+<span class="nc" id="L370">			return this.dataBuffer.asInputStream();</span>
+		}
+
+		@Override
+		public InputStream asInputStream(boolean releaseOnClose) {
+<span class="nc" id="L375">			return this.dataBuffer.asInputStream(releaseOnClose);</span>
+		}
+
+		@Override
+		public OutputStream asOutputStream() {
+<span class="nc" id="L380">			return this.dataBuffer.asOutputStream();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

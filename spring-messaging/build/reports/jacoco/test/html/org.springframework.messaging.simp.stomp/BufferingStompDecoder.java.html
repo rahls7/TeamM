@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BufferingStompDecoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.stomp</a> &gt; <span class="el_source">BufferingStompDecoder.java</span></div><h1>BufferingStompDecoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.stomp;
+
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.LinkedBlockingQueue;
+
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.util.Assert;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+
+/**
+ * An extension of {@link org.springframework.messaging.simp.stomp.StompDecoder}
+ * that buffers content remaining in the input ByteBuffer after the parent
+ * class has read all (complete) STOMP frames from it. The remaining content
+ * represents an incomplete STOMP frame. When called repeatedly with additional
+ * data, the decode method returns one or more messages or, if there is not
+ * enough data still, continues to buffer.
+ *
+ * &lt;p&gt;A single instance of this decoder can be invoked repeatedly to read all
+ * messages from a single stream (e.g. WebSocket session) as long as decoding
+ * does not fail. If there is an exception, StompDecoder instance should not
+ * be used any more as its internal state is not guaranteed to be consistent.
+ * It is expected that the underlying session is closed at that point.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.0.3
+ * @see StompDecoder
+ */
+public class BufferingStompDecoder {
+
+	private final StompDecoder stompDecoder;
+
+	private final int bufferSizeLimit;
+
+<span class="fc" id="L55">	private final Queue&lt;ByteBuffer&gt; chunks = new LinkedBlockingQueue&lt;&gt;();</span>
+
+	@Nullable
+	private volatile Integer expectedContentLength;
+
+
+	/**
+	 * Create a new {@code BufferingStompDecoder} wrapping the given {@code StompDecoder}.
+	 * @param stompDecoder the target decoder to wrap
+	 * @param bufferSizeLimit the buffer size limit
+	 */
+<span class="fc" id="L66">	public BufferingStompDecoder(StompDecoder stompDecoder, int bufferSizeLimit) {</span>
+<span class="fc" id="L67">		Assert.notNull(stompDecoder, &quot;StompDecoder is required&quot;);</span>
+<span class="pc bpc" id="L68" title="1 of 2 branches missed.">		Assert.isTrue(bufferSizeLimit &gt; 0, &quot;Buffer size limit must be greater than 0&quot;);</span>
+<span class="fc" id="L69">		this.stompDecoder = stompDecoder;</span>
+<span class="fc" id="L70">		this.bufferSizeLimit = bufferSizeLimit;</span>
+<span class="fc" id="L71">	}</span>
+
+
+	/**
+	 * Return the wrapped {@link StompDecoder}.
+	 */
+	public final StompDecoder getStompDecoder() {
+<span class="nc" id="L78">		return this.stompDecoder;</span>
+	}
+
+	/**
+	 * Return the configured buffer size limit.
+	 */
+	public final int getBufferSizeLimit() {
+<span class="nc" id="L85">		return this.bufferSizeLimit;</span>
+	}
+
+
+	/**
+	 * Decodes one or more STOMP frames from the given {@code ByteBuffer} into a
+	 * list of {@link Message Messages}.
+	 * &lt;p&gt;If there was enough data to parse a &quot;content-length&quot; header, then the
+	 * value is used to determine how much more data is needed before a new
+	 * attempt to decode is made.
+	 * &lt;p&gt;If there was not enough data to parse the &quot;content-length&quot;, or if there
+	 * is &quot;content-length&quot; header, every subsequent call to decode attempts to
+	 * parse again with all available data. Therefore the presence of a &quot;content-length&quot;
+	 * header helps to optimize the decoding of large messages.
+	 * @param newBuffer a buffer containing new data to decode
+	 * @return decoded messages or an empty list
+	 * @throws StompConversionException raised in case of decoding issues
+	 */
+	public List&lt;Message&lt;byte[]&gt;&gt; decode(ByteBuffer newBuffer) {
+<span class="fc" id="L104">		this.chunks.add(newBuffer);</span>
+<span class="fc" id="L105">		checkBufferLimits();</span>
+
+<span class="fc" id="L107">		Integer contentLength = this.expectedContentLength;</span>
+<span class="pc bpc" id="L108" title="1 of 4 branches missed.">		if (contentLength != null &amp;&amp; getBufferSize() &lt; contentLength) {</span>
+<span class="nc" id="L109">			return Collections.emptyList();</span>
+		}
+
+<span class="fc" id="L112">		ByteBuffer bufferToDecode = assembleChunksAndReset();</span>
+<span class="fc" id="L113">		MultiValueMap&lt;String, String&gt; headers = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="fc" id="L114">		List&lt;Message&lt;byte[]&gt;&gt; messages = this.stompDecoder.decode(bufferToDecode, headers);</span>
+
+<span class="fc bfc" id="L116" title="All 2 branches covered.">		if (bufferToDecode.hasRemaining()) {</span>
+<span class="fc" id="L117">			this.chunks.add(bufferToDecode);</span>
+<span class="fc" id="L118">			this.expectedContentLength = StompHeaderAccessor.getContentLength(headers);</span>
+		}
+
+<span class="fc" id="L121">		return messages;</span>
+	}
+
+	private ByteBuffer assembleChunksAndReset() {
+		ByteBuffer result;
+<span class="fc bfc" id="L126" title="All 2 branches covered.">		if (this.chunks.size() == 1) {</span>
+<span class="fc" id="L127">			result = this.chunks.remove();</span>
+		}
+		else {
+<span class="fc" id="L130">			result = ByteBuffer.allocate(getBufferSize());</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">			for (ByteBuffer partial : this.chunks) {</span>
+<span class="fc" id="L132">				result.put(partial);</span>
+<span class="fc" id="L133">			}</span>
+<span class="fc" id="L134">			result.flip();</span>
+		}
+<span class="fc" id="L136">		this.chunks.clear();</span>
+<span class="fc" id="L137">		this.expectedContentLength = null;</span>
+<span class="fc" id="L138">		return result;</span>
+	}
+
+	private void checkBufferLimits() {
+<span class="fc" id="L142">		Integer contentLength = this.expectedContentLength;</span>
+<span class="fc bfc" id="L143" title="All 4 branches covered.">		if (contentLength != null &amp;&amp; contentLength &gt; this.bufferSizeLimit) {</span>
+<span class="fc" id="L144">			throw new StompConversionException(</span>
+					&quot;STOMP 'content-length' header value &quot; + this.expectedContentLength +
+					&quot;  exceeds configured buffer size limit &quot; + this.bufferSizeLimit);
+		}
+<span class="fc bfc" id="L148" title="All 2 branches covered.">		if (getBufferSize() &gt; this.bufferSizeLimit) {</span>
+<span class="fc" id="L149">			throw new StompConversionException(&quot;The configured STOMP buffer size limit of &quot; +</span>
+					this.bufferSizeLimit + &quot; bytes has been exceeded&quot;);
+		}
+<span class="fc" id="L152">	}</span>
+
+	/**
+	 * Calculate the current buffer size.
+	 */
+	public int getBufferSize() {
+<span class="fc" id="L158">		int size = 0;</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		for (ByteBuffer buffer : this.chunks) {</span>
+<span class="fc" id="L160">			size = size + buffer.remaining();</span>
+<span class="fc" id="L161">		}</span>
+<span class="fc" id="L162">		return size;</span>
+	}
+
+	/**
+	 * Get the expected content length of the currently buffered, incomplete STOMP frame.
+	 */
+	@Nullable
+	public Integer getExpectedContentLength() {
+<span class="fc" id="L170">		return this.expectedContentLength;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

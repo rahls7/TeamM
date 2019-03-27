@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReactiveAdapterRegistry.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core</a> &gt; <span class="el_source">ReactiveAdapterRegistry.java</span></div><h1>ReactiveAdapterRegistry.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
+
+import io.reactivex.BackpressureStrategy;
+import io.reactivex.Flowable;
+import kotlinx.coroutines.CompletableDeferredKt;
+import kotlinx.coroutines.Deferred;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import rx.RxReactiveStreams;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * A registry of adapters to adapt Reactive Streams {@link Publisher} to/from
+ * various async/reactive types such as {@code CompletableFuture}, RxJava
+ * {@code Observable}, and others.
+ *
+ * &lt;p&gt;By default, depending on classpath availability, adapters are registered
+ * for Reactor, RxJava 1, RxJava 2 types, {@link CompletableFuture}, Java 9+
+ * {@code Flow.Publisher} and Kotlin Coroutines {@code Deferred}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @since 5.0
+ */
+public class ReactiveAdapterRegistry {
+
+	@Nullable
+	private static volatile ReactiveAdapterRegistry sharedInstance;
+
+	private final boolean reactorPresent;
+
+<span class="fc" id="L59">	private final List&lt;ReactiveAdapter&gt; adapters = new ArrayList&lt;&gt;(32);</span>
+
+
+	/**
+	 * Create a registry and auto-register default adapters.
+	 * @see #getSharedInstance()
+	 */
+<span class="fc" id="L66">	public ReactiveAdapterRegistry() {</span>
+
+<span class="fc" id="L68">		ClassLoader classLoader = ReactiveAdapterRegistry.class.getClassLoader();</span>
+
+		// Reactor
+<span class="fc" id="L71">		boolean reactorRegistered = false;</span>
+<span class="pc bpc" id="L72" title="1 of 2 branches missed.">		if (ClassUtils.isPresent(&quot;reactor.core.publisher.Flux&quot;, classLoader)) {</span>
+<span class="fc" id="L73">			new ReactorRegistrar().registerAdapters(this);</span>
+<span class="fc" id="L74">			reactorRegistered = true;</span>
+		}
+<span class="fc" id="L76">		this.reactorPresent = reactorRegistered;</span>
+
+		// RxJava1
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">		if (ClassUtils.isPresent(&quot;rx.Observable&quot;, classLoader) &amp;&amp;</span>
+<span class="pc bpc" id="L80" title="1 of 2 branches missed.">				ClassUtils.isPresent(&quot;rx.RxReactiveStreams&quot;, classLoader)) {</span>
+<span class="fc" id="L81">			new RxJava1Registrar().registerAdapters(this);</span>
+		}
+
+		// RxJava2
+<span class="pc bpc" id="L85" title="1 of 2 branches missed.">		if (ClassUtils.isPresent(&quot;io.reactivex.Flowable&quot;, classLoader)) {</span>
+<span class="fc" id="L86">			new RxJava2Registrar().registerAdapters(this);</span>
+		}
+
+		// Java 9+ Flow.Publisher
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">		if (ClassUtils.isPresent(&quot;java.util.concurrent.Flow.Publisher&quot;, classLoader)) {</span>
+<span class="nc" id="L91">			new ReactorJdkFlowAdapterRegistrar().registerAdapter(this);</span>
+		}
+		// If not present, do nothing for the time being...
+		// We can fall back on &quot;reactive-streams-flow-bridge&quot; (once released)
+
+		// Coroutines
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">		if (ClassUtils.isPresent(&quot;kotlinx.coroutines.Deferred&quot;, classLoader)) {</span>
+<span class="fc" id="L98">			new CoroutinesRegistrar().registerAdapters(this);</span>
+		}
+<span class="fc" id="L100">	}</span>
+
+
+	/**
+	 * Whether the registry has any adapters which would be the case if any of
+	 * Reactor, RxJava 2, or RxJava 1 (+ RxJava Reactive Streams bridge) are
+	 * present on the classpath.
+	 */
+	public boolean hasAdapters() {
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">		return !this.adapters.isEmpty();</span>
+	}
+
+	/**
+	 * Register a reactive type along with functions to adapt to and from a
+	 * Reactive Streams {@link Publisher}. The functions can assume their
+	 * input is never be {@code null} nor {@link Optional}.
+	 */
+	public void registerReactiveType(ReactiveTypeDescriptor descriptor,
+			Function&lt;Object, Publisher&lt;?&gt;&gt; toAdapter, Function&lt;Publisher&lt;?&gt;, Object&gt; fromAdapter) {
+
+<span class="fc bfc" id="L120" title="All 2 branches covered.">		if (this.reactorPresent) {</span>
+<span class="fc" id="L121">			this.adapters.add(new ReactorAdapter(descriptor, toAdapter, fromAdapter));</span>
+		}
+		else {
+<span class="fc" id="L124">			this.adapters.add(new ReactiveAdapter(descriptor, toAdapter, fromAdapter));</span>
+		}
+<span class="fc" id="L126">	}</span>
+
+	/**
+	 * Get the adapter for the given reactive type.
+	 */
+	@Nullable
+	public ReactiveAdapter getAdapter(Class&lt;?&gt; reactiveType) {
+<span class="fc" id="L133">		return getAdapter(reactiveType, null);</span>
+	}
+
+	/**
+	 * Get the adapter for the given reactive type. Or if a &quot;source&quot; object is
+	 * provided, its actual type is used instead.
+	 * @param reactiveType the reactive type
+	 * (may be {@code null} if a concrete source object is given)
+	 * @param source an instance of the reactive type
+	 * (i.e. to adapt from; may be {@code null} if the reactive type is specified)
+	 */
+	@Nullable
+	public ReactiveAdapter getAdapter(@Nullable Class&lt;?&gt; reactiveType, @Nullable Object source) {
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">		Object sourceToUse = (source instanceof Optional ? ((Optional&lt;?&gt;) source).orElse(null) : source);</span>
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">		Class&lt;?&gt; clazz = (sourceToUse != null ? sourceToUse.getClass() : reactiveType);</span>
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">		if (clazz == null) {</span>
+<span class="nc" id="L149">			return null;</span>
+		}
+<span class="fc bfc" id="L151" title="All 2 branches covered.">		for(ReactiveAdapter adapter : this.adapters) {</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">			if (adapter.getReactiveType() == clazz) {</span>
+<span class="fc" id="L153">				return adapter;</span>
+			}
+<span class="fc" id="L155">		}</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">		for(ReactiveAdapter adapter : this.adapters) {</span>
+<span class="fc bfc" id="L157" title="All 2 branches covered.">			if (adapter.getReactiveType().isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L158">				return adapter;</span>
+			}
+<span class="fc" id="L160">		}</span>
+<span class="fc" id="L161">		return null;</span>
+	}
+
+
+	/**
+	 * Return a shared default {@code ReactiveAdapterRegistry} instance, lazily
+	 * building it once needed.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; We highly recommend passing a long-lived, pre-configured
+	 * {@code ReactiveAdapterRegistry} instance for customization purposes.
+	 * This accessor is only meant as a fallback for code paths that want to
+	 * fall back on a default instance if one isn't provided.
+	 * @return the shared {@code ReactiveAdapterRegistry} instance (never {@code null})
+	 * @since 5.0.2
+	 */
+	public static ReactiveAdapterRegistry getSharedInstance() {
+<span class="fc" id="L176">		ReactiveAdapterRegistry registry = sharedInstance;</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">		if (registry == null) {</span>
+<span class="fc" id="L178">			synchronized (ReactiveAdapterRegistry.class) {</span>
+<span class="fc" id="L179">				registry = sharedInstance;</span>
+<span class="pc bpc" id="L180" title="1 of 2 branches missed.">				if (registry == null) {</span>
+<span class="fc" id="L181">					registry = new ReactiveAdapterRegistry();</span>
+<span class="fc" id="L182">					sharedInstance = registry;</span>
+				}
+<span class="fc" id="L184">			}</span>
+		}
+<span class="fc" id="L186">		return registry;</span>
+	}
+
+
+	private static class ReactorRegistrar {
+
+		void registerAdapters(ReactiveAdapterRegistry registry) {
+			// Register Flux and Mono before Publisher...
+
+<span class="fc" id="L195">			registry.registerReactiveType(</span>
+<span class="fc" id="L196">					ReactiveTypeDescriptor.singleOptionalValue(Mono.class, Mono::empty),</span>
+<span class="nc" id="L197">					source -&gt; (Mono&lt;?&gt;) source,</span>
+					Mono::from
+			);
+
+<span class="fc" id="L201">			registry.registerReactiveType(</span>
+<span class="fc" id="L202">					ReactiveTypeDescriptor.multiValue(Flux.class, Flux::empty),</span>
+<span class="nc" id="L203">					source -&gt; (Flux&lt;?&gt;) source,</span>
+					Flux::from);
+
+<span class="fc" id="L206">			registry.registerReactiveType(</span>
+<span class="fc" id="L207">					ReactiveTypeDescriptor.multiValue(Publisher.class, Flux::empty),</span>
+<span class="nc" id="L208">					source -&gt; (Publisher&lt;?&gt;) source,</span>
+<span class="nc" id="L209">					source -&gt; source);</span>
+
+<span class="fc" id="L211">			registry.registerReactiveType(</span>
+<span class="fc" id="L212">					ReactiveTypeDescriptor.singleOptionalValue(CompletableFuture.class, () -&gt; {</span>
+<span class="nc" id="L213">						CompletableFuture&lt;?&gt; empty = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L214">						empty.complete(null);</span>
+<span class="nc" id="L215">						return empty;</span>
+					}),
+<span class="fc" id="L217">					source -&gt; Mono.fromFuture((CompletableFuture&lt;?&gt;) source),</span>
+<span class="fc" id="L218">					source -&gt; Mono.from(source).toFuture()</span>
+			);
+<span class="fc" id="L220">		}</span>
+	}
+
+
+	private static class RxJava1Registrar {
+
+		void registerAdapters(ReactiveAdapterRegistry registry) {
+<span class="fc" id="L227">			registry.registerReactiveType(</span>
+<span class="fc" id="L228">					ReactiveTypeDescriptor.multiValue(rx.Observable.class, rx.Observable::empty),</span>
+<span class="fc" id="L229">					source -&gt; RxReactiveStreams.toPublisher((rx.Observable&lt;?&gt;) source),</span>
+					RxReactiveStreams::toObservable
+			);
+<span class="fc" id="L232">			registry.registerReactiveType(</span>
+<span class="fc" id="L233">					ReactiveTypeDescriptor.singleRequiredValue(rx.Single.class),</span>
+<span class="fc" id="L234">					source -&gt; RxReactiveStreams.toPublisher((rx.Single&lt;?&gt;) source),</span>
+					RxReactiveStreams::toSingle
+			);
+<span class="fc" id="L237">			registry.registerReactiveType(</span>
+<span class="fc" id="L238">					ReactiveTypeDescriptor.noValue(rx.Completable.class, rx.Completable::complete),</span>
+<span class="fc" id="L239">					source -&gt; RxReactiveStreams.toPublisher((rx.Completable) source),</span>
+					RxReactiveStreams::toCompletable
+			);
+<span class="fc" id="L242">		}</span>
+	}
+
+
+	private static class RxJava2Registrar {
+
+		void registerAdapters(ReactiveAdapterRegistry registry) {
+<span class="fc" id="L249">			registry.registerReactiveType(</span>
+<span class="fc" id="L250">					ReactiveTypeDescriptor.multiValue(io.reactivex.Flowable.class, io.reactivex.Flowable::empty),</span>
+<span class="fc" id="L251">					source -&gt; (io.reactivex.Flowable&lt;?&gt;) source,</span>
+					Flowable::fromPublisher
+			);
+<span class="fc" id="L254">			registry.registerReactiveType(</span>
+<span class="fc" id="L255">					ReactiveTypeDescriptor.multiValue(io.reactivex.Observable.class, io.reactivex.Observable::empty),</span>
+<span class="fc" id="L256">					source -&gt; ((io.reactivex.Observable&lt;?&gt;) source).toFlowable(BackpressureStrategy.BUFFER),</span>
+<span class="fc" id="L257">					source -&gt; io.reactivex.Flowable.fromPublisher(source).toObservable()</span>
+			);
+<span class="fc" id="L259">			registry.registerReactiveType(</span>
+<span class="fc" id="L260">					ReactiveTypeDescriptor.singleRequiredValue(io.reactivex.Single.class),</span>
+<span class="fc" id="L261">					source -&gt; ((io.reactivex.Single&lt;?&gt;) source).toFlowable(),</span>
+<span class="fc" id="L262">					source -&gt; io.reactivex.Flowable.fromPublisher(source).toObservable().singleElement().toSingle()</span>
+			);
+<span class="fc" id="L264">			registry.registerReactiveType(</span>
+<span class="fc" id="L265">					ReactiveTypeDescriptor.singleOptionalValue(io.reactivex.Maybe.class, io.reactivex.Maybe::empty),</span>
+<span class="nc" id="L266">					source -&gt; ((io.reactivex.Maybe&lt;?&gt;) source).toFlowable(),</span>
+<span class="nc" id="L267">					source -&gt; io.reactivex.Flowable.fromPublisher(source).toObservable().singleElement()</span>
+			);
+<span class="fc" id="L269">			registry.registerReactiveType(</span>
+<span class="fc" id="L270">					ReactiveTypeDescriptor.noValue(io.reactivex.Completable.class, io.reactivex.Completable::complete),</span>
+<span class="fc" id="L271">					source -&gt; ((io.reactivex.Completable) source).toFlowable(),</span>
+<span class="fc" id="L272">					source -&gt; io.reactivex.Flowable.fromPublisher(source).toObservable().ignoreElements()</span>
+			);
+<span class="fc" id="L274">		}</span>
+	}
+
+
+	private static class ReactorJdkFlowAdapterRegistrar {
+
+		void registerAdapter(ReactiveAdapterRegistry registry) {
+			// TODO: remove reflection when build requires JDK 9+
+
+			try {
+<span class="nc" id="L284">				String publisherName = &quot;java.util.concurrent.Flow.Publisher&quot;;</span>
+<span class="nc" id="L285">				Class&lt;?&gt; publisherClass = ClassUtils.forName(publisherName, getClass().getClassLoader());</span>
+
+<span class="nc" id="L287">				String adapterName = &quot;reactor.adapter.JdkFlowAdapter&quot;;</span>
+<span class="nc" id="L288">				Class&lt;?&gt; flowAdapterClass = ClassUtils.forName(adapterName,  getClass().getClassLoader());</span>
+
+<span class="nc" id="L290">				Method toFluxMethod = flowAdapterClass.getMethod(&quot;flowPublisherToFlux&quot;, publisherClass);</span>
+<span class="nc" id="L291">				Method toFlowMethod = flowAdapterClass.getMethod(&quot;publisherToFlowPublisher&quot;, Publisher.class);</span>
+<span class="nc" id="L292">				Object emptyFlow = ReflectionUtils.invokeMethod(toFlowMethod, null, Flux.empty());</span>
+
+<span class="nc" id="L294">				registry.registerReactiveType(</span>
+<span class="nc" id="L295">						ReactiveTypeDescriptor.multiValue(publisherClass, () -&gt; emptyFlow),</span>
+<span class="nc" id="L296">						source -&gt; (Publisher&lt;?&gt;) ReflectionUtils.invokeMethod(toFluxMethod, null, source),</span>
+<span class="nc" id="L297">						publisher -&gt; ReflectionUtils.invokeMethod(toFlowMethod, null, publisher)</span>
+				);
+			}
+<span class="nc" id="L300">			catch (Throwable ex) {</span>
+				// Ignore
+<span class="nc" id="L302">			}</span>
+<span class="nc" id="L303">		}</span>
+	}
+
+
+	/**
+	 * ReactiveAdapter variant that wraps adapted Publishers as {@link Flux} or
+	 * {@link Mono} depending on {@link ReactiveTypeDescriptor#isMultiValue()}.
+	 * This is important in places where only the stream and stream element type
+	 * information is available like encoders and decoders.
+	 */
+	private static class ReactorAdapter extends ReactiveAdapter {
+
+		ReactorAdapter(ReactiveTypeDescriptor descriptor,
+				Function&lt;Object, Publisher&lt;?&gt;&gt; toPublisherFunction,
+				Function&lt;Publisher&lt;?&gt;, Object&gt; fromPublisherFunction) {
+
+<span class="fc" id="L319">			super(descriptor, toPublisherFunction, fromPublisherFunction);</span>
+<span class="fc" id="L320">		}</span>
+
+		@Override
+		public &lt;T&gt; Publisher&lt;T&gt; toPublisher(@Nullable Object source) {
+<span class="fc" id="L324">			Publisher&lt;T&gt; publisher = super.toPublisher(source);</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">			return (isMultiValue() ? Flux.from(publisher) : Mono.from(publisher));</span>
+		}
+	}
+
+	private static class CoroutinesRegistrar {
+
+		@SuppressWarnings(&quot;KotlinInternalInJava&quot;)
+		void registerAdapters(ReactiveAdapterRegistry registry) {
+<span class="fc" id="L333">			registry.registerReactiveType(</span>
+<span class="pc" id="L334">					ReactiveTypeDescriptor.singleOptionalValue(Deferred.class, () -&gt; CompletableDeferredKt.CompletableDeferred(null)),</span>
+<span class="fc" id="L335">					source -&gt; CoroutinesUtils.deferredToMono((Deferred&lt;?&gt;) source),</span>
+<span class="fc" id="L336">					source -&gt; CoroutinesUtils.monoToDeferred(Mono.from(source)));</span>
+<span class="fc" id="L337">		}</span>
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

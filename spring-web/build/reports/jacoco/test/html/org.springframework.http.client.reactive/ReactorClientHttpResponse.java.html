@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReactorClientHttpResponse.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client.reactive</a> &gt; <span class="el_source">ReactorClientHttpResponse.java</span></div><h1>ReactorClientHttpResponse.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client.reactive;
+
+import java.util.Collection;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import io.netty.buffer.ByteBufAllocator;
+import reactor.core.publisher.Flux;
+import reactor.netty.NettyInbound;
+import reactor.netty.http.client.HttpClientResponse;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.NettyDataBufferFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseCookie;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+
+/**
+ * {@link ClientHttpResponse} implementation for the Reactor-Netty HTTP client.
+ *
+ * @author Brian Clozel
+ * @since 5.0
+ * @see reactor.netty.http.client.HttpClient
+ */
+class ReactorClientHttpResponse implements ClientHttpResponse {
+
+	private final NettyDataBufferFactory bufferFactory;
+
+	private final HttpClientResponse response;
+
+	private final NettyInbound inbound;
+
+<span class="nc" id="L51">	private final AtomicBoolean rejectSubscribers = new AtomicBoolean();</span>
+
+
+<span class="nc" id="L54">	public ReactorClientHttpResponse(HttpClientResponse response, NettyInbound inbound, ByteBufAllocator alloc) {</span>
+<span class="nc" id="L55">		this.response = response;</span>
+<span class="nc" id="L56">		this.inbound = inbound;</span>
+<span class="nc" id="L57">		this.bufferFactory = new NettyDataBufferFactory(alloc);</span>
+<span class="nc" id="L58">	}</span>
+
+
+	@Override
+	public Flux&lt;DataBuffer&gt; getBody() {
+<span class="nc" id="L63">		return this.inbound.receive()</span>
+<span class="nc" id="L64">				.doOnSubscribe(s -&gt; {</span>
+<span class="nc bnc" id="L65" title="All 2 branches missed.">					if (this.rejectSubscribers.get()) {</span>
+<span class="nc" id="L66">						throw new IllegalStateException(&quot;The client response body can only be consumed once.&quot;);</span>
+					}
+<span class="nc" id="L68">				})</span>
+<span class="nc" id="L69">				.doOnCancel(() -&gt;</span>
+					// https://github.com/reactor/reactor-netty/issues/503
+					// FluxReceive rejects multiple subscribers, but not after a cancel().
+					// Subsequent subscribers after cancel() will not be rejected, but will hang instead.
+					// So we need to intercept and reject them in that case.
+<span class="nc" id="L74">					this.rejectSubscribers.set(true)</span>
+				)
+<span class="nc" id="L76">				.map(byteBuf -&gt; {</span>
+<span class="nc" id="L77">					byteBuf.retain();</span>
+<span class="nc" id="L78">					return this.bufferFactory.wrap(byteBuf);</span>
+				});
+	}
+
+	@Override
+	public HttpHeaders getHeaders() {
+<span class="nc" id="L84">		HttpHeaders headers = new HttpHeaders();</span>
+<span class="nc" id="L85">		this.response.responseHeaders().entries().forEach(e -&gt; headers.add(e.getKey(), e.getValue()));</span>
+<span class="nc" id="L86">		return headers;</span>
+	}
+
+	@Override
+	public HttpStatus getStatusCode() {
+<span class="nc" id="L91">		return HttpStatus.valueOf(getRawStatusCode());</span>
+	}
+
+	@Override
+	public int getRawStatusCode() {
+<span class="nc" id="L96">		return this.response.status().code();</span>
+	}
+
+	@Override
+	public MultiValueMap&lt;String, ResponseCookie&gt; getCookies() {
+<span class="nc" id="L101">		MultiValueMap&lt;String, ResponseCookie&gt; result = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="nc" id="L102">		this.response.cookies().values().stream().flatMap(Collection::stream)</span>
+<span class="nc" id="L103">				.forEach(cookie -&gt;</span>
+<span class="nc" id="L104">					result.add(cookie.name(), ResponseCookie.from(cookie.name(), cookie.value())</span>
+<span class="nc" id="L105">							.domain(cookie.domain())</span>
+<span class="nc" id="L106">							.path(cookie.path())</span>
+<span class="nc" id="L107">							.maxAge(cookie.maxAge())</span>
+<span class="nc" id="L108">							.secure(cookie.isSecure())</span>
+<span class="nc" id="L109">							.httpOnly(cookie.isHttpOnly())</span>
+<span class="nc" id="L110">							.build()));</span>
+<span class="nc" id="L111">		return CollectionUtils.unmodifiableMultiValueMap(result);</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="nc" id="L116">		return &quot;ReactorClientHttpResponse{&quot; +</span>
+<span class="nc" id="L117">				&quot;request=[&quot; + this.response.method().name() + &quot; &quot; + this.response.uri() + &quot;],&quot; +</span>
+<span class="nc" id="L118">				&quot;status=&quot; + getRawStatusCode() + '}';</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

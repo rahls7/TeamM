@@ -1,0 +1,338 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ViewResolutionResultHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.view</a> &gt; <span class="el_source">ViewResolutionResultHandler.java</span></div><h1>ViewResolutionResultHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.view;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.core.Conventions;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.Ordered;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.lang.Nullable;
+import org.springframework.ui.Model;
+import org.springframework.util.StringUtils;
+import org.springframework.validation.BindingResult;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.bind.support.WebExchangeDataBinder;
+import org.springframework.web.reactive.BindingContext;
+import org.springframework.web.reactive.HandlerResult;
+import org.springframework.web.reactive.HandlerResultHandler;
+import org.springframework.web.reactive.accept.RequestedContentTypeResolver;
+import org.springframework.web.reactive.result.HandlerResultHandlerSupport;
+import org.springframework.web.server.NotAcceptableStatusException;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * {@code HandlerResultHandler} that encapsulates the view resolution algorithm
+ * supporting the following return types:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link Void} or no value -- default view name&lt;/li&gt;
+ * &lt;li&gt;{@link String} -- view name unless {@code @ModelAttribute}-annotated
+ * &lt;li&gt;{@link View} -- View to render with
+ * &lt;li&gt;{@link Model} -- attributes to add to the model
+ * &lt;li&gt;{@link Map} -- attributes to add to the model
+ * &lt;li&gt;{@link Rendering} -- use case driven API for view resolution&lt;/li&gt;
+ * &lt;li&gt;{@link ModelAttribute @ModelAttribute} -- attribute for the model
+ * &lt;li&gt;Non-simple value -- attribute for the model
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;A String-based view name is resolved through the configured
+ * {@link ViewResolver} instances into a {@link View} to use for rendering.
+ * If a view is left unspecified (e.g. by returning {@code null} or a
+ * model-related return value), a default view name is selected.
+ *
+ * &lt;p&gt;By default this resolver is ordered at {@link Ordered#LOWEST_PRECEDENCE}
+ * and generally needs to be late in the order since it interprets any String
+ * return value as a view name or any non-simple value type as a model attribute
+ * while other result handlers may interpret the same otherwise based on the
+ * presence of annotations, e.g. for {@code @ResponseBody}.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+public class ViewResolutionResultHandler extends HandlerResultHandlerSupport
+		implements HandlerResultHandler, Ordered {
+
+<span class="fc" id="L87">	private static final Object NO_VALUE = new Object();</span>
+
+<span class="fc" id="L89">	private static final Mono&lt;Object&gt; NO_VALUE_MONO = Mono.just(NO_VALUE);</span>
+
+
+<span class="fc" id="L92">	private final List&lt;ViewResolver&gt; viewResolvers = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L94">	private final List&lt;View&gt; defaultViews = new ArrayList&lt;&gt;(4);</span>
+
+
+	/**
+	 * Basic constructor with a default {@link ReactiveAdapterRegistry}.
+	 * @param viewResolvers the resolver to use
+	 * @param contentTypeResolver to determine the requested content type
+	 */
+	public ViewResolutionResultHandler(List&lt;ViewResolver&gt; viewResolvers,
+			RequestedContentTypeResolver contentTypeResolver) {
+
+<span class="fc" id="L105">		this(viewResolvers, contentTypeResolver, ReactiveAdapterRegistry.getSharedInstance());</span>
+<span class="fc" id="L106">	}</span>
+
+	/**
+	 * Constructor with an {@link ReactiveAdapterRegistry} instance.
+	 * @param viewResolvers the view resolver to use
+	 * @param contentTypeResolver to determine the requested content type
+	 * @param registry for adaptation to reactive types
+	 */
+	public ViewResolutionResultHandler(List&lt;ViewResolver&gt; viewResolvers,
+			RequestedContentTypeResolver contentTypeResolver, ReactiveAdapterRegistry registry) {
+
+<span class="fc" id="L117">		super(contentTypeResolver, registry);</span>
+<span class="fc" id="L118">		this.viewResolvers.addAll(viewResolvers);</span>
+<span class="fc" id="L119">		AnnotationAwareOrderComparator.sort(this.viewResolvers);</span>
+<span class="fc" id="L120">	}</span>
+
+
+	/**
+	 * Return a read-only list of view resolvers.
+	 */
+	public List&lt;ViewResolver&gt; getViewResolvers() {
+<span class="fc" id="L127">		return Collections.unmodifiableList(this.viewResolvers);</span>
+	}
+
+	/**
+	 * Set the default views to consider always when resolving view names and
+	 * trying to satisfy the best matching content type.
+	 */
+	public void setDefaultViews(@Nullable List&lt;View&gt; defaultViews) {
+<span class="fc" id="L135">		this.defaultViews.clear();</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">		if (defaultViews != null) {</span>
+<span class="fc" id="L137">			this.defaultViews.addAll(defaultViews);</span>
+		}
+<span class="fc" id="L139">	}</span>
+
+	/**
+	 * Return the configured default {@code View}'s.
+	 */
+	public List&lt;View&gt; getDefaultViews() {
+<span class="fc" id="L145">		return this.defaultViews;</span>
+	}
+
+	@Override
+	public boolean supports(HandlerResult result) {
+<span class="fc bfc" id="L150" title="All 2 branches covered.">		if (hasModelAnnotation(result.getReturnTypeSource())) {</span>
+<span class="fc" id="L151">			return true;</span>
+		}
+
+<span class="fc" id="L154">		Class&lt;?&gt; type = result.getReturnType().toClass();</span>
+<span class="fc" id="L155">		ReactiveAdapter adapter = getAdapter(result);</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">		if (adapter != null) {</span>
+<span class="fc bfc" id="L157" title="All 2 branches covered.">			if (adapter.isNoValue()) {</span>
+<span class="fc" id="L158">				return true;</span>
+			}
+<span class="fc" id="L160">			type = result.getReturnType().getGeneric().toClass();</span>
+		}
+
+<span class="fc bfc" id="L163" title="All 4 branches covered.">		return (CharSequence.class.isAssignableFrom(type) || Rendering.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L164" title="All 4 branches covered.">				Model.class.isAssignableFrom(type) || Map.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L165" title="All 4 branches covered.">				void.class.equals(type) || View.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">				!BeanUtils.isSimpleProperty(type));</span>
+	}
+
+	private boolean hasModelAnnotation(MethodParameter parameter) {
+<span class="fc" id="L170">		return parameter.hasMethodAnnotation(ModelAttribute.class);</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public Mono&lt;Void&gt; handleResult(ServerWebExchange exchange, HandlerResult result) {
+		Mono&lt;Object&gt; valueMono;
+		ResolvableType valueType;
+<span class="fc" id="L178">		ReactiveAdapter adapter = getAdapter(result);</span>
+
+<span class="fc bfc" id="L180" title="All 2 branches covered.">		if (adapter != null) {</span>
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">			if (adapter.isMultiValue()) {</span>
+<span class="nc" id="L182">				throw new IllegalArgumentException(</span>
+<span class="nc" id="L183">						&quot;Multi-value reactive types not supported in view resolution: &quot; + result.getReturnType());</span>
+			}
+
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">			valueMono = (result.getReturnValue() != null ?</span>
+<span class="pc" id="L187">					Mono.from(adapter.toPublisher(result.getReturnValue())) : Mono.empty());</span>
+
+<span class="fc bfc" id="L189" title="All 2 branches covered.">			valueType = (adapter.isNoValue() ? ResolvableType.forClass(Void.class) :</span>
+<span class="fc" id="L190">					result.getReturnType().getGeneric());</span>
+		}
+		else {
+<span class="fc" id="L193">			valueMono = Mono.justOrEmpty(result.getReturnValue());</span>
+<span class="fc" id="L194">			valueType = result.getReturnType();</span>
+		}
+
+<span class="fc" id="L197">		return valueMono</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">				.switchIfEmpty(exchange.isNotModified() ? Mono.empty() : NO_VALUE_MONO)</span>
+<span class="fc" id="L199">				.flatMap(returnValue -&gt; {</span>
+
+					Mono&lt;List&lt;View&gt;&gt; viewsMono;
+<span class="fc" id="L202">					Model model = result.getModel();</span>
+<span class="fc" id="L203">					MethodParameter parameter = result.getReturnTypeSource();</span>
+<span class="fc" id="L204">					Locale locale = LocaleContextHolder.getLocale(exchange.getLocaleContext());</span>
+
+<span class="fc" id="L206">					Class&lt;?&gt; clazz = valueType.toClass();</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">					if (clazz == Object.class) {</span>
+<span class="nc" id="L208">						clazz = returnValue.getClass();</span>
+					}
+
+<span class="pc bpc" id="L211" title="2 of 6 branches missed.">					if (returnValue == NO_VALUE || clazz == void.class || clazz == Void.class) {</span>
+<span class="fc" id="L212">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+<span class="fc bfc" id="L214" title="All 4 branches covered.">					else if (CharSequence.class.isAssignableFrom(clazz) &amp;&amp; !hasModelAnnotation(parameter)) {</span>
+<span class="fc" id="L215">						viewsMono = resolveViews(returnValue.toString(), locale);</span>
+					}
+<span class="fc bfc" id="L217" title="All 2 branches covered.">					else if (Rendering.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L218">						Rendering render = (Rendering) returnValue;</span>
+<span class="fc" id="L219">						HttpStatus status = render.status();</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">						if (status != null) {</span>
+<span class="fc" id="L221">							exchange.getResponse().setStatusCode(status);</span>
+						}
+<span class="fc" id="L223">						exchange.getResponse().getHeaders().putAll(render.headers());</span>
+<span class="fc" id="L224">						model.addAllAttributes(render.modelAttributes());</span>
+<span class="fc" id="L225">						Object view = render.view();</span>
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">						if (view == null) {</span>
+<span class="nc" id="L227">							view = getDefaultViewName(exchange);</span>
+						}
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">						viewsMono = (view instanceof String ? resolveViews((String) view, locale) :</span>
+<span class="pc" id="L230">								Mono.just(Collections.singletonList((View) view)));</span>
+<span class="fc" id="L231">					}</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">					else if (Model.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L233">						model.addAllAttributes(((Model) returnValue).asMap());</span>
+<span class="fc" id="L234">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+<span class="fc bfc" id="L236" title="All 4 branches covered.">					else if (Map.class.isAssignableFrom(clazz) &amp;&amp; !hasModelAnnotation(parameter)) {</span>
+<span class="fc" id="L237">						model.addAllAttributes((Map&lt;String, ?&gt;) returnValue);</span>
+<span class="fc" id="L238">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+<span class="fc bfc" id="L240" title="All 2 branches covered.">					else if (View.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L241">						viewsMono = Mono.just(Collections.singletonList((View) returnValue));</span>
+					}
+					else {
+<span class="fc" id="L244">						String name = getNameForReturnValue(parameter);</span>
+<span class="fc" id="L245">						model.addAttribute(name, returnValue);</span>
+<span class="fc" id="L246">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+
+<span class="fc" id="L249">					updateBindingContext(result.getBindingContext(), exchange);</span>
+
+<span class="fc" id="L251">					return viewsMono.flatMap(views -&gt; render(views, model.asMap(), exchange));</span>
+				});
+	}
+
+	/**
+	 * Select a default view name when a controller did not specify it.
+	 * Use the request path the leading and trailing slash stripped.
+	 */
+	private String getDefaultViewName(ServerWebExchange exchange) {
+<span class="fc" id="L260">		String path = exchange.getRequest().getPath().pathWithinApplication().value();</span>
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">		if (path.startsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L262">			path = path.substring(1);</span>
+		}
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		if (path.endsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L265">			path = path.substring(0, path.length() - 1);</span>
+		}
+<span class="fc" id="L267">		return StringUtils.stripFilenameExtension(path);</span>
+	}
+
+	private Mono&lt;List&lt;View&gt;&gt; resolveViews(String viewName, Locale locale) {
+<span class="fc" id="L271">		return Flux.fromIterable(getViewResolvers())</span>
+<span class="fc" id="L272">				.concatMap(resolver -&gt; resolver.resolveViewName(viewName, locale))</span>
+<span class="fc" id="L273">				.collectList()</span>
+<span class="fc" id="L274">				.map(views -&gt; {</span>
+<span class="fc bfc" id="L275" title="All 2 branches covered.">					if (views.isEmpty()) {</span>
+<span class="fc" id="L276">						throw new IllegalStateException(</span>
+								&quot;Could not resolve view with name '&quot; + viewName + &quot;'.&quot;);
+					}
+<span class="fc" id="L279">					views.addAll(getDefaultViews());</span>
+<span class="fc" id="L280">					return views;</span>
+				});
+	}
+
+	private String getNameForReturnValue(MethodParameter returnType) {
+<span class="fc" id="L285">		return Optional.ofNullable(returnType.getMethodAnnotation(ModelAttribute.class))</span>
+<span class="fc" id="L286">				.filter(ann -&gt; StringUtils.hasText(ann.value()))</span>
+<span class="fc" id="L287">				.map(ModelAttribute::value)</span>
+<span class="fc" id="L288">				.orElseGet(() -&gt; Conventions.getVariableNameForParameter(returnType));</span>
+	}
+
+	private void updateBindingContext(BindingContext context, ServerWebExchange exchange) {
+<span class="fc" id="L292">		Map&lt;String, Object&gt; model = context.getModel().asMap();</span>
+<span class="fc" id="L293">		model.keySet().stream()</span>
+<span class="fc" id="L294">				.filter(name -&gt; isBindingCandidate(name, model.get(name)))</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">				.filter(name -&gt; !model.containsKey(BindingResult.MODEL_KEY_PREFIX + name))</span>
+<span class="fc" id="L296">				.forEach(name -&gt; {</span>
+<span class="fc" id="L297">					WebExchangeDataBinder binder = context.createDataBinder(exchange, model.get(name), name);</span>
+<span class="fc" id="L298">					model.put(BindingResult.MODEL_KEY_PREFIX + name, binder.getBindingResult());</span>
+<span class="fc" id="L299">				});</span>
+<span class="fc" id="L300">	}</span>
+
+	private boolean isBindingCandidate(String name, @Nullable Object value) {
+<span class="pc bpc" id="L303" title="2 of 4 branches missed.">		return (!name.startsWith(BindingResult.MODEL_KEY_PREFIX) &amp;&amp; value != null &amp;&amp;</span>
+<span class="pc bpc" id="L304" title="2 of 6 branches missed.">				!value.getClass().isArray() &amp;&amp; !(value instanceof Collection) &amp;&amp;</span>
+<span class="fc bfc" id="L305" title="All 2 branches covered.">				!(value instanceof Map) &amp;&amp; !BeanUtils.isSimpleValueType(value.getClass()));</span>
+	}
+
+	private Mono&lt;? extends Void&gt; render(List&lt;View&gt; views, Map&lt;String, Object&gt; model,
+			ServerWebExchange exchange) {
+
+<span class="fc bfc" id="L311" title="All 2 branches covered.">		for (View view : views) {</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">			if (view.isRedirectView()) {</span>
+<span class="fc" id="L313">				return view.render(model, null, exchange);</span>
+			}
+<span class="fc" id="L315">		}</span>
+
+<span class="fc" id="L317">		List&lt;MediaType&gt; mediaTypes = getMediaTypes(views);</span>
+<span class="fc" id="L318">		MediaType bestMediaType = selectMediaType(exchange, () -&gt; mediaTypes);</span>
+<span class="fc bfc" id="L319" title="All 2 branches covered.">		if (bestMediaType != null) {</span>
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">			for (View view : views) {</span>
+<span class="fc bfc" id="L321" title="All 2 branches covered.">				for (MediaType mediaType : view.getSupportedMediaTypes()) {</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">					if (mediaType.isCompatibleWith(bestMediaType)) {</span>
+<span class="fc" id="L323">						return view.render(model, mediaType, exchange);</span>
+					}
+<span class="fc" id="L325">				}</span>
+<span class="fc" id="L326">			}</span>
+		}
+<span class="fc" id="L328">		throw new NotAcceptableStatusException(mediaTypes);</span>
+	}
+
+	private List&lt;MediaType&gt; getMediaTypes(List&lt;View&gt; views) {
+<span class="fc" id="L332">		return views.stream()</span>
+<span class="fc" id="L333">				.flatMap(view -&gt; view.getSupportedMediaTypes().stream())</span>
+<span class="fc" id="L334">				.collect(Collectors.toList());</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

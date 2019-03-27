@@ -1,0 +1,1797 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractBeanFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">AbstractBeanFactory.java</span></div><h1>AbstractBeanFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.beans.PropertyEditor;
+import java.security.AccessControlContext;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeanWrapper;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.PropertyEditorRegistrar;
+import org.springframework.beans.PropertyEditorRegistry;
+import org.springframework.beans.PropertyEditorRegistrySupport;
+import org.springframework.beans.SimpleTypeConverter;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanCurrentlyInCreationException;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.BeanIsAbstractException;
+import org.springframework.beans.factory.BeanIsNotAFactoryException;
+import org.springframework.beans.factory.BeanNotOfRequiredTypeException;
+import org.springframework.beans.factory.CannotLoadBeanClassException;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.SmartFactoryBean;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinitionHolder;
+import org.springframework.beans.factory.config.BeanExpressionContext;
+import org.springframework.beans.factory.config.BeanExpressionResolver;
+import org.springframework.beans.factory.config.BeanPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.DestructionAwareBeanPostProcessor;
+import org.springframework.beans.factory.config.InstantiationAwareBeanPostProcessor;
+import org.springframework.beans.factory.config.Scope;
+import org.springframework.core.DecoratingClassLoader;
+import org.springframework.core.NamedThreadLocal;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+
+/**
+ * Abstract base class for {@link org.springframework.beans.factory.BeanFactory}
+ * implementations, providing the full capabilities of the
+ * {@link org.springframework.beans.factory.config.ConfigurableBeanFactory} SPI.
+ * Does &lt;i&gt;not&lt;/i&gt; assume a listable bean factory: can therefore also be used
+ * as base class for bean factory implementations which obtain bean definitions
+ * from some backend resource (where bean definition access is an expensive operation).
+ *
+ * &lt;p&gt;This class provides a singleton cache (through its base class
+ * {@link org.springframework.beans.factory.support.DefaultSingletonBeanRegistry},
+ * singleton/prototype determination, {@link org.springframework.beans.factory.FactoryBean}
+ * handling, aliases, bean definition merging for child bean definitions,
+ * and bean destruction ({@link org.springframework.beans.factory.DisposableBean}
+ * interface, custom destroy methods). Furthermore, it can manage a bean factory
+ * hierarchy (delegating to the parent in case of an unknown bean), through implementing
+ * the {@link org.springframework.beans.factory.HierarchicalBeanFactory} interface.
+ *
+ * &lt;p&gt;The main template methods to be implemented by subclasses are
+ * {@link #getBeanDefinition} and {@link #createBean}, retrieving a bean definition
+ * for a given bean name and creating a bean instance for a given bean definition,
+ * respectively. Default implementations of those operations can be found in
+ * {@link DefaultListableBeanFactory} and {@link AbstractAutowireCapableBeanFactory}.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Costin Leau
+ * @author Chris Beams
+ * @since 15 April 2001
+ * @see #getBeanDefinition
+ * @see #createBean
+ * @see AbstractAutowireCapableBeanFactory#createBean
+ * @see DefaultListableBeanFactory#getBeanDefinition
+ */
+public abstract class AbstractBeanFactory extends FactoryBeanRegistrySupport implements ConfigurableBeanFactory {
+
+	/** Parent bean factory, for bean inheritance support. */
+	@Nullable
+	private BeanFactory parentBeanFactory;
+
+	/** ClassLoader to resolve bean class names with, if necessary. */
+<span class="pc" id="L119">	@Nullable</span>
+<span class="pc" id="L120">	private ClassLoader beanClassLoader = ClassUtils.getDefaultClassLoader();</span>
+
+	/** ClassLoader to temporarily resolve bean class names with, if necessary. */
+	@Nullable
+	private ClassLoader tempClassLoader;
+
+	/** Whether to cache bean metadata or rather reobtain it for every access. */
+<span class="pc" id="L127">	private boolean cacheBeanMetadata = true;</span>
+
+	/** Resolution strategy for expressions in bean definition values. */
+	@Nullable
+	private BeanExpressionResolver beanExpressionResolver;
+
+	/** Spring ConversionService to use instead of PropertyEditors. */
+	@Nullable
+	private ConversionService conversionService;
+
+	/** Custom PropertyEditorRegistrars to apply to the beans of this factory. */
+<span class="pc" id="L138">	private final Set&lt;PropertyEditorRegistrar&gt; propertyEditorRegistrars = new LinkedHashSet&lt;&gt;(4);</span>
+
+	/** Custom PropertyEditors to apply to the beans of this factory. */
+<span class="pc" id="L141">	private final Map&lt;Class&lt;?&gt;, Class&lt;? extends PropertyEditor&gt;&gt; customEditors = new HashMap&lt;&gt;(4);</span>
+
+	/** A custom TypeConverter to use, overriding the default PropertyEditor mechanism. */
+	@Nullable
+	private TypeConverter typeConverter;
+
+	/** String resolvers to apply e.g. to annotation attribute values. */
+<span class="pc" id="L148">	private final List&lt;StringValueResolver&gt; embeddedValueResolvers = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+	/** BeanPostProcessors to apply in createBean. */
+<span class="pc" id="L151">	private final List&lt;BeanPostProcessor&gt; beanPostProcessors = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+	/** Indicates whether any InstantiationAwareBeanPostProcessors have been registered. */
+	private volatile boolean hasInstantiationAwareBeanPostProcessors;
+
+	/** Indicates whether any DestructionAwareBeanPostProcessors have been registered. */
+	private volatile boolean hasDestructionAwareBeanPostProcessors;
+
+	/** Map from scope identifier String to corresponding Scope. */
+<span class="pc" id="L160">	private final Map&lt;String, Scope&gt; scopes = new LinkedHashMap&lt;&gt;(8);</span>
+
+	/** Security context used when running with a SecurityManager. */
+	@Nullable
+	private SecurityContextProvider securityContextProvider;
+
+	/** Map from bean name to merged RootBeanDefinition. */
+<span class="pc" id="L167">	private final Map&lt;String, RootBeanDefinition&gt; mergedBeanDefinitions = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+	/** Names of beans that have already been created at least once. */
+<span class="pc" id="L170">	private final Set&lt;String&gt; alreadyCreated = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(256));</span>
+
+	/** Names of beans that are currently in creation. */
+<span class="pc" id="L173">	private final ThreadLocal&lt;Object&gt; prototypesCurrentlyInCreation =</span>
+			new NamedThreadLocal&lt;&gt;(&quot;Prototype beans currently in creation&quot;);
+
+
+	/**
+	 * Create a new AbstractBeanFactory.
+	 */
+<span class="fc" id="L180">	public AbstractBeanFactory() {</span>
+<span class="fc" id="L181">	}</span>
+
+	/**
+	 * Create a new AbstractBeanFactory with the given parent.
+	 * @param parentBeanFactory parent bean factory, or {@code null} if none
+	 * @see #getBean
+	 */
+<span class="nc" id="L188">	public AbstractBeanFactory(@Nullable BeanFactory parentBeanFactory) {</span>
+<span class="nc" id="L189">		this.parentBeanFactory = parentBeanFactory;</span>
+<span class="nc" id="L190">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of BeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public Object getBean(String name) throws BeansException {
+<span class="fc" id="L199">		return doGetBean(name, null, null, false);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getBean(String name, Class&lt;T&gt; requiredType) throws BeansException {
+<span class="fc" id="L204">		return doGetBean(name, requiredType, null, false);</span>
+	}
+
+	@Override
+	public Object getBean(String name, Object... args) throws BeansException {
+<span class="fc" id="L209">		return doGetBean(name, null, args, false);</span>
+	}
+
+	/**
+	 * Return an instance, which may be shared or independent, of the specified bean.
+	 * @param name the name of the bean to retrieve
+	 * @param requiredType the required type of the bean to retrieve
+	 * @param args arguments to use when creating a bean instance using explicit arguments
+	 * (only applied when creating a new instance as opposed to retrieving an existing one)
+	 * @return an instance of the bean
+	 * @throws BeansException if the bean could not be created
+	 */
+	public &lt;T&gt; T getBean(String name, @Nullable Class&lt;T&gt; requiredType, @Nullable Object... args)
+			throws BeansException {
+
+<span class="fc" id="L224">		return doGetBean(name, requiredType, args, false);</span>
+	}
+
+	/**
+	 * Return an instance, which may be shared or independent, of the specified bean.
+	 * @param name the name of the bean to retrieve
+	 * @param requiredType the required type of the bean to retrieve
+	 * @param args arguments to use when creating a bean instance using explicit arguments
+	 * (only applied when creating a new instance as opposed to retrieving an existing one)
+	 * @param typeCheckOnly whether the instance is obtained for a type check,
+	 * not for actual use
+	 * @return an instance of the bean
+	 * @throws BeansException if the bean could not be created
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	protected &lt;T&gt; T doGetBean(final String name, @Nullable final Class&lt;T&gt; requiredType,
+			@Nullable final Object[] args, boolean typeCheckOnly) throws BeansException {
+
+<span class="fc" id="L242">		final String beanName = transformedBeanName(name);</span>
+		Object bean;
+
+		// Eagerly check singleton cache for manually registered singletons.
+<span class="fc" id="L246">		Object sharedInstance = getSingleton(beanName);</span>
+<span class="fc bfc" id="L247" title="All 4 branches covered.">		if (sharedInstance != null &amp;&amp; args == null) {</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">				if (isSingletonCurrentlyInCreation(beanName)) {</span>
+<span class="nc" id="L250">					logger.trace(&quot;Returning eagerly cached instance of singleton bean '&quot; + beanName +</span>
+							&quot;' that is not fully initialized yet - a consequence of a circular reference&quot;);
+				}
+				else {
+<span class="nc" id="L254">					logger.trace(&quot;Returning cached instance of singleton bean '&quot; + beanName + &quot;'&quot;);</span>
+				}
+			}
+<span class="fc" id="L257">			bean = getObjectForBeanInstance(sharedInstance, name, beanName, null);</span>
+		}
+
+		else {
+			// Fail if we're already creating this bean instance:
+			// We're assumably within a circular reference.
+<span class="fc bfc" id="L263" title="All 2 branches covered.">			if (isPrototypeCurrentlyInCreation(beanName)) {</span>
+<span class="fc" id="L264">				throw new BeanCurrentlyInCreationException(beanName);</span>
+			}
+
+			// Check if bean definition exists in this factory.
+<span class="fc" id="L268">			BeanFactory parentBeanFactory = getParentBeanFactory();</span>
+<span class="fc bfc" id="L269" title="All 4 branches covered.">			if (parentBeanFactory != null &amp;&amp; !containsBeanDefinition(beanName)) {</span>
+				// Not found -&gt; check parent.
+<span class="fc" id="L271">				String nameToLookup = originalBeanName(name);</span>
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">				if (parentBeanFactory instanceof AbstractBeanFactory) {</span>
+<span class="fc" id="L273">					return ((AbstractBeanFactory) parentBeanFactory).doGetBean(</span>
+							nameToLookup, requiredType, args, typeCheckOnly);
+				}
+<span class="nc bnc" id="L276" title="All 2 branches missed.">				else if (args != null) {</span>
+					// Delegation to parent with explicit args.
+<span class="nc" id="L278">					return (T) parentBeanFactory.getBean(nameToLookup, args);</span>
+				}
+<span class="nc bnc" id="L280" title="All 2 branches missed.">				else if (requiredType != null) {</span>
+					// No args -&gt; delegate to standard getBean method.
+<span class="nc" id="L282">					return parentBeanFactory.getBean(nameToLookup, requiredType);</span>
+				}
+				else {
+<span class="nc" id="L285">					return (T) parentBeanFactory.getBean(nameToLookup);</span>
+				}
+			}
+
+<span class="fc bfc" id="L289" title="All 2 branches covered.">			if (!typeCheckOnly) {</span>
+<span class="fc" id="L290">				markBeanAsCreated(beanName);</span>
+			}
+
+			try {
+<span class="fc" id="L294">				final RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+<span class="fc" id="L295">				checkMergedBeanDefinition(mbd, beanName, args);</span>
+
+				// Guarantee initialization of beans that the current bean depends on.
+<span class="fc" id="L298">				String[] dependsOn = mbd.getDependsOn();</span>
+<span class="fc bfc" id="L299" title="All 2 branches covered.">				if (dependsOn != null) {</span>
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">					for (String dep : dependsOn) {</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">						if (isDependent(beanName, dep)) {</span>
+<span class="fc" id="L302">							throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+									&quot;Circular depends-on relationship between '&quot; + beanName + &quot;' and '&quot; + dep + &quot;'&quot;);
+						}
+<span class="fc" id="L305">						registerDependentBean(dep, beanName);</span>
+						try {
+<span class="nc" id="L307">							getBean(dep);</span>
+						}
+<span class="nc" id="L309">						catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="nc" id="L310">							throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+									&quot;'&quot; + beanName + &quot;' depends on missing bean '&quot; + dep + &quot;'&quot;, ex);
+<span class="nc" id="L312">						}</span>
+					}
+				}
+
+				// Create bean instance.
+<span class="fc bfc" id="L317" title="All 2 branches covered.">				if (mbd.isSingleton()) {</span>
+<span class="fc" id="L318">					sharedInstance = getSingleton(beanName, () -&gt; {</span>
+						try {
+<span class="fc" id="L320">							return createBean(beanName, mbd, args);</span>
+						}
+<span class="fc" id="L322">						catch (BeansException ex) {</span>
+							// Explicitly remove instance from singleton cache: It might have been put there
+							// eagerly by the creation process, to allow for circular reference resolution.
+							// Also remove any beans that received a temporary reference to the bean.
+<span class="fc" id="L326">							destroySingleton(beanName);</span>
+<span class="fc" id="L327">							throw ex;</span>
+						}
+					});
+<span class="fc" id="L330">					bean = getObjectForBeanInstance(sharedInstance, name, beanName, mbd);</span>
+				}
+
+<span class="fc bfc" id="L333" title="All 2 branches covered.">				else if (mbd.isPrototype()) {</span>
+					// It's a prototype -&gt; create a new instance.
+<span class="fc" id="L335">					Object prototypeInstance = null;</span>
+					try {
+<span class="fc" id="L337">						beforePrototypeCreation(beanName);</span>
+<span class="fc" id="L338">						prototypeInstance = createBean(beanName, mbd, args);</span>
+					}
+					finally {
+<span class="fc" id="L341">						afterPrototypeCreation(beanName);</span>
+					}
+<span class="fc" id="L343">					bean = getObjectForBeanInstance(prototypeInstance, name, beanName, mbd);</span>
+<span class="fc" id="L344">				}</span>
+
+				else {
+<span class="fc" id="L347">					String scopeName = mbd.getScope();</span>
+<span class="fc" id="L348">					final Scope scope = this.scopes.get(scopeName);</span>
+<span class="fc bfc" id="L349" title="All 2 branches covered.">					if (scope == null) {</span>
+<span class="fc" id="L350">						throw new IllegalStateException(&quot;No Scope registered for scope name '&quot; + scopeName + &quot;'&quot;);</span>
+					}
+					try {
+<span class="fc" id="L353">						Object scopedInstance = scope.get(beanName, () -&gt; {</span>
+<span class="nc" id="L354">							beforePrototypeCreation(beanName);</span>
+							try {
+<span class="nc" id="L356">								return createBean(beanName, mbd, args);</span>
+							}
+							finally {
+<span class="nc" id="L359">								afterPrototypeCreation(beanName);</span>
+							}
+						});
+<span class="fc" id="L362">						bean = getObjectForBeanInstance(scopedInstance, name, beanName, mbd);</span>
+					}
+<span class="nc" id="L364">					catch (IllegalStateException ex) {</span>
+<span class="nc" id="L365">						throw new BeanCreationException(beanName,</span>
+								&quot;Scope '&quot; + scopeName + &quot;' is not active for the current thread; consider &quot; +
+								&quot;defining a scoped proxy for this bean if you intend to refer to it from a singleton&quot;,
+								ex);
+<span class="fc" id="L369">					}</span>
+				}
+			}
+<span class="fc" id="L372">			catch (BeansException ex) {</span>
+<span class="fc" id="L373">				cleanupAfterBeanCreationFailure(beanName);</span>
+<span class="fc" id="L374">				throw ex;</span>
+<span class="fc" id="L375">			}</span>
+		}
+
+		// Check if required type matches the type of the actual bean instance.
+<span class="fc bfc" id="L379" title="All 4 branches covered.">		if (requiredType != null &amp;&amp; !requiredType.isInstance(bean)) {</span>
+			try {
+<span class="nc" id="L381">				T convertedBean = getTypeConverter().convertIfNecessary(bean, requiredType);</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">				if (convertedBean == null) {</span>
+<span class="nc" id="L383">					throw new BeanNotOfRequiredTypeException(name, requiredType, bean.getClass());</span>
+				}
+<span class="nc" id="L385">				return convertedBean;</span>
+			}
+<span class="fc" id="L387">			catch (TypeMismatchException ex) {</span>
+<span class="pc bpc" id="L388" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L389">					logger.trace(&quot;Failed to convert bean '&quot; + name + &quot;' to required type '&quot; +</span>
+<span class="nc" id="L390">							ClassUtils.getQualifiedName(requiredType) + &quot;'&quot;, ex);</span>
+				}
+<span class="fc" id="L392">				throw new BeanNotOfRequiredTypeException(name, requiredType, bean.getClass());</span>
+			}
+		}
+<span class="fc" id="L395">		return (T) bean;</span>
+	}
+
+	@Override
+	public boolean containsBean(String name) {
+<span class="fc" id="L400">		String beanName = transformedBeanName(name);</span>
+<span class="fc bfc" id="L401" title="All 4 branches covered.">		if (containsSingleton(beanName) || containsBeanDefinition(beanName)) {</span>
+<span class="fc bfc" id="L402" title="All 4 branches covered.">			return (!BeanFactoryUtils.isFactoryDereference(name) || isFactoryBean(name));</span>
+		}
+		// Not found -&gt; check parent.
+<span class="fc" id="L405">		BeanFactory parentBeanFactory = getParentBeanFactory();</span>
+<span class="pc bpc" id="L406" title="1 of 4 branches missed.">		return (parentBeanFactory != null &amp;&amp; parentBeanFactory.containsBean(originalBeanName(name)));</span>
+	}
+
+	@Override
+	public boolean isSingleton(String name) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L411">		String beanName = transformedBeanName(name);</span>
+
+<span class="fc" id="L413">		Object beanInstance = getSingleton(beanName, false);</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">		if (beanInstance != null) {</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">			if (beanInstance instanceof FactoryBean) {</span>
+<span class="fc bfc" id="L416" title="All 4 branches covered.">				return (BeanFactoryUtils.isFactoryDereference(name) || ((FactoryBean&lt;?&gt;) beanInstance).isSingleton());</span>
+			}
+			else {
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">				return !BeanFactoryUtils.isFactoryDereference(name);</span>
+			}
+		}
+
+		// No singleton instance found -&gt; check bean definition.
+<span class="fc" id="L424">		BeanFactory parentBeanFactory = getParentBeanFactory();</span>
+<span class="pc bpc" id="L425" title="1 of 4 branches missed.">		if (parentBeanFactory != null &amp;&amp; !containsBeanDefinition(beanName)) {</span>
+			// No bean definition found in this factory -&gt; delegate to parent.
+<span class="nc" id="L427">			return parentBeanFactory.isSingleton(originalBeanName(name));</span>
+		}
+
+<span class="fc" id="L430">		RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+
+		// In case of FactoryBean, return singleton status of created object if not a dereference.
+<span class="fc bfc" id="L433" title="All 2 branches covered.">		if (mbd.isSingleton()) {</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">			if (isFactoryBean(beanName, mbd)) {</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">				if (BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="fc" id="L436">					return true;</span>
+				}
+<span class="fc" id="L438">				FactoryBean&lt;?&gt; factoryBean = (FactoryBean&lt;?&gt;) getBean(FACTORY_BEAN_PREFIX + beanName);</span>
+<span class="fc" id="L439">				return factoryBean.isSingleton();</span>
+			}
+			else {
+<span class="fc bfc" id="L442" title="All 2 branches covered.">				return !BeanFactoryUtils.isFactoryDereference(name);</span>
+			}
+		}
+		else {
+<span class="fc" id="L446">			return false;</span>
+		}
+	}
+
+	@Override
+	public boolean isPrototype(String name) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L452">		String beanName = transformedBeanName(name);</span>
+
+<span class="fc" id="L454">		BeanFactory parentBeanFactory = getParentBeanFactory();</span>
+<span class="pc bpc" id="L455" title="3 of 4 branches missed.">		if (parentBeanFactory != null &amp;&amp; !containsBeanDefinition(beanName)) {</span>
+			// No bean definition found in this factory -&gt; delegate to parent.
+<span class="nc" id="L457">			return parentBeanFactory.isPrototype(originalBeanName(name));</span>
+		}
+
+<span class="fc" id="L460">		RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+<span class="fc bfc" id="L461" title="All 2 branches covered.">		if (mbd.isPrototype()) {</span>
+			// In case of FactoryBean, return singleton status of created object if not a dereference.
+<span class="fc bfc" id="L463" title="All 4 branches covered.">			return (!BeanFactoryUtils.isFactoryDereference(name) || isFactoryBean(beanName, mbd));</span>
+		}
+
+		// Singleton or scoped - not a prototype.
+		// However, FactoryBean may still produce a prototype object...
+<span class="fc bfc" id="L468" title="All 2 branches covered.">		if (BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="fc" id="L469">			return false;</span>
+		}
+<span class="fc bfc" id="L471" title="All 2 branches covered.">		if (isFactoryBean(beanName, mbd)) {</span>
+<span class="fc" id="L472">			final FactoryBean&lt;?&gt; fb = (FactoryBean&lt;?&gt;) getBean(FACTORY_BEAN_PREFIX + beanName);</span>
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">			if (System.getSecurityManager() != null) {</span>
+<span class="nc" id="L474">				return AccessController.doPrivileged((PrivilegedAction&lt;Boolean&gt;) () -&gt;</span>
+<span class="nc bnc" id="L475" title="All 6 branches missed.">						((fb instanceof SmartFactoryBean &amp;&amp; ((SmartFactoryBean&lt;?&gt;) fb).isPrototype()) || !fb.isSingleton()),</span>
+<span class="nc" id="L476">						getAccessControlContext());</span>
+			}
+			else {
+<span class="pc bpc" id="L479" title="3 of 4 branches missed.">				return ((fb instanceof SmartFactoryBean &amp;&amp; ((SmartFactoryBean&lt;?&gt;) fb).isPrototype()) ||</span>
+<span class="pc bpc" id="L480" title="1 of 2 branches missed.">						!fb.isSingleton());</span>
+			}
+		}
+		else {
+<span class="fc" id="L484">			return false;</span>
+		}
+	}
+
+	@Override
+	public boolean isTypeMatch(String name, ResolvableType typeToMatch) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L490">		String beanName = transformedBeanName(name);</span>
+
+		// Check manually registered singletons.
+<span class="fc" id="L493">		Object beanInstance = getSingleton(beanName, false);</span>
+<span class="fc bfc" id="L494" title="All 4 branches covered.">		if (beanInstance != null &amp;&amp; beanInstance.getClass() != NullBean.class) {</span>
+<span class="fc bfc" id="L495" title="All 2 branches covered.">			if (beanInstance instanceof FactoryBean) {</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">				if (!BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="fc" id="L497">					Class&lt;?&gt; type = getTypeForFactoryBean((FactoryBean&lt;?&gt;) beanInstance);</span>
+<span class="pc bpc" id="L498" title="1 of 4 branches missed.">					return (type != null &amp;&amp; typeToMatch.isAssignableFrom(type));</span>
+				}
+				else {
+<span class="fc" id="L501">					return typeToMatch.isInstance(beanInstance);</span>
+				}
+			}
+<span class="pc bpc" id="L504" title="1 of 2 branches missed.">			else if (!BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="fc bfc" id="L505" title="All 2 branches covered.">				if (typeToMatch.isInstance(beanInstance)) {</span>
+					// Direct match for exposed instance?
+<span class="fc" id="L507">					return true;</span>
+				}
+<span class="pc bpc" id="L509" title="1 of 4 branches missed.">				else if (typeToMatch.hasGenerics() &amp;&amp; containsBeanDefinition(beanName)) {</span>
+					// Generics potentially only match on the target class, not on the proxy...
+<span class="fc" id="L511">					RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+<span class="fc" id="L512">					Class&lt;?&gt; targetType = mbd.getTargetType();</span>
+<span class="pc bpc" id="L513" title="2 of 4 branches missed.">					if (targetType != null &amp;&amp; targetType != ClassUtils.getUserClass(beanInstance)) {</span>
+						// Check raw class match as well, making sure it's exposed on the proxy.
+<span class="nc" id="L515">						Class&lt;?&gt; classToMatch = typeToMatch.resolve();</span>
+<span class="nc bnc" id="L516" title="All 4 branches missed.">						if (classToMatch != null &amp;&amp; !classToMatch.isInstance(beanInstance)) {</span>
+<span class="nc" id="L517">							return false;</span>
+						}
+<span class="nc bnc" id="L519" title="All 2 branches missed.">						if (typeToMatch.isAssignableFrom(targetType)) {</span>
+<span class="nc" id="L520">							return true;</span>
+						}
+					}
+<span class="fc" id="L523">					ResolvableType resolvableType = mbd.targetType;</span>
+<span class="fc bfc" id="L524" title="All 2 branches covered.">					if (resolvableType == null) {</span>
+<span class="fc" id="L525">						resolvableType = mbd.factoryMethodReturnType;</span>
+					}
+<span class="pc bpc" id="L527" title="1 of 4 branches missed.">					return (resolvableType != null &amp;&amp; typeToMatch.isAssignableFrom(resolvableType));</span>
+				}
+			}
+<span class="fc" id="L530">			return false;</span>
+		}
+<span class="pc bpc" id="L532" title="1 of 4 branches missed.">		else if (containsSingleton(beanName) &amp;&amp; !containsBeanDefinition(beanName)) {</span>
+			// null instance registered
+<span class="nc" id="L534">			return false;</span>
+		}
+
+		// No singleton instance found -&gt; check bean definition.
+<span class="fc" id="L538">		BeanFactory parentBeanFactory = getParentBeanFactory();</span>
+<span class="pc bpc" id="L539" title="1 of 4 branches missed.">		if (parentBeanFactory != null &amp;&amp; !containsBeanDefinition(beanName)) {</span>
+			// No bean definition found in this factory -&gt; delegate to parent.
+<span class="nc" id="L541">			return parentBeanFactory.isTypeMatch(originalBeanName(name), typeToMatch);</span>
+		}
+
+		// Retrieve corresponding bean definition.
+<span class="fc" id="L545">		RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+
+<span class="fc" id="L547">		Class&lt;?&gt; classToMatch = typeToMatch.resolve();</span>
+<span class="pc bpc" id="L548" title="1 of 2 branches missed.">		if (classToMatch == null) {</span>
+<span class="nc" id="L549">			classToMatch = FactoryBean.class;</span>
+		}
+<span class="fc bfc" id="L551" title="All 2 branches covered.">		Class&lt;?&gt;[] typesToMatch = (FactoryBean.class == classToMatch ?</span>
+				new Class&lt;?&gt;[] {classToMatch} : new Class&lt;?&gt;[] {FactoryBean.class, classToMatch});
+
+		// Check decorated bean definition, if any: We assume it'll be easier
+		// to determine the decorated bean's type than the proxy's type.
+<span class="fc" id="L556">		BeanDefinitionHolder dbd = mbd.getDecoratedDefinition();</span>
+<span class="pc bpc" id="L557" title="3 of 4 branches missed.">		if (dbd != null &amp;&amp; !BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="nc" id="L558">			RootBeanDefinition tbd = getMergedBeanDefinition(dbd.getBeanName(), dbd.getBeanDefinition(), mbd);</span>
+<span class="nc" id="L559">			Class&lt;?&gt; targetClass = predictBeanType(dbd.getBeanName(), tbd, typesToMatch);</span>
+<span class="nc bnc" id="L560" title="All 4 branches missed.">			if (targetClass != null &amp;&amp; !FactoryBean.class.isAssignableFrom(targetClass)) {</span>
+<span class="nc" id="L561">				return typeToMatch.isAssignableFrom(targetClass);</span>
+			}
+		}
+
+<span class="fc" id="L565">		Class&lt;?&gt; beanType = predictBeanType(beanName, mbd, typesToMatch);</span>
+<span class="fc bfc" id="L566" title="All 2 branches covered.">		if (beanType == null) {</span>
+<span class="fc" id="L567">			return false;</span>
+		}
+
+		// Check bean class whether we're dealing with a FactoryBean.
+<span class="fc bfc" id="L571" title="All 2 branches covered.">		if (FactoryBean.class.isAssignableFrom(beanType)) {</span>
+<span class="pc bpc" id="L572" title="1 of 4 branches missed.">			if (!BeanFactoryUtils.isFactoryDereference(name) &amp;&amp; beanInstance == null) {</span>
+				// If it's a FactoryBean, we want to look at what it creates, not the factory class.
+<span class="fc" id="L574">				beanType = getTypeForFactoryBean(beanName, mbd);</span>
+<span class="fc bfc" id="L575" title="All 2 branches covered.">				if (beanType == null) {</span>
+<span class="fc" id="L576">					return false;</span>
+				}
+			}
+		}
+<span class="fc bfc" id="L580" title="All 2 branches covered.">		else if (BeanFactoryUtils.isFactoryDereference(name)) {</span>
+			// Special case: A SmartInstantiationAwareBeanPostProcessor returned a non-FactoryBean
+			// type but we nevertheless are being asked to dereference a FactoryBean...
+			// Let's check the original bean class and proceed with it if it is a FactoryBean.
+<span class="fc" id="L584">			beanType = predictBeanType(beanName, mbd, FactoryBean.class);</span>
+<span class="pc bpc" id="L585" title="1 of 4 branches missed.">			if (beanType == null || !FactoryBean.class.isAssignableFrom(beanType)) {</span>
+<span class="fc" id="L586">				return false;</span>
+			}
+		}
+
+<span class="fc" id="L590">		ResolvableType resolvableType = mbd.targetType;</span>
+<span class="fc bfc" id="L591" title="All 2 branches covered.">		if (resolvableType == null) {</span>
+<span class="fc" id="L592">			resolvableType = mbd.factoryMethodReturnType;</span>
+		}
+<span class="fc bfc" id="L594" title="All 4 branches covered.">		if (resolvableType != null &amp;&amp; resolvableType.resolve() == beanType) {</span>
+<span class="fc" id="L595">			return typeToMatch.isAssignableFrom(resolvableType);</span>
+		}
+<span class="fc" id="L597">		return typeToMatch.isAssignableFrom(beanType);</span>
+	}
+
+	@Override
+	public boolean isTypeMatch(String name, Class&lt;?&gt; typeToMatch) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L602">		return isTypeMatch(name, ResolvableType.forRawClass(typeToMatch));</span>
+	}
+
+	@Override
+	@Nullable
+	public Class&lt;?&gt; getType(String name) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L608">		String beanName = transformedBeanName(name);</span>
+
+		// Check manually registered singletons.
+<span class="fc" id="L611">		Object beanInstance = getSingleton(beanName, false);</span>
+<span class="pc bpc" id="L612" title="1 of 4 branches missed.">		if (beanInstance != null &amp;&amp; beanInstance.getClass() != NullBean.class) {</span>
+<span class="fc bfc" id="L613" title="All 4 branches covered.">			if (beanInstance instanceof FactoryBean &amp;&amp; !BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="fc" id="L614">				return getTypeForFactoryBean((FactoryBean&lt;?&gt;) beanInstance);</span>
+			}
+			else {
+<span class="fc" id="L617">				return beanInstance.getClass();</span>
+			}
+		}
+
+		// No singleton instance found -&gt; check bean definition.
+<span class="fc" id="L622">		BeanFactory parentBeanFactory = getParentBeanFactory();</span>
+<span class="fc bfc" id="L623" title="All 4 branches covered.">		if (parentBeanFactory != null &amp;&amp; !containsBeanDefinition(beanName)) {</span>
+			// No bean definition found in this factory -&gt; delegate to parent.
+<span class="fc" id="L625">			return parentBeanFactory.getType(originalBeanName(name));</span>
+		}
+
+<span class="fc" id="L628">		RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+
+		// Check decorated bean definition, if any: We assume it'll be easier
+		// to determine the decorated bean's type than the proxy's type.
+<span class="fc" id="L632">		BeanDefinitionHolder dbd = mbd.getDecoratedDefinition();</span>
+<span class="pc bpc" id="L633" title="3 of 4 branches missed.">		if (dbd != null &amp;&amp; !BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="nc" id="L634">			RootBeanDefinition tbd = getMergedBeanDefinition(dbd.getBeanName(), dbd.getBeanDefinition(), mbd);</span>
+<span class="nc" id="L635">			Class&lt;?&gt; targetClass = predictBeanType(dbd.getBeanName(), tbd);</span>
+<span class="nc bnc" id="L636" title="All 4 branches missed.">			if (targetClass != null &amp;&amp; !FactoryBean.class.isAssignableFrom(targetClass)) {</span>
+<span class="nc" id="L637">				return targetClass;</span>
+			}
+		}
+
+<span class="fc" id="L641">		Class&lt;?&gt; beanClass = predictBeanType(beanName, mbd);</span>
+
+		// Check bean class whether we're dealing with a FactoryBean.
+<span class="fc bfc" id="L644" title="All 4 branches covered.">		if (beanClass != null &amp;&amp; FactoryBean.class.isAssignableFrom(beanClass)) {</span>
+<span class="fc bfc" id="L645" title="All 2 branches covered.">			if (!BeanFactoryUtils.isFactoryDereference(name)) {</span>
+				// If it's a FactoryBean, we want to look at what it creates, not at the factory class.
+<span class="fc" id="L647">				return getTypeForFactoryBean(beanName, mbd);</span>
+			}
+			else {
+<span class="fc" id="L650">				return beanClass;</span>
+			}
+		}
+		else {
+<span class="fc bfc" id="L654" title="All 2 branches covered.">			return (!BeanFactoryUtils.isFactoryDereference(name) ? beanClass : null);</span>
+		}
+	}
+
+	@Override
+	public String[] getAliases(String name) {
+<span class="fc" id="L660">		String beanName = transformedBeanName(name);</span>
+<span class="fc" id="L661">		List&lt;String&gt; aliases = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L662">		boolean factoryPrefix = name.startsWith(FACTORY_BEAN_PREFIX);</span>
+<span class="fc" id="L663">		String fullBeanName = beanName;</span>
+<span class="fc bfc" id="L664" title="All 2 branches covered.">		if (factoryPrefix) {</span>
+<span class="fc" id="L665">			fullBeanName = FACTORY_BEAN_PREFIX + beanName;</span>
+		}
+<span class="fc bfc" id="L667" title="All 2 branches covered.">		if (!fullBeanName.equals(name)) {</span>
+<span class="fc" id="L668">			aliases.add(fullBeanName);</span>
+		}
+<span class="fc" id="L670">		String[] retrievedAliases = super.getAliases(beanName);</span>
+<span class="fc bfc" id="L671" title="All 2 branches covered.">		for (String retrievedAlias : retrievedAliases) {</span>
+<span class="fc bfc" id="L672" title="All 2 branches covered.">			String alias = (factoryPrefix ? FACTORY_BEAN_PREFIX : &quot;&quot;) + retrievedAlias;</span>
+<span class="fc bfc" id="L673" title="All 2 branches covered.">			if (!alias.equals(name)) {</span>
+<span class="fc" id="L674">				aliases.add(alias);</span>
+			}
+		}
+<span class="pc bpc" id="L677" title="1 of 4 branches missed.">		if (!containsSingleton(beanName) &amp;&amp; !containsBeanDefinition(beanName)) {</span>
+<span class="nc" id="L678">			BeanFactory parentBeanFactory = getParentBeanFactory();</span>
+<span class="nc bnc" id="L679" title="All 2 branches missed.">			if (parentBeanFactory != null) {</span>
+<span class="nc" id="L680">				aliases.addAll(Arrays.asList(parentBeanFactory.getAliases(fullBeanName)));</span>
+			}
+		}
+<span class="fc" id="L683">		return StringUtils.toStringArray(aliases);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of HierarchicalBeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	@Nullable
+	public BeanFactory getParentBeanFactory() {
+<span class="fc" id="L694">		return this.parentBeanFactory;</span>
+	}
+
+	@Override
+	public boolean containsLocalBean(String name) {
+<span class="fc" id="L699">		String beanName = transformedBeanName(name);</span>
+<span class="fc bfc" id="L700" title="All 4 branches covered.">		return ((containsSingleton(beanName) || containsBeanDefinition(beanName)) &amp;&amp;</span>
+<span class="fc bfc" id="L701" title="All 4 branches covered.">				(!BeanFactoryUtils.isFactoryDereference(name) || isFactoryBean(beanName)));</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ConfigurableBeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public void setParentBeanFactory(@Nullable BeanFactory parentBeanFactory) {
+<span class="pc bpc" id="L711" title="3 of 4 branches missed.">		if (this.parentBeanFactory != null &amp;&amp; this.parentBeanFactory != parentBeanFactory) {</span>
+<span class="nc" id="L712">			throw new IllegalStateException(&quot;Already associated with parent BeanFactory: &quot; + this.parentBeanFactory);</span>
+		}
+<span class="fc" id="L714">		this.parentBeanFactory = parentBeanFactory;</span>
+<span class="fc" id="L715">	}</span>
+
+	@Override
+	public void setBeanClassLoader(@Nullable ClassLoader beanClassLoader) {
+<span class="nc bnc" id="L719" title="All 2 branches missed.">		this.beanClassLoader = (beanClassLoader != null ? beanClassLoader : ClassUtils.getDefaultClassLoader());</span>
+<span class="nc" id="L720">	}</span>
+
+	@Override
+	@Nullable
+	public ClassLoader getBeanClassLoader() {
+<span class="fc" id="L725">		return this.beanClassLoader;</span>
+	}
+
+	@Override
+	public void setTempClassLoader(@Nullable ClassLoader tempClassLoader) {
+<span class="fc" id="L730">		this.tempClassLoader = tempClassLoader;</span>
+<span class="fc" id="L731">	}</span>
+
+	@Override
+	@Nullable
+	public ClassLoader getTempClassLoader() {
+<span class="fc" id="L736">		return this.tempClassLoader;</span>
+	}
+
+	@Override
+	public void setCacheBeanMetadata(boolean cacheBeanMetadata) {
+<span class="nc" id="L741">		this.cacheBeanMetadata = cacheBeanMetadata;</span>
+<span class="nc" id="L742">	}</span>
+
+	@Override
+	public boolean isCacheBeanMetadata() {
+<span class="fc" id="L746">		return this.cacheBeanMetadata;</span>
+	}
+
+	@Override
+	public void setBeanExpressionResolver(@Nullable BeanExpressionResolver resolver) {
+<span class="fc" id="L751">		this.beanExpressionResolver = resolver;</span>
+<span class="fc" id="L752">	}</span>
+
+	@Override
+	@Nullable
+	public BeanExpressionResolver getBeanExpressionResolver() {
+<span class="nc" id="L757">		return this.beanExpressionResolver;</span>
+	}
+
+	@Override
+	public void setConversionService(@Nullable ConversionService conversionService) {
+<span class="fc" id="L762">		this.conversionService = conversionService;</span>
+<span class="fc" id="L763">	}</span>
+
+	@Override
+	@Nullable
+	public ConversionService getConversionService() {
+<span class="fc" id="L768">		return this.conversionService;</span>
+	}
+
+	@Override
+	public void addPropertyEditorRegistrar(PropertyEditorRegistrar registrar) {
+<span class="fc" id="L773">		Assert.notNull(registrar, &quot;PropertyEditorRegistrar must not be null&quot;);</span>
+<span class="fc" id="L774">		this.propertyEditorRegistrars.add(registrar);</span>
+<span class="fc" id="L775">	}</span>
+
+	/**
+	 * Return the set of PropertyEditorRegistrars.
+	 */
+	public Set&lt;PropertyEditorRegistrar&gt; getPropertyEditorRegistrars() {
+<span class="nc" id="L781">		return this.propertyEditorRegistrars;</span>
+	}
+
+	@Override
+	public void registerCustomEditor(Class&lt;?&gt; requiredType, Class&lt;? extends PropertyEditor&gt; propertyEditorClass) {
+<span class="fc" id="L786">		Assert.notNull(requiredType, &quot;Required type must not be null&quot;);</span>
+<span class="fc" id="L787">		Assert.notNull(propertyEditorClass, &quot;PropertyEditor class must not be null&quot;);</span>
+<span class="fc" id="L788">		this.customEditors.put(requiredType, propertyEditorClass);</span>
+<span class="fc" id="L789">	}</span>
+
+	@Override
+	public void copyRegisteredEditorsTo(PropertyEditorRegistry registry) {
+<span class="nc" id="L793">		registerCustomEditors(registry);</span>
+<span class="nc" id="L794">	}</span>
+
+	/**
+	 * Return the map of custom editors, with Classes as keys and PropertyEditor classes as values.
+	 */
+	public Map&lt;Class&lt;?&gt;, Class&lt;? extends PropertyEditor&gt;&gt; getCustomEditors() {
+<span class="nc" id="L800">		return this.customEditors;</span>
+	}
+
+	@Override
+	public void setTypeConverter(TypeConverter typeConverter) {
+<span class="fc" id="L805">		this.typeConverter = typeConverter;</span>
+<span class="fc" id="L806">	}</span>
+
+	/**
+	 * Return the custom TypeConverter to use, if any.
+	 * @return the custom TypeConverter, or {@code null} if none specified
+	 */
+	@Nullable
+	protected TypeConverter getCustomTypeConverter() {
+<span class="fc" id="L814">		return this.typeConverter;</span>
+	}
+
+	@Override
+	public TypeConverter getTypeConverter() {
+<span class="fc" id="L819">		TypeConverter customConverter = getCustomTypeConverter();</span>
+<span class="pc bpc" id="L820" title="1 of 2 branches missed.">		if (customConverter != null) {</span>
+<span class="nc" id="L821">			return customConverter;</span>
+		}
+		else {
+			// Build default TypeConverter, registering custom editors.
+<span class="fc" id="L825">			SimpleTypeConverter typeConverter = new SimpleTypeConverter();</span>
+<span class="fc" id="L826">			typeConverter.setConversionService(getConversionService());</span>
+<span class="fc" id="L827">			registerCustomEditors(typeConverter);</span>
+<span class="fc" id="L828">			return typeConverter;</span>
+		}
+	}
+
+	@Override
+	public void addEmbeddedValueResolver(StringValueResolver valueResolver) {
+<span class="fc" id="L834">		Assert.notNull(valueResolver, &quot;StringValueResolver must not be null&quot;);</span>
+<span class="fc" id="L835">		this.embeddedValueResolvers.add(valueResolver);</span>
+<span class="fc" id="L836">	}</span>
+
+	@Override
+	public boolean hasEmbeddedValueResolver() {
+<span class="nc bnc" id="L840" title="All 2 branches missed.">		return !this.embeddedValueResolvers.isEmpty();</span>
+	}
+
+	@Override
+	@Nullable
+	public String resolveEmbeddedValue(@Nullable String value) {
+<span class="pc bpc" id="L846" title="1 of 2 branches missed.">		if (value == null) {</span>
+<span class="nc" id="L847">			return null;</span>
+		}
+<span class="fc" id="L849">		String result = value;</span>
+<span class="pc bpc" id="L850" title="1 of 2 branches missed.">		for (StringValueResolver resolver : this.embeddedValueResolvers) {</span>
+<span class="fc" id="L851">			result = resolver.resolveStringValue(result);</span>
+<span class="fc bfc" id="L852" title="All 2 branches covered.">			if (result == null) {</span>
+<span class="fc" id="L853">				return null;</span>
+			}
+<span class="fc" id="L855">		}</span>
+<span class="nc" id="L856">		return result;</span>
+	}
+
+	@Override
+	public void addBeanPostProcessor(BeanPostProcessor beanPostProcessor) {
+<span class="fc" id="L861">		Assert.notNull(beanPostProcessor, &quot;BeanPostProcessor must not be null&quot;);</span>
+		// Remove from old position, if any
+<span class="fc" id="L863">		this.beanPostProcessors.remove(beanPostProcessor);</span>
+		// Track whether it is instantiation/destruction aware
+<span class="fc bfc" id="L865" title="All 2 branches covered.">		if (beanPostProcessor instanceof InstantiationAwareBeanPostProcessor) {</span>
+<span class="fc" id="L866">			this.hasInstantiationAwareBeanPostProcessors = true;</span>
+		}
+<span class="pc bpc" id="L868" title="1 of 2 branches missed.">		if (beanPostProcessor instanceof DestructionAwareBeanPostProcessor) {</span>
+<span class="nc" id="L869">			this.hasDestructionAwareBeanPostProcessors = true;</span>
+		}
+		// Add to end of list
+<span class="fc" id="L872">		this.beanPostProcessors.add(beanPostProcessor);</span>
+<span class="fc" id="L873">	}</span>
+
+	@Override
+	public int getBeanPostProcessorCount() {
+<span class="nc" id="L877">		return this.beanPostProcessors.size();</span>
+	}
+
+	/**
+	 * Return the list of BeanPostProcessors that will get applied
+	 * to beans created with this factory.
+	 */
+	public List&lt;BeanPostProcessor&gt; getBeanPostProcessors() {
+<span class="fc" id="L885">		return this.beanPostProcessors;</span>
+	}
+
+	/**
+	 * Return whether this factory holds a InstantiationAwareBeanPostProcessor
+	 * that will get applied to singleton beans on shutdown.
+	 * @see #addBeanPostProcessor
+	 * @see org.springframework.beans.factory.config.InstantiationAwareBeanPostProcessor
+	 */
+	protected boolean hasInstantiationAwareBeanPostProcessors() {
+<span class="fc" id="L895">		return this.hasInstantiationAwareBeanPostProcessors;</span>
+	}
+
+	/**
+	 * Return whether this factory holds a DestructionAwareBeanPostProcessor
+	 * that will get applied to singleton beans on shutdown.
+	 * @see #addBeanPostProcessor
+	 * @see org.springframework.beans.factory.config.DestructionAwareBeanPostProcessor
+	 */
+	protected boolean hasDestructionAwareBeanPostProcessors() {
+<span class="fc" id="L905">		return this.hasDestructionAwareBeanPostProcessors;</span>
+	}
+
+	@Override
+	public void registerScope(String scopeName, Scope scope) {
+<span class="fc" id="L910">		Assert.notNull(scopeName, &quot;Scope identifier must not be null&quot;);</span>
+<span class="fc" id="L911">		Assert.notNull(scope, &quot;Scope must not be null&quot;);</span>
+<span class="pc bpc" id="L912" title="2 of 4 branches missed.">		if (SCOPE_SINGLETON.equals(scopeName) || SCOPE_PROTOTYPE.equals(scopeName)) {</span>
+<span class="nc" id="L913">			throw new IllegalArgumentException(&quot;Cannot replace existing scopes 'singleton' and 'prototype'&quot;);</span>
+		}
+<span class="fc" id="L915">		Scope previous = this.scopes.put(scopeName, scope);</span>
+<span class="pc bpc" id="L916" title="1 of 4 branches missed.">		if (previous != null &amp;&amp; previous != scope) {</span>
+<span class="nc bnc" id="L917" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L918">				logger.debug(&quot;Replacing scope '&quot; + scopeName + &quot;' from [&quot; + previous + &quot;] to [&quot; + scope + &quot;]&quot;);</span>
+			}
+		}
+		else {
+<span class="pc bpc" id="L922" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L923">				logger.trace(&quot;Registering scope '&quot; + scopeName + &quot;' with implementation [&quot; + scope + &quot;]&quot;);</span>
+			}
+		}
+<span class="fc" id="L926">	}</span>
+
+	@Override
+	public String[] getRegisteredScopeNames() {
+<span class="fc" id="L930">		return StringUtils.toStringArray(this.scopes.keySet());</span>
+	}
+
+	@Override
+	@Nullable
+	public Scope getRegisteredScope(String scopeName) {
+<span class="fc" id="L936">		Assert.notNull(scopeName, &quot;Scope identifier must not be null&quot;);</span>
+<span class="fc" id="L937">		return this.scopes.get(scopeName);</span>
+	}
+
+	/**
+	 * Set the security context provider for this bean factory. If a security manager
+	 * is set, interaction with the user code will be executed using the privileged
+	 * of the provided security context.
+	 */
+	public void setSecurityContextProvider(SecurityContextProvider securityProvider) {
+<span class="fc" id="L946">		this.securityContextProvider = securityProvider;</span>
+<span class="fc" id="L947">	}</span>
+
+	/**
+	 * Delegate the creation of the access control context to the
+	 * {@link #setSecurityContextProvider SecurityContextProvider}.
+	 */
+	@Override
+	public AccessControlContext getAccessControlContext() {
+<span class="fc bfc" id="L955" title="All 2 branches covered.">		return (this.securityContextProvider != null ?</span>
+<span class="fc" id="L956">				this.securityContextProvider.getAccessControlContext() :</span>
+<span class="fc" id="L957">				AccessController.getContext());</span>
+	}
+
+	@Override
+	public void copyConfigurationFrom(ConfigurableBeanFactory otherFactory) {
+<span class="nc" id="L962">		Assert.notNull(otherFactory, &quot;BeanFactory must not be null&quot;);</span>
+<span class="nc" id="L963">		setBeanClassLoader(otherFactory.getBeanClassLoader());</span>
+<span class="nc" id="L964">		setCacheBeanMetadata(otherFactory.isCacheBeanMetadata());</span>
+<span class="nc" id="L965">		setBeanExpressionResolver(otherFactory.getBeanExpressionResolver());</span>
+<span class="nc" id="L966">		setConversionService(otherFactory.getConversionService());</span>
+<span class="nc bnc" id="L967" title="All 2 branches missed.">		if (otherFactory instanceof AbstractBeanFactory) {</span>
+<span class="nc" id="L968">			AbstractBeanFactory otherAbstractFactory = (AbstractBeanFactory) otherFactory;</span>
+<span class="nc" id="L969">			this.propertyEditorRegistrars.addAll(otherAbstractFactory.propertyEditorRegistrars);</span>
+<span class="nc" id="L970">			this.customEditors.putAll(otherAbstractFactory.customEditors);</span>
+<span class="nc" id="L971">			this.typeConverter = otherAbstractFactory.typeConverter;</span>
+<span class="nc" id="L972">			this.beanPostProcessors.addAll(otherAbstractFactory.beanPostProcessors);</span>
+<span class="nc bnc" id="L973" title="All 4 branches missed.">			this.hasInstantiationAwareBeanPostProcessors = this.hasInstantiationAwareBeanPostProcessors ||</span>
+					otherAbstractFactory.hasInstantiationAwareBeanPostProcessors;
+<span class="nc bnc" id="L975" title="All 4 branches missed.">			this.hasDestructionAwareBeanPostProcessors = this.hasDestructionAwareBeanPostProcessors ||</span>
+					otherAbstractFactory.hasDestructionAwareBeanPostProcessors;
+<span class="nc" id="L977">			this.scopes.putAll(otherAbstractFactory.scopes);</span>
+<span class="nc" id="L978">			this.securityContextProvider = otherAbstractFactory.securityContextProvider;</span>
+<span class="nc" id="L979">		}</span>
+		else {
+<span class="nc" id="L981">			setTypeConverter(otherFactory.getTypeConverter());</span>
+<span class="nc" id="L982">			String[] otherScopeNames = otherFactory.getRegisteredScopeNames();</span>
+<span class="nc bnc" id="L983" title="All 2 branches missed.">			for (String scopeName : otherScopeNames) {</span>
+<span class="nc" id="L984">				this.scopes.put(scopeName, otherFactory.getRegisteredScope(scopeName));</span>
+			}
+		}
+<span class="nc" id="L987">	}</span>
+
+	/**
+	 * Return a 'merged' BeanDefinition for the given bean name,
+	 * merging a child bean definition with its parent if necessary.
+	 * &lt;p&gt;This {@code getMergedBeanDefinition} considers bean definition
+	 * in ancestors as well.
+	 * @param name the name of the bean to retrieve the merged definition for
+	 * (may be an alias)
+	 * @return a (potentially merged) RootBeanDefinition for the given bean
+	 * @throws NoSuchBeanDefinitionException if there is no bean with the given name
+	 * @throws BeanDefinitionStoreException in case of an invalid bean definition
+	 */
+	@Override
+	public BeanDefinition getMergedBeanDefinition(String name) throws BeansException {
+<span class="fc" id="L1002">		String beanName = transformedBeanName(name);</span>
+		// Efficiently check whether bean definition exists in this factory.
+<span class="pc bpc" id="L1004" title="3 of 4 branches missed.">		if (!containsBeanDefinition(beanName) &amp;&amp; getParentBeanFactory() instanceof ConfigurableBeanFactory) {</span>
+<span class="nc" id="L1005">			return ((ConfigurableBeanFactory) getParentBeanFactory()).getMergedBeanDefinition(beanName);</span>
+		}
+		// Resolve merged bean definition locally.
+<span class="fc" id="L1008">		return getMergedLocalBeanDefinition(beanName);</span>
+	}
+
+	@Override
+	public boolean isFactoryBean(String name) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L1013">		String beanName = transformedBeanName(name);</span>
+<span class="fc" id="L1014">		Object beanInstance = getSingleton(beanName, false);</span>
+<span class="fc bfc" id="L1015" title="All 2 branches covered.">		if (beanInstance != null) {</span>
+<span class="fc" id="L1016">			return (beanInstance instanceof FactoryBean);</span>
+		}
+		// No singleton instance found -&gt; check bean definition.
+<span class="pc bpc" id="L1019" title="3 of 4 branches missed.">		if (!containsBeanDefinition(beanName) &amp;&amp; getParentBeanFactory() instanceof ConfigurableBeanFactory) {</span>
+			// No bean definition found in this factory -&gt; delegate to parent.
+<span class="nc" id="L1021">			return ((ConfigurableBeanFactory) getParentBeanFactory()).isFactoryBean(name);</span>
+		}
+<span class="fc" id="L1023">		return isFactoryBean(beanName, getMergedLocalBeanDefinition(beanName));</span>
+	}
+
+	@Override
+	public boolean isActuallyInCreation(String beanName) {
+<span class="pc bpc" id="L1028" title="2 of 4 branches missed.">		return (isSingletonCurrentlyInCreation(beanName) || isPrototypeCurrentlyInCreation(beanName));</span>
+	}
+
+	/**
+	 * Return whether the specified prototype bean is currently in creation
+	 * (within the current thread).
+	 * @param beanName the name of the bean
+	 */
+	protected boolean isPrototypeCurrentlyInCreation(String beanName) {
+<span class="fc" id="L1037">		Object curVal = this.prototypesCurrentlyInCreation.get();</span>
+<span class="fc bfc" id="L1038" title="All 2 branches covered.">		return (curVal != null &amp;&amp;</span>
+<span class="pc bpc" id="L1039" title="1 of 6 branches missed.">				(curVal.equals(beanName) || (curVal instanceof Set &amp;&amp; ((Set&lt;?&gt;) curVal).contains(beanName))));</span>
+	}
+
+	/**
+	 * Callback before prototype creation.
+	 * &lt;p&gt;The default implementation register the prototype as currently in creation.
+	 * @param beanName the name of the prototype about to be created
+	 * @see #isPrototypeCurrentlyInCreation
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	protected void beforePrototypeCreation(String beanName) {
+<span class="fc" id="L1050">		Object curVal = this.prototypesCurrentlyInCreation.get();</span>
+<span class="fc bfc" id="L1051" title="All 2 branches covered.">		if (curVal == null) {</span>
+<span class="fc" id="L1052">			this.prototypesCurrentlyInCreation.set(beanName);</span>
+		}
+<span class="fc bfc" id="L1054" title="All 2 branches covered.">		else if (curVal instanceof String) {</span>
+<span class="fc" id="L1055">			Set&lt;String&gt; beanNameSet = new HashSet&lt;&gt;(2);</span>
+<span class="fc" id="L1056">			beanNameSet.add((String) curVal);</span>
+<span class="fc" id="L1057">			beanNameSet.add(beanName);</span>
+<span class="fc" id="L1058">			this.prototypesCurrentlyInCreation.set(beanNameSet);</span>
+<span class="fc" id="L1059">		}</span>
+		else {
+<span class="fc" id="L1061">			Set&lt;String&gt; beanNameSet = (Set&lt;String&gt;) curVal;</span>
+<span class="fc" id="L1062">			beanNameSet.add(beanName);</span>
+		}
+<span class="fc" id="L1064">	}</span>
+
+	/**
+	 * Callback after prototype creation.
+	 * &lt;p&gt;The default implementation marks the prototype as not in creation anymore.
+	 * @param beanName the name of the prototype that has been created
+	 * @see #isPrototypeCurrentlyInCreation
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	protected void afterPrototypeCreation(String beanName) {
+<span class="fc" id="L1074">		Object curVal = this.prototypesCurrentlyInCreation.get();</span>
+<span class="fc bfc" id="L1075" title="All 2 branches covered.">		if (curVal instanceof String) {</span>
+<span class="fc" id="L1076">			this.prototypesCurrentlyInCreation.remove();</span>
+		}
+<span class="pc bpc" id="L1078" title="1 of 2 branches missed.">		else if (curVal instanceof Set) {</span>
+<span class="fc" id="L1079">			Set&lt;String&gt; beanNameSet = (Set&lt;String&gt;) curVal;</span>
+<span class="fc" id="L1080">			beanNameSet.remove(beanName);</span>
+<span class="fc bfc" id="L1081" title="All 2 branches covered.">			if (beanNameSet.isEmpty()) {</span>
+<span class="fc" id="L1082">				this.prototypesCurrentlyInCreation.remove();</span>
+			}
+		}
+<span class="fc" id="L1085">	}</span>
+
+	@Override
+	public void destroyBean(String beanName, Object beanInstance) {
+<span class="nc" id="L1089">		destroyBean(beanName, beanInstance, getMergedLocalBeanDefinition(beanName));</span>
+<span class="nc" id="L1090">	}</span>
+
+	/**
+	 * Destroy the given bean instance (usually a prototype instance
+	 * obtained from this factory) according to the given bean definition.
+	 * @param beanName the name of the bean definition
+	 * @param bean the bean instance to destroy
+	 * @param mbd the merged bean definition
+	 */
+	protected void destroyBean(String beanName, Object bean, RootBeanDefinition mbd) {
+<span class="nc" id="L1100">		new DisposableBeanAdapter(bean, beanName, mbd, getBeanPostProcessors(), getAccessControlContext()).destroy();</span>
+<span class="nc" id="L1101">	}</span>
+
+	@Override
+	public void destroyScopedBean(String beanName) {
+<span class="nc" id="L1105">		RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+<span class="nc bnc" id="L1106" title="All 4 branches missed.">		if (mbd.isSingleton() || mbd.isPrototype()) {</span>
+<span class="nc" id="L1107">			throw new IllegalArgumentException(</span>
+					&quot;Bean name '&quot; + beanName + &quot;' does not correspond to an object in a mutable scope&quot;);
+		}
+<span class="nc" id="L1110">		String scopeName = mbd.getScope();</span>
+<span class="nc" id="L1111">		Scope scope = this.scopes.get(scopeName);</span>
+<span class="nc bnc" id="L1112" title="All 2 branches missed.">		if (scope == null) {</span>
+<span class="nc" id="L1113">			throw new IllegalStateException(&quot;No Scope SPI registered for scope name '&quot; + scopeName + &quot;'&quot;);</span>
+		}
+<span class="nc" id="L1115">		Object bean = scope.remove(beanName);</span>
+<span class="nc bnc" id="L1116" title="All 2 branches missed.">		if (bean != null) {</span>
+<span class="nc" id="L1117">			destroyBean(beanName, bean, mbd);</span>
+		}
+<span class="nc" id="L1119">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation methods
+	//---------------------------------------------------------------------
+
+	/**
+	 * Return the bean name, stripping out the factory dereference prefix if necessary,
+	 * and resolving aliases to canonical names.
+	 * @param name the user-specified name
+	 * @return the transformed bean name
+	 */
+	protected String transformedBeanName(String name) {
+<span class="fc" id="L1133">		return canonicalName(BeanFactoryUtils.transformedBeanName(name));</span>
+	}
+
+	/**
+	 * Determine the original bean name, resolving locally defined aliases to canonical names.
+	 * @param name the user-specified name
+	 * @return the original bean name
+	 */
+	protected String originalBeanName(String name) {
+<span class="fc" id="L1142">		String beanName = transformedBeanName(name);</span>
+<span class="fc bfc" id="L1143" title="All 2 branches covered.">		if (name.startsWith(FACTORY_BEAN_PREFIX)) {</span>
+<span class="fc" id="L1144">			beanName = FACTORY_BEAN_PREFIX + beanName;</span>
+		}
+<span class="fc" id="L1146">		return beanName;</span>
+	}
+
+	/**
+	 * Initialize the given BeanWrapper with the custom editors registered
+	 * with this factory. To be called for BeanWrappers that will create
+	 * and populate bean instances.
+	 * &lt;p&gt;The default implementation delegates to {@link #registerCustomEditors}.
+	 * Can be overridden in subclasses.
+	 * @param bw the BeanWrapper to initialize
+	 */
+	protected void initBeanWrapper(BeanWrapper bw) {
+<span class="fc" id="L1158">		bw.setConversionService(getConversionService());</span>
+<span class="fc" id="L1159">		registerCustomEditors(bw);</span>
+<span class="fc" id="L1160">	}</span>
+
+	/**
+	 * Initialize the given PropertyEditorRegistry with the custom editors
+	 * that have been registered with this BeanFactory.
+	 * &lt;p&gt;To be called for BeanWrappers that will create and populate bean
+	 * instances, and for SimpleTypeConverter used for constructor argument
+	 * and factory method type conversion.
+	 * @param registry the PropertyEditorRegistry to initialize
+	 */
+	protected void registerCustomEditors(PropertyEditorRegistry registry) {
+<span class="pc bpc" id="L1171" title="1 of 2 branches missed.">		PropertyEditorRegistrySupport registrySupport =</span>
+				(registry instanceof PropertyEditorRegistrySupport ? (PropertyEditorRegistrySupport) registry : null);
+<span class="pc bpc" id="L1173" title="1 of 2 branches missed.">		if (registrySupport != null) {</span>
+<span class="fc" id="L1174">			registrySupport.useConfigValueEditors();</span>
+		}
+<span class="fc bfc" id="L1176" title="All 2 branches covered.">		if (!this.propertyEditorRegistrars.isEmpty()) {</span>
+<span class="fc bfc" id="L1177" title="All 2 branches covered.">			for (PropertyEditorRegistrar registrar : this.propertyEditorRegistrars) {</span>
+				try {
+<span class="fc" id="L1179">					registrar.registerCustomEditors(registry);</span>
+				}
+<span class="nc" id="L1181">				catch (BeanCreationException ex) {</span>
+<span class="nc" id="L1182">					Throwable rootCause = ex.getMostSpecificCause();</span>
+<span class="nc bnc" id="L1183" title="All 2 branches missed.">					if (rootCause instanceof BeanCurrentlyInCreationException) {</span>
+<span class="nc" id="L1184">						BeanCreationException bce = (BeanCreationException) rootCause;</span>
+<span class="nc" id="L1185">						String bceBeanName = bce.getBeanName();</span>
+<span class="nc bnc" id="L1186" title="All 4 branches missed.">						if (bceBeanName != null &amp;&amp; isCurrentlyInCreation(bceBeanName)) {</span>
+<span class="nc bnc" id="L1187" title="All 2 branches missed.">							if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1188">								logger.debug(&quot;PropertyEditorRegistrar [&quot; + registrar.getClass().getName() +</span>
+										&quot;] failed because it tried to obtain currently created bean '&quot; +
+<span class="nc" id="L1190">										ex.getBeanName() + &quot;': &quot; + ex.getMessage());</span>
+							}
+<span class="nc" id="L1192">							onSuppressedException(ex);</span>
+<span class="nc" id="L1193">							continue;</span>
+						}
+					}
+<span class="nc" id="L1196">					throw ex;</span>
+<span class="fc" id="L1197">				}</span>
+<span class="fc" id="L1198">			}</span>
+		}
+<span class="fc bfc" id="L1200" title="All 2 branches covered.">		if (!this.customEditors.isEmpty()) {</span>
+<span class="fc" id="L1201">			this.customEditors.forEach((requiredType, editorClass) -&gt;</span>
+<span class="fc" id="L1202">					registry.registerCustomEditor(requiredType, BeanUtils.instantiateClass(editorClass)));</span>
+		}
+<span class="fc" id="L1204">	}</span>
+
+
+	/**
+	 * Return a merged RootBeanDefinition, traversing the parent bean definition
+	 * if the specified bean corresponds to a child bean definition.
+	 * @param beanName the name of the bean to retrieve the merged definition for
+	 * @return a (potentially merged) RootBeanDefinition for the given bean
+	 * @throws NoSuchBeanDefinitionException if there is no bean with the given name
+	 * @throws BeanDefinitionStoreException in case of an invalid bean definition
+	 */
+	protected RootBeanDefinition getMergedLocalBeanDefinition(String beanName) throws BeansException {
+		// Quick check on the concurrent map first, with minimal locking.
+<span class="fc" id="L1217">		RootBeanDefinition mbd = this.mergedBeanDefinitions.get(beanName);</span>
+<span class="fc bfc" id="L1218" title="All 2 branches covered.">		if (mbd != null) {</span>
+<span class="fc" id="L1219">			return mbd;</span>
+		}
+<span class="fc" id="L1221">		return getMergedBeanDefinition(beanName, getBeanDefinition(beanName));</span>
+	}
+
+	/**
+	 * Return a RootBeanDefinition for the given top-level bean, by merging with
+	 * the parent if the given bean's definition is a child bean definition.
+	 * @param beanName the name of the bean definition
+	 * @param bd the original bean definition (Root/ChildBeanDefinition)
+	 * @return a (potentially merged) RootBeanDefinition for the given bean
+	 * @throws BeanDefinitionStoreException in case of an invalid bean definition
+	 */
+	protected RootBeanDefinition getMergedBeanDefinition(String beanName, BeanDefinition bd)
+			throws BeanDefinitionStoreException {
+
+<span class="fc" id="L1235">		return getMergedBeanDefinition(beanName, bd, null);</span>
+	}
+
+	/**
+	 * Return a RootBeanDefinition for the given bean, by merging with the
+	 * parent if the given bean's definition is a child bean definition.
+	 * @param beanName the name of the bean definition
+	 * @param bd the original bean definition (Root/ChildBeanDefinition)
+	 * @param containingBd the containing bean definition in case of inner bean,
+	 * or {@code null} in case of a top-level bean
+	 * @return a (potentially merged) RootBeanDefinition for the given bean
+	 * @throws BeanDefinitionStoreException in case of an invalid bean definition
+	 */
+	protected RootBeanDefinition getMergedBeanDefinition(
+			String beanName, BeanDefinition bd, @Nullable BeanDefinition containingBd)
+			throws BeanDefinitionStoreException {
+
+<span class="fc" id="L1252">		synchronized (this.mergedBeanDefinitions) {</span>
+<span class="fc" id="L1253">			RootBeanDefinition mbd = null;</span>
+
+			// Check with full lock now in order to enforce the same merged instance.
+<span class="fc bfc" id="L1256" title="All 2 branches covered.">			if (containingBd == null) {</span>
+<span class="fc" id="L1257">				mbd = this.mergedBeanDefinitions.get(beanName);</span>
+			}
+
+<span class="pc bpc" id="L1260" title="1 of 2 branches missed.">			if (mbd == null) {</span>
+<span class="fc bfc" id="L1261" title="All 2 branches covered.">				if (bd.getParentName() == null) {</span>
+					// Use copy of given root bean definition.
+<span class="fc bfc" id="L1263" title="All 2 branches covered.">					if (bd instanceof RootBeanDefinition) {</span>
+<span class="fc" id="L1264">						mbd = ((RootBeanDefinition) bd).cloneBeanDefinition();</span>
+					}
+					else {
+<span class="fc" id="L1267">						mbd = new RootBeanDefinition(bd);</span>
+					}
+				}
+				else {
+					// Child bean definition: needs to be merged with parent.
+					BeanDefinition pbd;
+					try {
+<span class="fc" id="L1274">						String parentBeanName = transformedBeanName(bd.getParentName());</span>
+<span class="pc bpc" id="L1275" title="1 of 2 branches missed.">						if (!beanName.equals(parentBeanName)) {</span>
+<span class="fc" id="L1276">							pbd = getMergedBeanDefinition(parentBeanName);</span>
+						}
+						else {
+<span class="nc" id="L1279">							BeanFactory parent = getParentBeanFactory();</span>
+<span class="nc bnc" id="L1280" title="All 2 branches missed.">							if (parent instanceof ConfigurableBeanFactory) {</span>
+<span class="nc" id="L1281">								pbd = ((ConfigurableBeanFactory) parent).getMergedBeanDefinition(parentBeanName);</span>
+							}
+							else {
+<span class="nc" id="L1284">								throw new NoSuchBeanDefinitionException(parentBeanName,</span>
+										&quot;Parent name '&quot; + parentBeanName + &quot;' is equal to bean name '&quot; + beanName +
+										&quot;': cannot be resolved without an AbstractBeanFactory parent&quot;);
+							}
+						}
+					}
+<span class="nc" id="L1290">					catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="nc" id="L1291">						throw new BeanDefinitionStoreException(bd.getResourceDescription(), beanName,</span>
+<span class="nc" id="L1292">								&quot;Could not resolve parent bean definition '&quot; + bd.getParentName() + &quot;'&quot;, ex);</span>
+<span class="fc" id="L1293">					}</span>
+					// Deep copy with overridden values.
+<span class="fc" id="L1295">					mbd = new RootBeanDefinition(pbd);</span>
+<span class="fc" id="L1296">					mbd.overrideFrom(bd);</span>
+				}
+
+				// Set default singleton scope, if not configured before.
+<span class="fc bfc" id="L1300" title="All 2 branches covered.">				if (!StringUtils.hasLength(mbd.getScope())) {</span>
+<span class="fc" id="L1301">					mbd.setScope(RootBeanDefinition.SCOPE_SINGLETON);</span>
+				}
+
+				// A bean contained in a non-singleton bean cannot be a singleton itself.
+				// Let's correct this on the fly here, since this might be the result of
+				// parent-child merging for the outer bean, in which case the original inner bean
+				// definition will not have inherited the merged outer bean's singleton status.
+<span class="pc bpc" id="L1308" title="1 of 6 branches missed.">				if (containingBd != null &amp;&amp; !containingBd.isSingleton() &amp;&amp; mbd.isSingleton()) {</span>
+<span class="nc" id="L1309">					mbd.setScope(containingBd.getScope());</span>
+				}
+
+				// Cache the merged bean definition for the time being
+				// (it might still get re-merged later on in order to pick up metadata changes)
+<span class="pc bpc" id="L1314" title="1 of 4 branches missed.">				if (containingBd == null &amp;&amp; isCacheBeanMetadata()) {</span>
+<span class="fc" id="L1315">					this.mergedBeanDefinitions.put(beanName, mbd);</span>
+				}
+			}
+
+<span class="fc" id="L1319">			return mbd;</span>
+		}
+	}
+
+	/**
+	 * Check the given merged bean definition,
+	 * potentially throwing validation exceptions.
+	 * @param mbd the merged bean definition to check
+	 * @param beanName the name of the bean
+	 * @param args the arguments for bean creation, if any
+	 * @throws BeanDefinitionStoreException in case of validation failure
+	 */
+	protected void checkMergedBeanDefinition(RootBeanDefinition mbd, String beanName, @Nullable Object[] args)
+			throws BeanDefinitionStoreException {
+
+<span class="fc bfc" id="L1334" title="All 2 branches covered.">		if (mbd.isAbstract()) {</span>
+<span class="fc" id="L1335">			throw new BeanIsAbstractException(beanName);</span>
+		}
+<span class="fc" id="L1337">	}</span>
+
+	/**
+	 * Remove the merged bean definition for the specified bean,
+	 * recreating it on next access.
+	 * @param beanName the bean name to clear the merged definition for
+	 */
+	protected void clearMergedBeanDefinition(String beanName) {
+<span class="fc" id="L1345">		this.mergedBeanDefinitions.remove(beanName);</span>
+<span class="fc" id="L1346">	}</span>
+
+	/**
+	 * Clear the merged bean definition cache, removing entries for beans
+	 * which are not considered eligible for full metadata caching yet.
+	 * &lt;p&gt;Typically triggered after changes to the original bean definitions,
+	 * e.g. after applying a {@code BeanFactoryPostProcessor}. Note that metadata
+	 * for beans which have already been created at this point will be kept around.
+	 * @since 4.2
+	 */
+	public void clearMetadataCache() {
+<span class="nc bnc" id="L1357" title="All 2 branches missed.">		this.mergedBeanDefinitions.keySet().removeIf(bean -&gt; !isBeanEligibleForMetadataCaching(bean));</span>
+<span class="nc" id="L1358">	}</span>
+
+	/**
+	 * Resolve the bean class for the specified bean definition,
+	 * resolving a bean class name into a Class reference (if necessary)
+	 * and storing the resolved Class in the bean definition for further use.
+	 * @param mbd the merged bean definition to determine the class for
+	 * @param beanName the name of the bean (for error handling purposes)
+	 * @param typesToMatch the types to match in case of internal type matching purposes
+	 * (also signals that the returned {@code Class} will never be exposed to application code)
+	 * @return the resolved bean class (or {@code null} if none)
+	 * @throws CannotLoadBeanClassException if we failed to load the class
+	 */
+	@Nullable
+	protected Class&lt;?&gt; resolveBeanClass(final RootBeanDefinition mbd, String beanName, final Class&lt;?&gt;... typesToMatch)
+			throws CannotLoadBeanClassException {
+
+		try {
+<span class="fc bfc" id="L1376" title="All 2 branches covered.">			if (mbd.hasBeanClass()) {</span>
+<span class="fc" id="L1377">				return mbd.getBeanClass();</span>
+			}
+<span class="fc bfc" id="L1379" title="All 2 branches covered.">			if (System.getSecurityManager() != null) {</span>
+<span class="fc" id="L1380">				return AccessController.doPrivileged((PrivilegedExceptionAction&lt;Class&lt;?&gt;&gt;) () -&gt;</span>
+<span class="fc" id="L1381">					doResolveBeanClass(mbd, typesToMatch), getAccessControlContext());</span>
+			}
+			else {
+<span class="fc" id="L1384">				return doResolveBeanClass(mbd, typesToMatch);</span>
+			}
+		}
+<span class="nc" id="L1387">		catch (PrivilegedActionException pae) {</span>
+<span class="nc" id="L1388">			ClassNotFoundException ex = (ClassNotFoundException) pae.getException();</span>
+<span class="nc" id="L1389">			throw new CannotLoadBeanClassException(mbd.getResourceDescription(), beanName, mbd.getBeanClassName(), ex);</span>
+		}
+<span class="nc" id="L1391">		catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L1392">			throw new CannotLoadBeanClassException(mbd.getResourceDescription(), beanName, mbd.getBeanClassName(), ex);</span>
+		}
+<span class="nc" id="L1394">		catch (LinkageError err) {</span>
+<span class="nc" id="L1395">			throw new CannotLoadBeanClassException(mbd.getResourceDescription(), beanName, mbd.getBeanClassName(), err);</span>
+		}
+	}
+
+	@Nullable
+	private Class&lt;?&gt; doResolveBeanClass(RootBeanDefinition mbd, Class&lt;?&gt;... typesToMatch)
+			throws ClassNotFoundException {
+
+<span class="fc" id="L1403">		ClassLoader beanClassLoader = getBeanClassLoader();</span>
+<span class="fc" id="L1404">		ClassLoader dynamicLoader = beanClassLoader;</span>
+<span class="fc" id="L1405">		boolean freshResolve = false;</span>
+
+<span class="fc bfc" id="L1407" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(typesToMatch)) {</span>
+			// When just doing type checks (i.e. not creating an actual instance yet),
+			// use the specified temporary class loader (e.g. in a weaving scenario).
+<span class="fc" id="L1410">			ClassLoader tempClassLoader = getTempClassLoader();</span>
+<span class="pc bpc" id="L1411" title="1 of 2 branches missed.">			if (tempClassLoader != null) {</span>
+<span class="nc" id="L1412">				dynamicLoader = tempClassLoader;</span>
+<span class="nc" id="L1413">				freshResolve = true;</span>
+<span class="nc bnc" id="L1414" title="All 2 branches missed.">				if (tempClassLoader instanceof DecoratingClassLoader) {</span>
+<span class="nc" id="L1415">					DecoratingClassLoader dcl = (DecoratingClassLoader) tempClassLoader;</span>
+<span class="nc bnc" id="L1416" title="All 2 branches missed.">					for (Class&lt;?&gt; typeToMatch : typesToMatch) {</span>
+<span class="nc" id="L1417">						dcl.excludeClass(typeToMatch.getName());</span>
+					}
+				}
+			}
+		}
+
+<span class="fc" id="L1423">		String className = mbd.getBeanClassName();</span>
+<span class="fc bfc" id="L1424" title="All 2 branches covered.">		if (className != null) {</span>
+<span class="fc" id="L1425">			Object evaluated = evaluateBeanDefinitionString(className, mbd);</span>
+<span class="pc bpc" id="L1426" title="1 of 2 branches missed.">			if (!className.equals(evaluated)) {</span>
+				// A dynamically resolved expression, supported as of 4.2...
+<span class="nc bnc" id="L1428" title="All 2 branches missed.">				if (evaluated instanceof Class) {</span>
+<span class="nc" id="L1429">					return (Class&lt;?&gt;) evaluated;</span>
+				}
+<span class="nc bnc" id="L1431" title="All 2 branches missed.">				else if (evaluated instanceof String) {</span>
+<span class="nc" id="L1432">					className = (String) evaluated;</span>
+<span class="nc" id="L1433">					freshResolve = true;</span>
+				}
+				else {
+<span class="nc" id="L1436">					throw new IllegalStateException(&quot;Invalid class name expression result: &quot; + evaluated);</span>
+				}
+			}
+<span class="pc bpc" id="L1439" title="1 of 2 branches missed.">			if (freshResolve) {</span>
+				// When resolving against a temporary class loader, exit early in order
+				// to avoid storing the resolved Class in the bean definition.
+<span class="nc bnc" id="L1442" title="All 2 branches missed.">				if (dynamicLoader != null) {</span>
+					try {
+<span class="nc" id="L1444">						return dynamicLoader.loadClass(className);</span>
+					}
+<span class="nc" id="L1446">					catch (ClassNotFoundException ex) {</span>
+<span class="nc bnc" id="L1447" title="All 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1448">							logger.trace(&quot;Could not load class [&quot; + className + &quot;] from &quot; + dynamicLoader + &quot;: &quot; + ex);</span>
+						}
+					}
+				}
+<span class="nc" id="L1452">				return ClassUtils.forName(className, dynamicLoader);</span>
+			}
+		}
+
+		// Resolve regularly, caching the result in the BeanDefinition...
+<span class="fc" id="L1457">		return mbd.resolveBeanClass(beanClassLoader);</span>
+	}
+
+	/**
+	 * Evaluate the given String as contained in a bean definition,
+	 * potentially resolving it as an expression.
+	 * @param value the value to check
+	 * @param beanDefinition the bean definition that the value comes from
+	 * @return the resolved value
+	 * @see #setBeanExpressionResolver
+	 */
+	@Nullable
+	protected Object evaluateBeanDefinitionString(@Nullable String value, @Nullable BeanDefinition beanDefinition) {
+<span class="fc bfc" id="L1470" title="All 2 branches covered.">		if (this.beanExpressionResolver == null) {</span>
+<span class="fc" id="L1471">			return value;</span>
+		}
+
+<span class="fc" id="L1474">		Scope scope = null;</span>
+<span class="pc bpc" id="L1475" title="1 of 2 branches missed.">		if (beanDefinition != null) {</span>
+<span class="fc" id="L1476">			String scopeName = beanDefinition.getScope();</span>
+<span class="pc bpc" id="L1477" title="1 of 2 branches missed.">			if (scopeName != null) {</span>
+<span class="fc" id="L1478">				scope = getRegisteredScope(scopeName);</span>
+			}
+		}
+<span class="fc" id="L1481">		return this.beanExpressionResolver.evaluate(value, new BeanExpressionContext(this, scope));</span>
+	}
+
+
+	/**
+	 * Predict the eventual bean type (of the processed bean instance) for the
+	 * specified bean. Called by {@link #getType} and {@link #isTypeMatch}.
+	 * Does not need to handle FactoryBeans specifically, since it is only
+	 * supposed to operate on the raw bean type.
+	 * &lt;p&gt;This implementation is simplistic in that it is not able to
+	 * handle factory methods and InstantiationAwareBeanPostProcessors.
+	 * It only predicts the bean type correctly for a standard bean.
+	 * To be overridden in subclasses, applying more sophisticated type detection.
+	 * @param beanName the name of the bean
+	 * @param mbd the merged bean definition to determine the type for
+	 * @param typesToMatch the types to match in case of internal type matching purposes
+	 * (also signals that the returned {@code Class} will never be exposed to application code)
+	 * @return the type of the bean, or {@code null} if not predictable
+	 */
+	@Nullable
+	protected Class&lt;?&gt; predictBeanType(String beanName, RootBeanDefinition mbd, Class&lt;?&gt;... typesToMatch) {
+<span class="nc" id="L1502">		Class&lt;?&gt; targetType = mbd.getTargetType();</span>
+<span class="nc bnc" id="L1503" title="All 2 branches missed.">		if (targetType != null) {</span>
+<span class="nc" id="L1504">			return targetType;</span>
+		}
+<span class="nc bnc" id="L1506" title="All 2 branches missed.">		if (mbd.getFactoryMethodName() != null) {</span>
+<span class="nc" id="L1507">			return null;</span>
+		}
+<span class="nc" id="L1509">		return resolveBeanClass(mbd, beanName, typesToMatch);</span>
+	}
+
+	/**
+	 * Check whether the given bean is defined as a {@link FactoryBean}.
+	 * @param beanName the name of the bean
+	 * @param mbd the corresponding bean definition
+	 */
+	protected boolean isFactoryBean(String beanName, RootBeanDefinition mbd) {
+<span class="fc" id="L1518">		Class&lt;?&gt; beanType = predictBeanType(beanName, mbd, FactoryBean.class);</span>
+<span class="fc bfc" id="L1519" title="All 4 branches covered.">		return (beanType != null &amp;&amp; FactoryBean.class.isAssignableFrom(beanType));</span>
+	}
+
+	/**
+	 * Determine the bean type for the given FactoryBean definition, as far as possible.
+	 * Only called if there is no singleton instance registered for the target bean already.
+	 * &lt;p&gt;The default implementation creates the FactoryBean via {@code getBean}
+	 * to call its {@code getObjectType} method. Subclasses are encouraged to optimize
+	 * this, typically by just instantiating the FactoryBean but not populating it yet,
+	 * trying whether its {@code getObjectType} method already returns a type.
+	 * If no type found, a full FactoryBean creation as performed by this implementation
+	 * should be used as fallback.
+	 * @param beanName the name of the bean
+	 * @param mbd the merged bean definition for the bean
+	 * @return the type for the bean if determinable, or {@code null} otherwise
+	 * @see org.springframework.beans.factory.FactoryBean#getObjectType()
+	 * @see #getBean(String)
+	 */
+	@Nullable
+	protected Class&lt;?&gt; getTypeForFactoryBean(String beanName, RootBeanDefinition mbd) {
+<span class="pc bpc" id="L1539" title="1 of 2 branches missed.">		if (!mbd.isSingleton()) {</span>
+<span class="nc" id="L1540">			return null;</span>
+		}
+		try {
+<span class="fc" id="L1543">			FactoryBean&lt;?&gt; factoryBean = doGetBean(FACTORY_BEAN_PREFIX + beanName, FactoryBean.class, null, true);</span>
+<span class="fc" id="L1544">			return getTypeForFactoryBean(factoryBean);</span>
+		}
+<span class="fc" id="L1546">		catch (BeanCreationException ex) {</span>
+<span class="pc bpc" id="L1547" title="1 of 2 branches missed.">			if (ex.contains(BeanCurrentlyInCreationException.class)) {</span>
+<span class="nc bnc" id="L1548" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1549">					logger.trace(&quot;Bean currently in creation on FactoryBean type check: &quot; + ex);</span>
+				}
+			}
+<span class="pc bpc" id="L1552" title="1 of 2 branches missed.">			else if (mbd.isLazyInit()) {</span>
+<span class="nc bnc" id="L1553" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1554">					logger.trace(&quot;Bean creation exception on lazy FactoryBean type check: &quot; + ex);</span>
+				}
+			}
+			else {
+<span class="pc bpc" id="L1558" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1559">					logger.debug(&quot;Bean creation exception on non-lazy FactoryBean type check: &quot; + ex);</span>
+				}
+			}
+<span class="fc" id="L1562">			onSuppressedException(ex);</span>
+<span class="fc" id="L1563">			return null;</span>
+		}
+	}
+
+	/**
+	 * Mark the specified bean as already created (or about to be created).
+	 * &lt;p&gt;This allows the bean factory to optimize its caching for repeated
+	 * creation of the specified bean.
+	 * @param beanName the name of the bean
+	 */
+	protected void markBeanAsCreated(String beanName) {
+<span class="fc bfc" id="L1574" title="All 2 branches covered.">		if (!this.alreadyCreated.contains(beanName)) {</span>
+<span class="fc" id="L1575">			synchronized (this.mergedBeanDefinitions) {</span>
+<span class="pc bpc" id="L1576" title="1 of 2 branches missed.">				if (!this.alreadyCreated.contains(beanName)) {</span>
+					// Let the bean definition get re-merged now that we're actually creating
+					// the bean... just in case some of its metadata changed in the meantime.
+<span class="fc" id="L1579">					clearMergedBeanDefinition(beanName);</span>
+<span class="fc" id="L1580">					this.alreadyCreated.add(beanName);</span>
+				}
+<span class="fc" id="L1582">			}</span>
+		}
+<span class="fc" id="L1584">	}</span>
+
+	/**
+	 * Perform appropriate cleanup of cached metadata after bean creation failed.
+	 * @param beanName the name of the bean
+	 */
+	protected void cleanupAfterBeanCreationFailure(String beanName) {
+<span class="fc" id="L1591">		synchronized (this.mergedBeanDefinitions) {</span>
+<span class="fc" id="L1592">			this.alreadyCreated.remove(beanName);</span>
+<span class="fc" id="L1593">		}</span>
+<span class="fc" id="L1594">	}</span>
+
+	/**
+	 * Determine whether the specified bean is eligible for having
+	 * its bean definition metadata cached.
+	 * @param beanName the name of the bean
+	 * @return {@code true} if the bean's metadata may be cached
+	 * at this point already
+	 */
+	protected boolean isBeanEligibleForMetadataCaching(String beanName) {
+<span class="nc" id="L1604">		return this.alreadyCreated.contains(beanName);</span>
+	}
+
+	/**
+	 * Remove the singleton instance (if any) for the given bean name,
+	 * but only if it hasn't been used for other purposes than type checking.
+	 * @param beanName the name of the bean
+	 * @return {@code true} if actually removed, {@code false} otherwise
+	 */
+	protected boolean removeSingletonIfCreatedForTypeCheckOnly(String beanName) {
+<span class="nc bnc" id="L1614" title="All 2 branches missed.">		if (!this.alreadyCreated.contains(beanName)) {</span>
+<span class="nc" id="L1615">			removeSingleton(beanName);</span>
+<span class="nc" id="L1616">			return true;</span>
+		}
+		else {
+<span class="nc" id="L1619">			return false;</span>
+		}
+	}
+
+	/**
+	 * Check whether this factory's bean creation phase already started,
+	 * i.e. whether any bean has been marked as created in the meantime.
+	 * @since 4.2.2
+	 * @see #markBeanAsCreated
+	 */
+	protected boolean hasBeanCreationStarted() {
+<span class="fc bfc" id="L1630" title="All 2 branches covered.">		return !this.alreadyCreated.isEmpty();</span>
+	}
+
+	/**
+	 * Get the object for the given bean instance, either the bean
+	 * instance itself or its created object in case of a FactoryBean.
+	 * @param beanInstance the shared bean instance
+	 * @param name name that may include factory dereference prefix
+	 * @param beanName the canonical bean name
+	 * @param mbd the merged bean definition
+	 * @return the object to expose for the bean
+	 */
+	protected Object getObjectForBeanInstance(
+			Object beanInstance, String name, String beanName, @Nullable RootBeanDefinition mbd) {
+
+		// Don't let calling code try to dereference the factory if the bean isn't a factory.
+<span class="fc bfc" id="L1646" title="All 2 branches covered.">		if (BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="pc bpc" id="L1647" title="1 of 2 branches missed.">			if (beanInstance instanceof NullBean) {</span>
+<span class="nc" id="L1648">				return beanInstance;</span>
+			}
+<span class="fc bfc" id="L1650" title="All 2 branches covered.">			if (!(beanInstance instanceof FactoryBean)) {</span>
+<span class="fc" id="L1651">				throw new BeanIsNotAFactoryException(transformedBeanName(name), beanInstance.getClass());</span>
+			}
+		}
+
+		// Now we have the bean instance, which may be a normal bean or a FactoryBean.
+		// If it's a FactoryBean, we use it to create a bean instance, unless the
+		// caller actually wants a reference to the factory.
+<span class="fc bfc" id="L1658" title="All 4 branches covered.">		if (!(beanInstance instanceof FactoryBean) || BeanFactoryUtils.isFactoryDereference(name)) {</span>
+<span class="fc" id="L1659">			return beanInstance;</span>
+		}
+
+<span class="fc" id="L1662">		Object object = null;</span>
+<span class="fc bfc" id="L1663" title="All 2 branches covered.">		if (mbd == null) {</span>
+<span class="fc" id="L1664">			object = getCachedObjectForFactoryBean(beanName);</span>
+		}
+<span class="fc bfc" id="L1666" title="All 2 branches covered.">		if (object == null) {</span>
+			// Return bean instance from factory.
+<span class="fc" id="L1668">			FactoryBean&lt;?&gt; factory = (FactoryBean&lt;?&gt;) beanInstance;</span>
+			// Caches object obtained from FactoryBean if it is a singleton.
+<span class="fc bfc" id="L1670" title="All 4 branches covered.">			if (mbd == null &amp;&amp; containsBeanDefinition(beanName)) {</span>
+<span class="fc" id="L1671">				mbd = getMergedLocalBeanDefinition(beanName);</span>
+			}
+<span class="pc bpc" id="L1673" title="1 of 4 branches missed.">			boolean synthetic = (mbd != null &amp;&amp; mbd.isSynthetic());</span>
+<span class="pc bpc" id="L1674" title="1 of 2 branches missed.">			object = getObjectFromFactoryBean(factory, beanName, !synthetic);</span>
+		}
+<span class="fc" id="L1676">		return object;</span>
+	}
+
+	/**
+	 * Determine whether the given bean name is already in use within this factory,
+	 * i.e. whether there is a local bean or alias registered under this name or
+	 * an inner bean created with this name.
+	 * @param beanName the name to check
+	 */
+	public boolean isBeanNameInUse(String beanName) {
+<span class="fc bfc" id="L1686" title="All 6 branches covered.">		return isAlias(beanName) || containsLocalBean(beanName) || hasDependentBean(beanName);</span>
+	}
+
+	/**
+	 * Determine whether the given bean requires destruction on shutdown.
+	 * &lt;p&gt;The default implementation checks the DisposableBean interface as well as
+	 * a specified destroy method and registered DestructionAwareBeanPostProcessors.
+	 * @param bean the bean instance to check
+	 * @param mbd the corresponding bean definition
+	 * @see org.springframework.beans.factory.DisposableBean
+	 * @see AbstractBeanDefinition#getDestroyMethodName()
+	 * @see org.springframework.beans.factory.config.DestructionAwareBeanPostProcessor
+	 */
+	protected boolean requiresDestruction(Object bean, RootBeanDefinition mbd) {
+<span class="fc bfc" id="L1700" title="All 2 branches covered.">		return (bean.getClass() != NullBean.class &amp;&amp;</span>
+<span class="pc bpc" id="L1701" title="1 of 4 branches missed.">				(DisposableBeanAdapter.hasDestroyMethod(bean, mbd) || (hasDestructionAwareBeanPostProcessors() &amp;&amp;</span>
+<span class="pc bnc" id="L1702" title="All 2 branches missed.">						DisposableBeanAdapter.hasApplicableProcessors(bean, getBeanPostProcessors()))));</span>
+	}
+
+	/**
+	 * Add the given bean to the list of disposable beans in this factory,
+	 * registering its DisposableBean interface and/or the given destroy method
+	 * to be called on factory shutdown (if applicable). Only applies to singletons.
+	 * @param beanName the name of the bean
+	 * @param bean the bean instance
+	 * @param mbd the bean definition for the bean
+	 * @see RootBeanDefinition#isSingleton
+	 * @see RootBeanDefinition#getDependsOn
+	 * @see #registerDisposableBean
+	 * @see #registerDependentBean
+	 */
+	protected void registerDisposableBeanIfNecessary(String beanName, Object bean, RootBeanDefinition mbd) {
+<span class="fc bfc" id="L1718" title="All 2 branches covered.">		AccessControlContext acc = (System.getSecurityManager() != null ? getAccessControlContext() : null);</span>
+<span class="fc bfc" id="L1719" title="All 4 branches covered.">		if (!mbd.isPrototype() &amp;&amp; requiresDestruction(bean, mbd)) {</span>
+<span class="pc bpc" id="L1720" title="1 of 2 branches missed.">			if (mbd.isSingleton()) {</span>
+				// Register a DisposableBean implementation that performs all destruction
+				// work for the given bean: DestructionAwareBeanPostProcessors,
+				// DisposableBean interface, custom destroy method.
+<span class="fc" id="L1724">				registerDisposableBean(beanName,</span>
+<span class="fc" id="L1725">						new DisposableBeanAdapter(bean, beanName, mbd, getBeanPostProcessors(), acc));</span>
+			}
+			else {
+				// A bean with a custom scope...
+<span class="nc" id="L1729">				Scope scope = this.scopes.get(mbd.getScope());</span>
+<span class="nc bnc" id="L1730" title="All 2 branches missed.">				if (scope == null) {</span>
+<span class="nc" id="L1731">					throw new IllegalStateException(&quot;No Scope registered for scope name '&quot; + mbd.getScope() + &quot;'&quot;);</span>
+				}
+<span class="nc" id="L1733">				scope.registerDestructionCallback(beanName,</span>
+<span class="nc" id="L1734">						new DisposableBeanAdapter(bean, beanName, mbd, getBeanPostProcessors(), acc));</span>
+			}
+		}
+<span class="fc" id="L1737">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Abstract methods to be implemented by subclasses
+	//---------------------------------------------------------------------
+
+	/**
+	 * Check if this bean factory contains a bean definition with the given name.
+	 * Does not consider any hierarchy this factory may participate in.
+	 * Invoked by {@code containsBean} when no cached singleton instance is found.
+	 * &lt;p&gt;Depending on the nature of the concrete bean factory implementation,
+	 * this operation might be expensive (for example, because of directory lookups
+	 * in external registries). However, for listable bean factories, this usually
+	 * just amounts to a local hash lookup: The operation is therefore part of the
+	 * public interface there. The same implementation can serve for both this
+	 * template method and the public interface method in that case.
+	 * @param beanName the name of the bean to look for
+	 * @return if this bean factory contains a bean definition with the given name
+	 * @see #containsBean
+	 * @see org.springframework.beans.factory.ListableBeanFactory#containsBeanDefinition
+	 */
+	protected abstract boolean containsBeanDefinition(String beanName);
+
+	/**
+	 * Return the bean definition for the given bean name.
+	 * Subclasses should normally implement caching, as this method is invoked
+	 * by this class every time bean definition metadata is needed.
+	 * &lt;p&gt;Depending on the nature of the concrete bean factory implementation,
+	 * this operation might be expensive (for example, because of directory lookups
+	 * in external registries). However, for listable bean factories, this usually
+	 * just amounts to a local hash lookup: The operation is therefore part of the
+	 * public interface there. The same implementation can serve for both this
+	 * template method and the public interface method in that case.
+	 * @param beanName the name of the bean to find a definition for
+	 * @return the BeanDefinition for this prototype name (never {@code null})
+	 * @throws org.springframework.beans.factory.NoSuchBeanDefinitionException
+	 * if the bean definition cannot be resolved
+	 * @throws BeansException in case of errors
+	 * @see RootBeanDefinition
+	 * @see ChildBeanDefinition
+	 * @see org.springframework.beans.factory.config.ConfigurableListableBeanFactory#getBeanDefinition
+	 */
+	protected abstract BeanDefinition getBeanDefinition(String beanName) throws BeansException;
+
+	/**
+	 * Create a bean instance for the given merged bean definition (and arguments).
+	 * The bean definition will already have been merged with the parent definition
+	 * in case of a child definition.
+	 * &lt;p&gt;All bean retrieval methods delegate to this method for actual bean creation.
+	 * @param beanName the name of the bean
+	 * @param mbd the merged bean definition for the bean
+	 * @param args explicit arguments to use for constructor or factory method invocation
+	 * @return a new instance of the bean
+	 * @throws BeanCreationException if the bean could not be created
+	 */
+	protected abstract Object createBean(String beanName, RootBeanDefinition mbd, @Nullable Object[] args)
+			throws BeanCreationException;
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

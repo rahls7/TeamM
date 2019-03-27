@@ -1,0 +1,483 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UndertowXhrTransport.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-websocket</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.sockjs.client</a> &gt; <span class="el_source">UndertowXhrTransport.java</span></div><h1>UndertowXhrTransport.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.sockjs.client;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+
+import io.undertow.client.ClientCallback;
+import io.undertow.client.ClientConnection;
+import io.undertow.client.ClientExchange;
+import io.undertow.client.ClientRequest;
+import io.undertow.client.ClientResponse;
+import io.undertow.client.UndertowClient;
+import io.undertow.connector.ByteBufferPool;
+import io.undertow.connector.PooledByteBuffer;
+import io.undertow.server.DefaultByteBufferPool;
+import io.undertow.util.AttachmentKey;
+import io.undertow.util.HeaderMap;
+import io.undertow.util.HttpString;
+import io.undertow.util.Methods;
+import io.undertow.util.StringReadChannelListener;
+import org.xnio.ChannelListener;
+import org.xnio.ChannelListeners;
+import org.xnio.IoUtils;
+import org.xnio.OptionMap;
+import org.xnio.Options;
+import org.xnio.Xnio;
+import org.xnio.XnioWorker;
+import org.xnio.channels.StreamSinkChannel;
+import org.xnio.channels.StreamSourceChannel;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.util.concurrent.SettableListenableFuture;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.sockjs.SockJsException;
+import org.springframework.web.socket.sockjs.SockJsTransportFailureException;
+import org.springframework.web.socket.sockjs.frame.SockJsFrame;
+
+/**
+ * An XHR transport based on Undertow's {@link io.undertow.client.UndertowClient}.
+ * Requires Undertow 1.3 or 1.4, including XNIO, as of Spring Framework 5.0.
+ *
+ * &lt;p&gt;When used for testing purposes (e.g. load testing) or for specific use cases
+ * (like HTTPS configuration), a custom OptionMap should be provided:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * OptionMap optionMap = OptionMap.builder()
+ *   .set(Options.WORKER_IO_THREADS, 8)
+ *   .set(Options.TCP_NODELAY, true)
+ *   .set(Options.KEEP_ALIVE, true)
+ *   .set(Options.WORKER_NAME, &quot;SockJSClient&quot;)
+ *   .getMap();
+ *
+ * UndertowXhrTransport transport = new UndertowXhrTransport(optionMap);
+ * &lt;/pre&gt;
+ *
+ * @author Brian Clozel
+ * @author Rossen Stoyanchev
+ * @since 4.1.2
+ * @see org.xnio.Options
+ */
+public class UndertowXhrTransport extends AbstractXhrTransport {
+
+<span class="nc" id="L92">	private static final AttachmentKey&lt;String&gt; RESPONSE_BODY = AttachmentKey.create(String.class);</span>
+
+
+	private final OptionMap optionMap;
+
+	private final UndertowClient httpClient;
+
+	private final XnioWorker worker;
+
+	private final ByteBufferPool bufferPool;
+
+
+	public UndertowXhrTransport() throws IOException {
+<span class="nc" id="L105">		this(OptionMap.builder().parse(Options.WORKER_NAME, &quot;SockJSClient&quot;).getMap());</span>
+<span class="nc" id="L106">	}</span>
+
+<span class="nc" id="L108">	public UndertowXhrTransport(OptionMap optionMap) throws IOException {</span>
+<span class="nc" id="L109">		Assert.notNull(optionMap, &quot;OptionMap is required&quot;);</span>
+<span class="nc" id="L110">		this.optionMap = optionMap;</span>
+<span class="nc" id="L111">		this.httpClient = UndertowClient.getInstance();</span>
+<span class="nc" id="L112">		this.worker = Xnio.getInstance().createWorker(optionMap);</span>
+<span class="nc" id="L113">		this.bufferPool = new DefaultByteBufferPool(false, 1024, -1, 2);</span>
+<span class="nc" id="L114">	}</span>
+
+
+	/**
+	 * Return Undertow's native HTTP client.
+	 */
+	public UndertowClient getHttpClient() {
+<span class="nc" id="L121">		return this.httpClient;</span>
+	}
+
+	/**
+	 * Return the {@link org.xnio.XnioWorker} backing the I/O operations
+	 * for Undertow's HTTP client.
+	 * @see org.xnio.Xnio
+	 */
+	public XnioWorker getWorker() {
+<span class="nc" id="L130">		return this.worker;</span>
+	}
+
+
+	@Override
+	protected void connectInternal(TransportRequest request, WebSocketHandler handler, URI receiveUrl,
+			HttpHeaders handshakeHeaders, XhrClientSockJsSession session,
+			SettableListenableFuture&lt;WebSocketSession&gt; connectFuture) {
+
+<span class="nc" id="L139">		executeReceiveRequest(request, receiveUrl, handshakeHeaders, session, connectFuture);</span>
+<span class="nc" id="L140">	}</span>
+
+	private void executeReceiveRequest(final TransportRequest transportRequest,
+			final URI url, final HttpHeaders headers, final XhrClientSockJsSession session,
+			final SettableListenableFuture&lt;WebSocketSession&gt; connectFuture) {
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L147">			logger.trace(&quot;Starting XHR receive request for &quot; + url);</span>
+		}
+
+<span class="nc" id="L150">		ClientCallback&lt;ClientConnection&gt; clientCallback = new ClientCallback&lt;ClientConnection&gt;() {</span>
+			@Override
+			public void completed(ClientConnection connection) {
+<span class="nc" id="L153">				ClientRequest request = new ClientRequest().setMethod(Methods.POST).setPath(url.getPath());</span>
+<span class="nc" id="L154">				HttpString headerName = HttpString.tryFromString(HttpHeaders.HOST);</span>
+<span class="nc" id="L155">				request.getRequestHeaders().add(headerName, url.getHost());</span>
+<span class="nc" id="L156">				addHttpHeaders(request, headers);</span>
+<span class="nc" id="L157">				HttpHeaders httpHeaders = transportRequest.getHttpRequestHeaders();</span>
+<span class="nc" id="L158">				connection.sendRequest(request, createReceiveCallback(transportRequest,</span>
+						url, httpHeaders, session, connectFuture));
+<span class="nc" id="L160">			}</span>
+
+			@Override
+			public void failed(IOException ex) {
+<span class="nc" id="L164">				throw new SockJsTransportFailureException(&quot;Failed to execute request to &quot; + url, ex);</span>
+			}
+		};
+
+<span class="nc" id="L168">		this.httpClient.connect(clientCallback, url, this.worker, this.bufferPool, this.optionMap);</span>
+<span class="nc" id="L169">	}</span>
+
+	private static void addHttpHeaders(ClientRequest request, HttpHeaders headers) {
+<span class="nc" id="L172">		HeaderMap headerMap = request.getRequestHeaders();</span>
+<span class="nc" id="L173">		headers.forEach((key, values) -&gt; {</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">			for (String value : values) {</span>
+<span class="nc" id="L175">				headerMap.add(HttpString.tryFromString(key), value);</span>
+<span class="nc" id="L176">			}</span>
+<span class="nc" id="L177">		});</span>
+<span class="nc" id="L178">	}</span>
+
+	private ClientCallback&lt;ClientExchange&gt; createReceiveCallback(final TransportRequest transportRequest,
+			final URI url, final HttpHeaders headers, final XhrClientSockJsSession sockJsSession,
+			final SettableListenableFuture&lt;WebSocketSession&gt; connectFuture) {
+
+<span class="nc" id="L184">		return new ClientCallback&lt;ClientExchange&gt;() {</span>
+			@Override
+			public void completed(final ClientExchange exchange) {
+<span class="nc" id="L187">				exchange.setResponseListener(new ClientCallback&lt;ClientExchange&gt;() {</span>
+					@Override
+					public void completed(ClientExchange result) {
+<span class="nc" id="L190">						ClientResponse response = result.getResponse();</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">						if (response.getResponseCode() != 200) {</span>
+<span class="nc" id="L192">							HttpStatus status = HttpStatus.valueOf(response.getResponseCode());</span>
+<span class="nc" id="L193">							IoUtils.safeClose(result.getConnection());</span>
+<span class="nc" id="L194">							onFailure(new HttpServerErrorException(status, &quot;Unexpected XHR receive status&quot;));</span>
+<span class="nc" id="L195">						}</span>
+						else {
+<span class="nc" id="L197">							SockJsResponseListener listener = new SockJsResponseListener(</span>
+<span class="nc" id="L198">									transportRequest, result.getConnection(), url, headers,</span>
+									sockJsSession, connectFuture);
+<span class="nc" id="L200">							listener.setup(result.getResponseChannel());</span>
+						}
+<span class="nc bnc" id="L202" title="All 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L203">							logger.trace(&quot;XHR receive headers: &quot; + toHttpHeaders(response.getResponseHeaders()));</span>
+						}
+						try {
+<span class="nc" id="L206">							StreamSinkChannel channel = result.getRequestChannel();</span>
+<span class="nc" id="L207">							channel.shutdownWrites();</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">							if (!channel.flush()) {</span>
+<span class="nc" id="L209">								channel.getWriteSetter().set(ChannelListeners.&lt;StreamSinkChannel&gt;flushingChannelListener(null, null));</span>
+<span class="nc" id="L210">								channel.resumeWrites();</span>
+							}
+						}
+<span class="nc" id="L213">						catch (IOException exc) {</span>
+<span class="nc" id="L214">							IoUtils.safeClose(result.getConnection());</span>
+<span class="nc" id="L215">							onFailure(exc);</span>
+<span class="nc" id="L216">						}</span>
+<span class="nc" id="L217">					}</span>
+
+					@Override
+					public void failed(IOException exc) {
+<span class="nc" id="L221">						IoUtils.safeClose(exchange.getConnection());</span>
+<span class="nc" id="L222">						onFailure(exc);</span>
+<span class="nc" id="L223">					}</span>
+				});
+<span class="nc" id="L225">			}</span>
+
+			@Override
+			public void failed(IOException exc) {
+<span class="nc" id="L229">				onFailure(exc);</span>
+<span class="nc" id="L230">			}</span>
+
+			private void onFailure(Throwable failure) {
+<span class="nc bnc" id="L233" title="All 2 branches missed.">				if (connectFuture.setException(failure)) {</span>
+<span class="nc" id="L234">					return;</span>
+				}
+<span class="nc bnc" id="L236" title="All 2 branches missed.">				if (sockJsSession.isDisconnected()) {</span>
+<span class="nc" id="L237">					sockJsSession.afterTransportClosed(null);</span>
+				}
+				else {
+<span class="nc" id="L240">					sockJsSession.handleTransportError(failure);</span>
+<span class="nc" id="L241">					sockJsSession.afterTransportClosed(new CloseStatus(1006, failure.getMessage()));</span>
+				}
+<span class="nc" id="L243">			}</span>
+		};
+	}
+
+	private static HttpHeaders toHttpHeaders(HeaderMap headerMap) {
+<span class="nc" id="L248">		HttpHeaders httpHeaders = new HttpHeaders();</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">		for (HttpString name : headerMap.getHeaderNames()) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">			for (String value : headerMap.get(name)) {</span>
+<span class="nc" id="L251">				httpHeaders.add(name.toString(), value);</span>
+<span class="nc" id="L252">			}</span>
+<span class="nc" id="L253">		}</span>
+<span class="nc" id="L254">		return httpHeaders;</span>
+	}
+
+	@Override
+	protected ResponseEntity&lt;String&gt; executeInfoRequestInternal(URI infoUrl, HttpHeaders headers) {
+<span class="nc" id="L259">		return executeRequest(infoUrl, Methods.GET, headers, null);</span>
+	}
+
+	@Override
+	protected ResponseEntity&lt;String&gt; executeSendRequestInternal(URI url, HttpHeaders headers, TextMessage message) {
+<span class="nc" id="L264">		return executeRequest(url, Methods.POST, headers, message.getPayload());</span>
+	}
+
+	protected ResponseEntity&lt;String&gt; executeRequest(
+			URI url, HttpString method, HttpHeaders headers, @Nullable String body) {
+
+<span class="nc" id="L270">		CountDownLatch latch = new CountDownLatch(1);</span>
+<span class="nc" id="L271">		List&lt;ClientResponse&gt; responses = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+		try {
+<span class="nc" id="L274">			ClientConnection connection =</span>
+<span class="nc" id="L275">					this.httpClient.connect(url, this.worker, this.bufferPool, this.optionMap).get();</span>
+			try {
+<span class="nc" id="L277">				ClientRequest request = new ClientRequest().setMethod(method).setPath(url.getPath());</span>
+<span class="nc" id="L278">				request.getRequestHeaders().add(HttpString.tryFromString(HttpHeaders.HOST), url.getHost());</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">				if (StringUtils.hasLength(body)) {</span>
+<span class="nc" id="L280">					HttpString headerName = HttpString.tryFromString(HttpHeaders.CONTENT_LENGTH);</span>
+<span class="nc" id="L281">					request.getRequestHeaders().add(headerName, body.length());</span>
+				}
+<span class="nc" id="L283">				addHttpHeaders(request, headers);</span>
+<span class="nc" id="L284">				connection.sendRequest(request, createRequestCallback(body, responses, latch));</span>
+
+<span class="nc" id="L286">				latch.await();</span>
+<span class="nc" id="L287">				ClientResponse response = responses.iterator().next();</span>
+<span class="nc" id="L288">				HttpStatus status = HttpStatus.valueOf(response.getResponseCode());</span>
+<span class="nc" id="L289">				HttpHeaders responseHeaders = toHttpHeaders(response.getResponseHeaders());</span>
+<span class="nc" id="L290">				String responseBody = response.getAttachment(RESPONSE_BODY);</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">				return (responseBody != null ?</span>
+						new ResponseEntity&lt;&gt;(responseBody, responseHeaders, status) :
+						new ResponseEntity&lt;&gt;(responseHeaders, status));
+			}
+			finally {
+<span class="nc" id="L296">				IoUtils.safeClose(connection);</span>
+			}
+		}
+<span class="nc" id="L299">		catch (IOException ex) {</span>
+<span class="nc" id="L300">			throw new SockJsTransportFailureException(&quot;Failed to execute request to &quot; + url, ex);</span>
+		}
+<span class="nc" id="L302">		catch (InterruptedException ex) {</span>
+<span class="nc" id="L303">			Thread.currentThread().interrupt();</span>
+<span class="nc" id="L304">			throw new SockJsTransportFailureException(&quot;Interrupted while processing request to &quot; + url, ex);</span>
+		}
+	}
+
+	private ClientCallback&lt;ClientExchange&gt; createRequestCallback(final @Nullable String body,
+			final List&lt;ClientResponse&gt; responses, final CountDownLatch latch) {
+
+<span class="nc" id="L311">		return new ClientCallback&lt;ClientExchange&gt;() {</span>
+			@Override
+			public void completed(ClientExchange result) {
+<span class="nc" id="L314">				result.setResponseListener(new ClientCallback&lt;ClientExchange&gt;() {</span>
+					@Override
+					public void completed(final ClientExchange result) {
+<span class="nc" id="L317">						responses.add(result.getResponse());</span>
+<span class="nc" id="L318">						new StringReadChannelListener(result.getConnection().getBufferPool()) {</span>
+							@Override
+							protected void stringDone(String string) {
+<span class="nc" id="L321">								result.getResponse().putAttachment(RESPONSE_BODY, string);</span>
+<span class="nc" id="L322">								latch.countDown();</span>
+<span class="nc" id="L323">							}</span>
+							@Override
+							protected void error(IOException ex) {
+<span class="nc" id="L326">								onFailure(latch, ex);</span>
+<span class="nc" id="L327">							}</span>
+<span class="nc" id="L328">						}.setup(result.getResponseChannel());</span>
+<span class="nc" id="L329">					}</span>
+					@Override
+					public void failed(IOException ex) {
+<span class="nc" id="L332">						onFailure(latch, ex);</span>
+<span class="nc" id="L333">					}</span>
+				});
+				try {
+<span class="nc bnc" id="L336" title="All 2 branches missed.">					if (body != null) {</span>
+<span class="nc" id="L337">						result.getRequestChannel().write(ByteBuffer.wrap(body.getBytes()));</span>
+					}
+<span class="nc" id="L339">					result.getRequestChannel().shutdownWrites();</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">					if (!result.getRequestChannel().flush()) {</span>
+<span class="nc" id="L341">						result.getRequestChannel().getWriteSetter()</span>
+<span class="nc" id="L342">								.set(ChannelListeners.&lt;StreamSinkChannel&gt;flushingChannelListener(null, null));</span>
+<span class="nc" id="L343">						result.getRequestChannel().resumeWrites();</span>
+					}
+				}
+<span class="nc" id="L346">				catch (IOException ex) {</span>
+<span class="nc" id="L347">					onFailure(latch, ex);</span>
+<span class="nc" id="L348">				}</span>
+<span class="nc" id="L349">			}</span>
+
+			@Override
+			public void failed(IOException ex) {
+<span class="nc" id="L353">				onFailure(latch, ex);</span>
+<span class="nc" id="L354">			}</span>
+
+			private void onFailure(CountDownLatch latch, IOException ex) {
+<span class="nc" id="L357">				latch.countDown();</span>
+<span class="nc" id="L358">				throw new SockJsTransportFailureException(&quot;Failed to execute request&quot;, ex);</span>
+			}
+		};
+	}
+
+
+	private class SockJsResponseListener implements ChannelListener&lt;StreamSourceChannel&gt; {
+
+		private final TransportRequest request;
+
+		private final ClientConnection connection;
+
+		private final URI url;
+
+		private final HttpHeaders headers;
+
+		private final XhrClientSockJsSession session;
+
+		private final SettableListenableFuture&lt;WebSocketSession&gt; connectFuture;
+
+<span class="nc" id="L378">		private final ByteArrayOutputStream outputStream = new ByteArrayOutputStream();</span>
+
+		public SockJsResponseListener(TransportRequest request, ClientConnection connection, URI url,
+				HttpHeaders headers, XhrClientSockJsSession sockJsSession,
+<span class="nc" id="L382">				SettableListenableFuture&lt;WebSocketSession&gt; connectFuture) {</span>
+
+<span class="nc" id="L384">			this.request = request;</span>
+<span class="nc" id="L385">			this.connection = connection;</span>
+<span class="nc" id="L386">			this.url = url;</span>
+<span class="nc" id="L387">			this.headers = headers;</span>
+<span class="nc" id="L388">			this.session = sockJsSession;</span>
+<span class="nc" id="L389">			this.connectFuture = connectFuture;</span>
+<span class="nc" id="L390">		}</span>
+
+		public void setup(StreamSourceChannel channel) {
+<span class="nc" id="L393">			channel.suspendReads();</span>
+<span class="nc" id="L394">			channel.getReadSetter().set(this);</span>
+<span class="nc" id="L395">			channel.resumeReads();</span>
+<span class="nc" id="L396">		}</span>
+
+		@Override
+		public void handleEvent(StreamSourceChannel channel) {
+<span class="nc bnc" id="L400" title="All 2 branches missed.">			if (this.session.isDisconnected()) {</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L402">					logger.debug(&quot;SockJS sockJsSession closed, closing response.&quot;);</span>
+				}
+<span class="nc" id="L404">				IoUtils.safeClose(this.connection);</span>
+<span class="nc" id="L405">				throw new SockJsException(&quot;Session closed.&quot;, this.session.getId(), null);</span>
+			}
+
+<span class="nc" id="L408">			PooledByteBuffer pooled = bufferPool.allocate();</span>
+			try {
+				int r;
+				do {
+<span class="nc" id="L412">					ByteBuffer buffer = pooled.getBuffer();</span>
+<span class="nc" id="L413">					buffer.clear();</span>
+<span class="nc" id="L414">					r = channel.read(buffer);</span>
+<span class="nc" id="L415">					buffer.flip();</span>
+<span class="nc bnc" id="L416" title="All 2 branches missed.">					if (r == 0) {</span>
+<span class="nc" id="L417">						return;</span>
+					}
+<span class="nc bnc" id="L419" title="All 2 branches missed.">					else if (r == -1) {</span>
+<span class="nc" id="L420">						onSuccess();</span>
+					}
+					else {
+<span class="nc bnc" id="L423" title="All 2 branches missed.">						while (buffer.hasRemaining()) {</span>
+<span class="nc" id="L424">							int b = buffer.get();</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">							if (b == '\n') {</span>
+<span class="nc" id="L426">								handleFrame();</span>
+							}
+							else {
+<span class="nc" id="L429">								this.outputStream.write(b);</span>
+							}
+<span class="nc" id="L431">						}</span>
+					}
+				}
+<span class="nc bnc" id="L434" title="All 2 branches missed.">				while (r &gt; 0);</span>
+			}
+<span class="nc" id="L436">			catch (IOException exc) {</span>
+<span class="nc" id="L437">				onFailure(exc);</span>
+			}
+			finally {
+<span class="nc" id="L440">				pooled.close();</span>
+			}
+<span class="nc" id="L442">		}</span>
+
+		private void handleFrame() {
+<span class="nc" id="L445">			byte[] bytes = this.outputStream.toByteArray();</span>
+<span class="nc" id="L446">			this.outputStream.reset();</span>
+<span class="nc" id="L447">			String content = new String(bytes, SockJsFrame.CHARSET);</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L449">				logger.trace(&quot;XHR content received: &quot; + content);</span>
+			}
+<span class="nc bnc" id="L451" title="All 2 branches missed.">			if (!PRELUDE.equals(content)) {</span>
+<span class="nc" id="L452">				this.session.handleFrame(new String(bytes, SockJsFrame.CHARSET));</span>
+			}
+<span class="nc" id="L454">		}</span>
+
+		public void onSuccess() {
+<span class="nc bnc" id="L457" title="All 2 branches missed.">			if (this.outputStream.size() &gt; 0) {</span>
+<span class="nc" id="L458">				handleFrame();</span>
+			}
+<span class="nc bnc" id="L460" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L461">				logger.trace(&quot;XHR receive request completed.&quot;);</span>
+			}
+<span class="nc" id="L463">			IoUtils.safeClose(this.connection);</span>
+<span class="nc" id="L464">			executeReceiveRequest(this.request, this.url, this.headers, this.session, this.connectFuture);</span>
+<span class="nc" id="L465">		}</span>
+
+		public void onFailure(Throwable failure) {
+<span class="nc" id="L468">			IoUtils.safeClose(this.connection);</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">			if (this.connectFuture.setException(failure)) {</span>
+<span class="nc" id="L470">				return;</span>
+			}
+<span class="nc bnc" id="L472" title="All 2 branches missed.">			if (this.session.isDisconnected()) {</span>
+<span class="nc" id="L473">				this.session.afterTransportClosed(null);</span>
+			}
+			else {
+<span class="nc" id="L476">				this.session.handleTransportError(failure);</span>
+<span class="nc" id="L477">				this.session.afterTransportClosed(new CloseStatus(1006, failure.getMessage()));</span>
+			}
+<span class="nc" id="L479">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

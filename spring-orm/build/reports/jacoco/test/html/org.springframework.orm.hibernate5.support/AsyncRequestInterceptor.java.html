@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AsyncRequestInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.hibernate5.support</a> &gt; <span class="el_source">AsyncRequestInterceptor.java</span></div><h1>AsyncRequestInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2017 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.hibernate5.support;
+
+import java.util.concurrent.Callable;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.hibernate.SessionFactory;
+
+import org.springframework.orm.hibernate5.SessionFactoryUtils;
+import org.springframework.orm.hibernate5.SessionHolder;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.context.request.async.CallableProcessingInterceptor;
+import org.springframework.web.context.request.async.DeferredResult;
+import org.springframework.web.context.request.async.DeferredResultProcessingInterceptor;
+
+/**
+ * An interceptor with asynchronous web requests used in OpenSessionInViewFilter and
+ * OpenSessionInViewInterceptor.
+ *
+ * Ensures the following:
+ * 1) The session is bound/unbound when &quot;callable processing&quot; is started
+ * 2) The session is closed if an async request times out or an error occurred
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.2
+ */
+class AsyncRequestInterceptor implements CallableProcessingInterceptor, DeferredResultProcessingInterceptor {
+
+<span class="nc" id="L46">	private static final Log logger = LogFactory.getLog(AsyncRequestInterceptor.class);</span>
+
+	private final SessionFactory sessionFactory;
+
+	private final SessionHolder sessionHolder;
+
+	private volatile boolean timeoutInProgress;
+
+	private volatile boolean errorInProgress;
+
+
+<span class="nc" id="L57">	public AsyncRequestInterceptor(SessionFactory sessionFactory, SessionHolder sessionHolder) {</span>
+<span class="nc" id="L58">		this.sessionFactory = sessionFactory;</span>
+<span class="nc" id="L59">		this.sessionHolder = sessionHolder;</span>
+<span class="nc" id="L60">	}</span>
+
+
+	@Override
+	public &lt;T&gt; void preProcess(NativeWebRequest request, Callable&lt;T&gt; task) {
+<span class="nc" id="L65">		bindSession();</span>
+<span class="nc" id="L66">	}</span>
+
+	public void bindSession() {
+<span class="nc" id="L69">		this.timeoutInProgress = false;</span>
+<span class="nc" id="L70">		this.errorInProgress = false;</span>
+<span class="nc" id="L71">		TransactionSynchronizationManager.bindResource(this.sessionFactory, this.sessionHolder);</span>
+<span class="nc" id="L72">	}</span>
+
+	@Override
+	public &lt;T&gt; void postProcess(NativeWebRequest request, Callable&lt;T&gt; task, Object concurrentResult) {
+<span class="nc" id="L76">		TransactionSynchronizationManager.unbindResource(this.sessionFactory);</span>
+<span class="nc" id="L77">	}</span>
+
+	@Override
+	public &lt;T&gt; Object handleTimeout(NativeWebRequest request, Callable&lt;T&gt; task) {
+<span class="nc" id="L81">		this.timeoutInProgress = true;</span>
+<span class="nc" id="L82">		return RESULT_NONE;  // give other interceptors a chance to handle the timeout</span>
+	}
+
+	@Override
+	public &lt;T&gt; Object handleError(NativeWebRequest request, Callable&lt;T&gt; task, Throwable t) {
+<span class="nc" id="L87">		this.errorInProgress = true;</span>
+<span class="nc" id="L88">		return RESULT_NONE;  // give other interceptors a chance to handle the error</span>
+	}
+
+	@Override
+	public &lt;T&gt; void afterCompletion(NativeWebRequest request, Callable&lt;T&gt; task) throws Exception {
+<span class="nc" id="L93">		closeSession();</span>
+<span class="nc" id="L94">	}</span>
+
+	private void closeSession() {
+<span class="nc bnc" id="L97" title="All 4 branches missed.">		if (this.timeoutInProgress || this.errorInProgress) {</span>
+<span class="nc" id="L98">			logger.debug(&quot;Closing Hibernate Session after async request timeout/error&quot;);</span>
+<span class="nc" id="L99">			SessionFactoryUtils.closeSession(this.sessionHolder.getSession());</span>
+		}
+<span class="nc" id="L101">	}</span>
+
+
+	// Implementation of DeferredResultProcessingInterceptor methods
+
+	@Override
+	public &lt;T&gt; boolean handleTimeout(NativeWebRequest request, DeferredResult&lt;T&gt; deferredResult) {
+<span class="nc" id="L108">		this.timeoutInProgress = true;</span>
+<span class="nc" id="L109">		return true;  // give other interceptors a chance to handle the timeout</span>
+	}
+
+	@Override
+	public &lt;T&gt; boolean handleError(NativeWebRequest request, DeferredResult&lt;T&gt; deferredResult, Throwable t) {
+<span class="nc" id="L114">		this.errorInProgress = true;</span>
+<span class="nc" id="L115">		return true;  // give other interceptors a chance to handle the error</span>
+	}
+
+	@Override
+	public &lt;T&gt; void afterCompletion(NativeWebRequest request, DeferredResult&lt;T&gt; deferredResult) {
+<span class="nc" id="L120">		closeSession();</span>
+<span class="nc" id="L121">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,945 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestContext.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.support</a> &gt; <span class="el_source">RequestContext.java</span></div><h1>RequestContext.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.support;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TimeZone;
+import javax.servlet.ServletContext;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
+import javax.servlet.jsp.jstl.core.Config;
+
+import org.springframework.context.MessageSource;
+import org.springframework.context.MessageSourceResolvable;
+import org.springframework.context.NoSuchMessageException;
+import org.springframework.context.i18n.LocaleContext;
+import org.springframework.context.i18n.SimpleTimeZoneAwareLocaleContext;
+import org.springframework.context.i18n.TimeZoneAwareLocaleContext;
+import org.springframework.lang.Nullable;
+import org.springframework.ui.context.Theme;
+import org.springframework.ui.context.ThemeSource;
+import org.springframework.ui.context.support.ResourceBundleThemeSource;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.validation.BindException;
+import org.springframework.validation.BindingResult;
+import org.springframework.validation.Errors;
+import org.springframework.web.bind.EscapedErrors;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.servlet.LocaleContextResolver;
+import org.springframework.web.servlet.LocaleResolver;
+import org.springframework.web.servlet.ThemeResolver;
+import org.springframework.web.util.HtmlUtils;
+import org.springframework.web.util.UriTemplate;
+import org.springframework.web.util.UrlPathHelper;
+import org.springframework.web.util.WebUtils;
+
+/**
+ * Context holder for request-specific state, like current web application context, current locale,
+ * current theme, and potential binding errors. Provides easy access to localized messages and
+ * Errors instances.
+ *
+ * &lt;p&gt;Suitable for exposition to views, and usage within JSP's &quot;useBean&quot; tag, JSP scriptlets, JSTL EL,
+ * etc. Necessary for views that do not have access to the servlet request, like FreeMarker templates.
+ *
+ * &lt;p&gt;Can be instantiated manually, or automatically exposed to views as model attribute via AbstractView's
+ * &quot;requestContextAttribute&quot; property.
+ *
+ * &lt;p&gt;Will also work outside of DispatcherServlet requests, accessing the root WebApplicationContext
+ * and using an appropriate fallback for the locale (the HttpServletRequest's primary locale).
+ *
+ * @author Juergen Hoeller
+ * @author Rossen Stoyanchev
+ * @since 03.03.2003
+ * @see org.springframework.web.servlet.DispatcherServlet
+ * @see org.springframework.web.servlet.view.AbstractView#setRequestContextAttribute
+ * @see org.springframework.web.servlet.view.UrlBasedViewResolver#setRequestContextAttribute
+ */
+public class RequestContext {
+
+	/**
+	 * Default theme name used if the RequestContext cannot find a ThemeResolver.
+	 * Only applies to non-DispatcherServlet requests.
+	 * &lt;p&gt;Same as AbstractThemeResolver's default, but not linked in here to avoid package interdependencies.
+	 * @see org.springframework.web.servlet.theme.AbstractThemeResolver#ORIGINAL_DEFAULT_THEME_NAME
+	 */
+	public static final String DEFAULT_THEME_NAME = &quot;theme&quot;;
+
+	/**
+	 * Request attribute to hold the current web application context for RequestContext usage.
+	 * By default, the DispatcherServlet's context (or the root context as fallback) is exposed.
+	 */
+<span class="fc" id="L91">	public static final String WEB_APPLICATION_CONTEXT_ATTRIBUTE = RequestContext.class.getName() + &quot;.CONTEXT&quot;;</span>
+
+
+<span class="fc" id="L94">	protected static final boolean jstlPresent = ClassUtils.isPresent(</span>
+<span class="fc" id="L95">			&quot;javax.servlet.jsp.jstl.core.Config&quot;, RequestContext.class.getClassLoader());</span>
+
+	private HttpServletRequest request;
+
+	@Nullable
+	private HttpServletResponse response;
+
+	@Nullable
+	private Map&lt;String, Object&gt; model;
+
+	private WebApplicationContext webApplicationContext;
+
+	@Nullable
+	private Locale locale;
+
+	@Nullable
+	private TimeZone timeZone;
+
+	@Nullable
+	private Theme theme;
+
+	@Nullable
+	private Boolean defaultHtmlEscape;
+
+	@Nullable
+	private Boolean responseEncodedHtmlEscape;
+
+	private UrlPathHelper urlPathHelper;
+
+	@Nullable
+	private RequestDataValueProcessor requestDataValueProcessor;
+
+	@Nullable
+	private Map&lt;String, Errors&gt; errorsMap;
+
+
+	/**
+	 * Create a new RequestContext for the given request, using the request attributes for Errors retrieval.
+	 * &lt;p&gt;This only works with InternalResourceViews, as Errors instances are part of the model and not
+	 * normally exposed as request attributes. It will typically be used within JSPs or custom tags.
+	 * &lt;p&gt;&lt;b&gt;Will only work within a DispatcherServlet request.&lt;/b&gt;
+	 * Pass in a ServletContext to be able to fallback to the root WebApplicationContext.
+	 * @param request current HTTP request
+	 * @see org.springframework.web.servlet.DispatcherServlet
+	 * @see #RequestContext(javax.servlet.http.HttpServletRequest, javax.servlet.ServletContext)
+	 */
+	public RequestContext(HttpServletRequest request) {
+<span class="fc" id="L142">		this(request, null, null, null);</span>
+<span class="fc" id="L143">	}</span>
+
+	/**
+	 * Create a new RequestContext for the given request, using the request attributes for Errors retrieval.
+	 * &lt;p&gt;This only works with InternalResourceViews, as Errors instances are part of the model and not
+	 * normally exposed as request attributes. It will typically be used within JSPs or custom tags.
+	 * &lt;p&gt;&lt;b&gt;Will only work within a DispatcherServlet request.&lt;/b&gt;
+	 * Pass in a ServletContext to be able to fallback to the root WebApplicationContext.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @see org.springframework.web.servlet.DispatcherServlet
+	 * @see #RequestContext(javax.servlet.http.HttpServletRequest, javax.servlet.http.HttpServletResponse, javax.servlet.ServletContext, Map)
+	 */
+	public RequestContext(HttpServletRequest request, HttpServletResponse response) {
+<span class="nc" id="L157">		this(request, response, null, null);</span>
+<span class="nc" id="L158">	}</span>
+
+	/**
+	 * Create a new RequestContext for the given request, using the request attributes for Errors retrieval.
+	 * &lt;p&gt;This only works with InternalResourceViews, as Errors instances are part of the model and not
+	 * normally exposed as request attributes. It will typically be used within JSPs or custom tags.
+	 * &lt;p&gt;If a ServletContext is specified, the RequestContext will also work with the root
+	 * WebApplicationContext (outside a DispatcherServlet).
+	 * @param request current HTTP request
+	 * @param servletContext the servlet context of the web application (can be {@code null};
+	 * necessary for fallback to root WebApplicationContext)
+	 * @see org.springframework.web.context.WebApplicationContext
+	 * @see org.springframework.web.servlet.DispatcherServlet
+	 */
+	public RequestContext(HttpServletRequest request, @Nullable ServletContext servletContext) {
+<span class="fc" id="L173">		this(request, null, servletContext, null);</span>
+<span class="fc" id="L174">	}</span>
+
+	/**
+	 * Create a new RequestContext for the given request, using the given model attributes for Errors retrieval.
+	 * &lt;p&gt;This works with all View implementations. It will typically be used by View implementations.
+	 * &lt;p&gt;&lt;b&gt;Will only work within a DispatcherServlet request.&lt;/b&gt;
+	 * Pass in a ServletContext to be able to fallback to the root WebApplicationContext.
+	 * @param request current HTTP request
+	 * @param model the model attributes for the current view (can be {@code null},
+	 * using the request attributes for Errors retrieval)
+	 * @see org.springframework.web.servlet.DispatcherServlet
+	 * @see #RequestContext(javax.servlet.http.HttpServletRequest, javax.servlet.http.HttpServletResponse, javax.servlet.ServletContext, Map)
+	 */
+	public RequestContext(HttpServletRequest request, @Nullable Map&lt;String, Object&gt; model) {
+<span class="fc" id="L188">		this(request, null, null, model);</span>
+<span class="fc" id="L189">	}</span>
+
+	/**
+	 * Create a new RequestContext for the given request, using the given model attributes for Errors retrieval.
+	 * &lt;p&gt;This works with all View implementations. It will typically be used by View implementations.
+	 * &lt;p&gt;If a ServletContext is specified, the RequestContext will also work with a root
+	 * WebApplicationContext (outside a DispatcherServlet).
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @param servletContext the servlet context of the web application (can be {@code null}; necessary for
+	 * fallback to root WebApplicationContext)
+	 * @param model the model attributes for the current view (can be {@code null}, using the request attributes
+	 * for Errors retrieval)
+	 * @see org.springframework.web.context.WebApplicationContext
+	 * @see org.springframework.web.servlet.DispatcherServlet
+	 */
+	public RequestContext(HttpServletRequest request, @Nullable HttpServletResponse response,
+<span class="fc" id="L206">			@Nullable ServletContext servletContext, @Nullable Map&lt;String, Object&gt; model) {</span>
+
+<span class="fc" id="L208">		this.request = request;</span>
+<span class="fc" id="L209">		this.response = response;</span>
+<span class="fc" id="L210">		this.model = model;</span>
+
+		// Fetch WebApplicationContext, either from DispatcherServlet or the root context.
+		// ServletContext needs to be specified to be able to fall back to the root context!
+<span class="fc" id="L214">		WebApplicationContext wac = (WebApplicationContext) request.getAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE);</span>
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">		if (wac == null) {</span>
+<span class="fc" id="L216">			wac = RequestContextUtils.findWebApplicationContext(request, servletContext);</span>
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">			if (wac == null) {</span>
+<span class="nc" id="L218">				throw new IllegalStateException(&quot;No WebApplicationContext found: not in a DispatcherServlet &quot; +</span>
+						&quot;request and no ContextLoaderListener registered?&quot;);
+			}
+		}
+<span class="fc" id="L222">		this.webApplicationContext = wac;</span>
+
+<span class="fc" id="L224">		Locale locale = null;</span>
+<span class="fc" id="L225">		TimeZone timeZone = null;</span>
+
+		// Determine locale to use for this RequestContext.
+<span class="fc" id="L228">		LocaleResolver localeResolver = RequestContextUtils.getLocaleResolver(request);</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">		if (localeResolver instanceof LocaleContextResolver) {</span>
+<span class="fc" id="L230">			LocaleContext localeContext = ((LocaleContextResolver) localeResolver).resolveLocaleContext(request);</span>
+<span class="fc" id="L231">			locale = localeContext.getLocale();</span>
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">			if (localeContext instanceof TimeZoneAwareLocaleContext) {</span>
+<span class="fc" id="L233">				timeZone = ((TimeZoneAwareLocaleContext) localeContext).getTimeZone();</span>
+			}
+<span class="fc" id="L235">		}</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">		else if (localeResolver != null) {</span>
+			// Try LocaleResolver (we're within a DispatcherServlet request).
+<span class="fc" id="L238">			locale = localeResolver.resolveLocale(request);</span>
+		}
+
+<span class="fc" id="L241">		this.locale = locale;</span>
+<span class="fc" id="L242">		this.timeZone = timeZone;</span>
+
+		// Determine default HTML escape setting from the &quot;defaultHtmlEscape&quot;
+		// context-param in web.xml, if any.
+<span class="fc" id="L246">		this.defaultHtmlEscape = WebUtils.getDefaultHtmlEscape(this.webApplicationContext.getServletContext());</span>
+
+		// Determine response-encoded HTML escape setting from the &quot;responseEncodedHtmlEscape&quot;
+		// context-param in web.xml, if any.
+<span class="fc" id="L250">		this.responseEncodedHtmlEscape =</span>
+<span class="fc" id="L251">				WebUtils.getResponseEncodedHtmlEscape(this.webApplicationContext.getServletContext());</span>
+
+<span class="fc" id="L253">		this.urlPathHelper = new UrlPathHelper();</span>
+
+<span class="fc bfc" id="L255" title="All 2 branches covered.">		if (this.webApplicationContext.containsBean(RequestContextUtils.REQUEST_DATA_VALUE_PROCESSOR_BEAN_NAME)) {</span>
+<span class="fc" id="L256">			this.requestDataValueProcessor = this.webApplicationContext.getBean(</span>
+					RequestContextUtils.REQUEST_DATA_VALUE_PROCESSOR_BEAN_NAME, RequestDataValueProcessor.class);
+		}
+<span class="fc" id="L259">	}</span>
+
+
+	/**
+	 * Return the underlying HttpServletRequest. Only intended for cooperating classes in this package.
+	 */
+	protected final HttpServletRequest getRequest() {
+<span class="fc" id="L266">		return this.request;</span>
+	}
+
+	/**
+	 * Return the underlying ServletContext. Only intended for cooperating classes in this package.
+	 */
+	@Nullable
+	protected final ServletContext getServletContext() {
+<span class="fc" id="L274">		return this.webApplicationContext.getServletContext();</span>
+	}
+
+	/**
+	 * Return the current WebApplicationContext.
+	 */
+	public final WebApplicationContext getWebApplicationContext() {
+<span class="fc" id="L281">		return this.webApplicationContext;</span>
+	}
+
+	/**
+	 * Return the current WebApplicationContext as MessageSource.
+	 */
+	public final MessageSource getMessageSource() {
+<span class="fc" id="L288">		return this.webApplicationContext;</span>
+	}
+
+	/**
+	 * Return the model Map that this RequestContext encapsulates, if any.
+	 * @return the populated model Map, or {@code null} if none available
+	 */
+	@Nullable
+	public final Map&lt;String, Object&gt; getModel() {
+<span class="nc" id="L297">		return this.model;</span>
+	}
+
+	/**
+	 * Return the current Locale (falling back to the request locale; never {@code null}).
+	 * &lt;p&gt;Typically coming from a DispatcherServlet's {@link LocaleResolver}.
+	 * Also includes a fallback check for JSTL's Locale attribute.
+	 * @see RequestContextUtils#getLocale
+	 */
+	public final Locale getLocale() {
+<span class="fc bfc" id="L307" title="All 2 branches covered.">		return (this.locale != null ? this.locale : getFallbackLocale());</span>
+	}
+
+	/**
+	 * Return the current TimeZone (or {@code null} if none derivable from the request).
+	 * &lt;p&gt;Typically coming from a DispatcherServlet's {@link LocaleContextResolver}.
+	 * Also includes a fallback check for JSTL's TimeZone attribute.
+	 * @see RequestContextUtils#getTimeZone
+	 */
+	@Nullable
+	public TimeZone getTimeZone() {
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">		return (this.timeZone != null ? this.timeZone : getFallbackTimeZone());</span>
+	}
+
+	/**
+	 * Determine the fallback locale for this context.
+	 * &lt;p&gt;The default implementation checks for a JSTL locale attribute in request, session
+	 * or application scope; if not found, returns the {@code HttpServletRequest.getLocale()}.
+	 * @return the fallback locale (never {@code null})
+	 * @see javax.servlet.http.HttpServletRequest#getLocale()
+	 */
+	protected Locale getFallbackLocale() {
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">		if (jstlPresent) {</span>
+<span class="fc" id="L330">			Locale locale = JstlLocaleResolver.getJstlLocale(getRequest(), getServletContext());</span>
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">			if (locale != null) {</span>
+<span class="nc" id="L332">				return locale;</span>
+			}
+		}
+<span class="fc" id="L335">		return getRequest().getLocale();</span>
+	}
+
+	/**
+	 * Determine the fallback time zone for this context.
+	 * &lt;p&gt;The default implementation checks for a JSTL time zone attribute in request,
+	 * session or application scope; returns {@code null} if not found.
+	 * @return the fallback time zone (or {@code null} if none derivable from the request)
+	 */
+	@Nullable
+	protected TimeZone getFallbackTimeZone() {
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">		if (jstlPresent) {</span>
+<span class="fc" id="L347">			TimeZone timeZone = JstlLocaleResolver.getJstlTimeZone(getRequest(), getServletContext());</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">			if (timeZone != null) {</span>
+<span class="nc" id="L349">				return timeZone;</span>
+			}
+		}
+<span class="fc" id="L352">		return null;</span>
+	}
+
+	/**
+	 * Change the current locale to the specified one,
+	 * storing the new locale through the configured {@link LocaleResolver}.
+	 * @param locale the new locale
+	 * @see LocaleResolver#setLocale
+	 * @see #changeLocale(java.util.Locale, java.util.TimeZone)
+	 */
+	public void changeLocale(Locale locale) {
+<span class="nc" id="L363">		LocaleResolver localeResolver = RequestContextUtils.getLocaleResolver(this.request);</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">		if (localeResolver == null) {</span>
+<span class="nc" id="L365">			throw new IllegalStateException(&quot;Cannot change locale if no LocaleResolver configured&quot;);</span>
+		}
+<span class="nc" id="L367">		localeResolver.setLocale(this.request, this.response, locale);</span>
+<span class="nc" id="L368">		this.locale = locale;</span>
+<span class="nc" id="L369">	}</span>
+
+	/**
+	 * Change the current locale to the specified locale and time zone context,
+	 * storing the new locale context through the configured {@link LocaleResolver}.
+	 * @param locale the new locale
+	 * @param timeZone the new time zone
+	 * @see LocaleContextResolver#setLocaleContext
+	 * @see org.springframework.context.i18n.SimpleTimeZoneAwareLocaleContext
+	 */
+	public void changeLocale(Locale locale, TimeZone timeZone) {
+<span class="fc" id="L380">		LocaleResolver localeResolver = RequestContextUtils.getLocaleResolver(this.request);</span>
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">		if (!(localeResolver instanceof LocaleContextResolver)) {</span>
+<span class="nc" id="L382">			throw new IllegalStateException(&quot;Cannot change locale context if no LocaleContextResolver configured&quot;);</span>
+		}
+<span class="fc" id="L384">		((LocaleContextResolver) localeResolver).setLocaleContext(this.request, this.response,</span>
+				new SimpleTimeZoneAwareLocaleContext(locale, timeZone));
+<span class="fc" id="L386">		this.locale = locale;</span>
+<span class="fc" id="L387">		this.timeZone = timeZone;</span>
+<span class="fc" id="L388">	}</span>
+
+	/**
+	 * Return the current theme (never {@code null}).
+	 * &lt;p&gt;Resolved lazily for more efficiency when theme support is not being used.
+	 */
+	public Theme getTheme() {
+<span class="fc bfc" id="L395" title="All 2 branches covered.">		if (this.theme == null) {</span>
+			// Lazily determine theme to use for this RequestContext.
+<span class="fc" id="L397">			this.theme = RequestContextUtils.getTheme(this.request);</span>
+<span class="pc bpc" id="L398" title="1 of 2 branches missed.">			if (this.theme == null) {</span>
+				// No ThemeResolver and ThemeSource available -&gt; try fallback.
+<span class="nc" id="L400">				this.theme = getFallbackTheme();</span>
+			}
+		}
+<span class="fc" id="L403">		return this.theme;</span>
+	}
+
+	/**
+	 * Determine the fallback theme for this context.
+	 * &lt;p&gt;The default implementation returns the default theme (with name &quot;theme&quot;).
+	 * @return the fallback theme (never {@code null})
+	 */
+	protected Theme getFallbackTheme() {
+<span class="nc" id="L412">		ThemeSource themeSource = RequestContextUtils.getThemeSource(getRequest());</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">		if (themeSource == null) {</span>
+<span class="nc" id="L414">			themeSource = new ResourceBundleThemeSource();</span>
+		}
+<span class="nc" id="L416">		Theme theme = themeSource.getTheme(DEFAULT_THEME_NAME);</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">		if (theme == null) {</span>
+<span class="nc" id="L418">			throw new IllegalStateException(&quot;No theme defined and no fallback theme found&quot;);</span>
+		}
+<span class="nc" id="L420">		return theme;</span>
+	}
+
+	/**
+	 * Change the current theme to the specified one,
+	 * storing the new theme name through the configured {@link ThemeResolver}.
+	 * @param theme the new theme
+	 * @see ThemeResolver#setThemeName
+	 */
+	public void changeTheme(@Nullable Theme theme) {
+<span class="nc" id="L430">		ThemeResolver themeResolver = RequestContextUtils.getThemeResolver(this.request);</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">		if (themeResolver == null) {</span>
+<span class="nc" id="L432">			throw new IllegalStateException(&quot;Cannot change theme if no ThemeResolver configured&quot;);</span>
+		}
+<span class="nc bnc" id="L434" title="All 2 branches missed.">		themeResolver.setThemeName(this.request, this.response, (theme != null ? theme.getName() : null));</span>
+<span class="nc" id="L435">		this.theme = theme;</span>
+<span class="nc" id="L436">	}</span>
+
+	/**
+	 * Change the current theme to the specified theme by name,
+	 * storing the new theme name through the configured {@link ThemeResolver}.
+	 * @param themeName the name of the new theme
+	 * @see ThemeResolver#setThemeName
+	 */
+	public void changeTheme(String themeName) {
+<span class="fc" id="L445">		ThemeResolver themeResolver = RequestContextUtils.getThemeResolver(this.request);</span>
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">		if (themeResolver == null) {</span>
+<span class="nc" id="L447">			throw new IllegalStateException(&quot;Cannot change theme if no ThemeResolver configured&quot;);</span>
+		}
+<span class="fc" id="L449">		themeResolver.setThemeName(this.request, this.response, themeName);</span>
+		// Ask for re-resolution on next getTheme call.
+<span class="fc" id="L451">		this.theme = null;</span>
+<span class="fc" id="L452">	}</span>
+
+	/**
+	 * (De)activate default HTML escaping for messages and errors, for the scope of this RequestContext.
+	 * &lt;p&gt;The default is the application-wide setting (the &quot;defaultHtmlEscape&quot; context-param in web.xml).
+	 * @see org.springframework.web.util.WebUtils#getDefaultHtmlEscape
+	 */
+	public void setDefaultHtmlEscape(boolean defaultHtmlEscape) {
+<span class="fc" id="L460">		this.defaultHtmlEscape = defaultHtmlEscape;</span>
+<span class="fc" id="L461">	}</span>
+
+	/**
+	 * Is default HTML escaping active? Falls back to {@code false} in case of no explicit default given.
+	 */
+	public boolean isDefaultHtmlEscape() {
+<span class="fc bfc" id="L467" title="All 4 branches covered.">		return (this.defaultHtmlEscape != null &amp;&amp; this.defaultHtmlEscape.booleanValue());</span>
+	}
+
+	/**
+	 * Return the default HTML escape setting, differentiating between no default specified and an explicit value.
+	 * @return whether default HTML escaping is enabled (null = no explicit default)
+	 */
+	@Nullable
+	public Boolean getDefaultHtmlEscape() {
+<span class="fc" id="L476">		return this.defaultHtmlEscape;</span>
+	}
+
+	/**
+	 * Is HTML escaping using the response encoding by default?
+	 * If enabled, only XML markup significant characters will be escaped with UTF-* encodings.
+	 * &lt;p&gt;Falls back to {@code true} in case of no explicit default given, as of Spring 4.2.
+	 * @since 4.1.2
+	 */
+	public boolean isResponseEncodedHtmlEscape() {
+<span class="pc bpc" id="L486" title="1 of 4 branches missed.">		return (this.responseEncodedHtmlEscape == null || this.responseEncodedHtmlEscape.booleanValue());</span>
+	}
+
+	/**
+	 * Return the default setting about use of response encoding for HTML escape setting,
+	 * differentiating between no default specified and an explicit value.
+	 * @return whether default use of response encoding HTML escaping is enabled (null = no explicit default)
+	 * @since 4.1.2
+	 */
+	@Nullable
+	public Boolean getResponseEncodedHtmlEscape() {
+<span class="nc" id="L497">		return this.responseEncodedHtmlEscape;</span>
+	}
+
+
+	/**
+	 * Set the UrlPathHelper to use for context path and request URI decoding.
+	 * Can be used to pass a shared UrlPathHelper instance in.
+	 * &lt;p&gt;A default UrlPathHelper is always available.
+	 */
+	public void setUrlPathHelper(UrlPathHelper urlPathHelper) {
+<span class="nc" id="L507">		Assert.notNull(urlPathHelper, &quot;UrlPathHelper must not be null&quot;);</span>
+<span class="nc" id="L508">		this.urlPathHelper = urlPathHelper;</span>
+<span class="nc" id="L509">	}</span>
+
+	/**
+	 * Return the UrlPathHelper used for context path and request URI decoding.
+	 * Can be used to configure the current UrlPathHelper.
+	 * &lt;p&gt;A default UrlPathHelper is always available.
+	 */
+	public UrlPathHelper getUrlPathHelper() {
+<span class="nc" id="L517">		return this.urlPathHelper;</span>
+	}
+
+	/**
+	 * Return the RequestDataValueProcessor instance to use obtained from the
+	 * WebApplicationContext under the name {@code &quot;requestDataValueProcessor&quot;}.
+	 * Or {@code null} if no matching bean was found.
+	 */
+	@Nullable
+	public RequestDataValueProcessor getRequestDataValueProcessor() {
+<span class="fc" id="L527">		return this.requestDataValueProcessor;</span>
+	}
+
+	/**
+	 * Return the context path of the original request, that is, the path that
+	 * indicates the current web application. This is useful for building links
+	 * to other resources within the application.
+	 * &lt;p&gt;Delegates to the UrlPathHelper for decoding.
+	 * @see javax.servlet.http.HttpServletRequest#getContextPath
+	 * @see #getUrlPathHelper
+	 */
+	public String getContextPath() {
+<span class="fc" id="L539">		return this.urlPathHelper.getOriginatingContextPath(this.request);</span>
+	}
+
+	/**
+	 * Return a context-aware URl for the given relative URL.
+	 * @param relativeUrl the relative URL part
+	 * @return a URL that points back to the server with an absolute path (also URL-encoded accordingly)
+	 */
+	public String getContextUrl(String relativeUrl) {
+<span class="fc" id="L548">		String url = getContextPath() + relativeUrl;</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">		if (this.response != null) {</span>
+<span class="fc" id="L550">			url = this.response.encodeURL(url);</span>
+		}
+<span class="fc" id="L552">		return url;</span>
+	}
+
+	/**
+	 * Return a context-aware URl for the given relative URL with placeholders (named keys with braces {@code {}}).
+	 * For example, send in a relative URL {@code foo/{bar}?spam={spam}} and a parameter map
+	 * {@code {bar=baz,spam=nuts}} and the result will be {@code [contextpath]/foo/baz?spam=nuts}.
+	 * @param relativeUrl the relative URL part
+	 * @param params a map of parameters to insert as placeholders in the url
+	 * @return a URL that points back to the server with an absolute path (also URL-encoded accordingly)
+	 */
+	public String getContextUrl(String relativeUrl, Map&lt;String, ?&gt; params) {
+<span class="fc" id="L564">		String url = getContextPath() + relativeUrl;</span>
+<span class="fc" id="L565">		UriTemplate template = new UriTemplate(url);</span>
+<span class="fc" id="L566">		url = template.expand(params).toASCIIString();</span>
+<span class="pc bpc" id="L567" title="1 of 2 branches missed.">		if (this.response != null) {</span>
+<span class="fc" id="L568">			url = this.response.encodeURL(url);</span>
+		}
+<span class="fc" id="L570">		return url;</span>
+	}
+
+	/**
+	 * Return the path to URL mappings within the current servlet including the
+	 * context path and the servlet path of the original request. This is useful
+	 * for building links to other resources within the application where a
+	 * servlet mapping of the style {@code &quot;/main/*&quot;} is used.
+	 * &lt;p&gt;Delegates to the UrlPathHelper to determine the context and servlet path.
+	 */
+	public String getPathToServlet() {
+<span class="fc" id="L581">		String path = this.urlPathHelper.getOriginatingContextPath(this.request);</span>
+<span class="pc bpc" id="L582" title="1 of 2 branches missed.">		if (StringUtils.hasText(this.urlPathHelper.getPathWithinServletMapping(this.request))) {</span>
+<span class="fc" id="L583">			path += this.urlPathHelper.getOriginatingServletPath(this.request);</span>
+		}
+<span class="fc" id="L585">		return path;</span>
+	}
+
+	/**
+	 * Return the request URI of the original request, that is, the invoked URL
+	 * without parameters. This is particularly useful as HTML form action target,
+	 * possibly in combination with the original query string.
+	 * &lt;p&gt;Delegates to the UrlPathHelper for decoding.
+	 * @see #getQueryString
+	 * @see org.springframework.web.util.UrlPathHelper#getOriginatingRequestUri
+	 * @see #getUrlPathHelper
+	 */
+	public String getRequestUri() {
+<span class="fc" id="L598">		return this.urlPathHelper.getOriginatingRequestUri(this.request);</span>
+	}
+
+	/**
+	 * Return the query string of the current request, that is, the part after
+	 * the request path. This is particularly useful for building an HTML form
+	 * action target in combination with the original request URI.
+	 * &lt;p&gt;Delegates to the UrlPathHelper for decoding.
+	 * @see #getRequestUri
+	 * @see org.springframework.web.util.UrlPathHelper#getOriginatingQueryString
+	 * @see #getUrlPathHelper
+	 */
+	public String getQueryString() {
+<span class="fc" id="L611">		return this.urlPathHelper.getOriginatingQueryString(this.request);</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param code code of the message
+	 * @param defaultMessage the String to return if the lookup fails
+	 * @return the message
+	 */
+	public String getMessage(String code, String defaultMessage) {
+<span class="fc" id="L621">		return getMessage(code, null, defaultMessage, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param code code of the message
+	 * @param args arguments for the message, or {@code null} if none
+	 * @param defaultMessage the String to return if the lookup fails
+	 * @return the message
+	 */
+	public String getMessage(String code, @Nullable Object[] args, String defaultMessage) {
+<span class="fc" id="L632">		return getMessage(code, args, defaultMessage, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param code code of the message
+	 * @param args arguments for the message as a List, or {@code null} if none
+	 * @param defaultMessage the String to return if the lookup fails
+	 * @return the message
+	 */
+	public String getMessage(String code, @Nullable List&lt;?&gt; args, String defaultMessage) {
+<span class="fc bfc" id="L643" title="All 2 branches covered.">		return getMessage(code, (args != null ? args.toArray() : null), defaultMessage, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code.
+	 * @param code code of the message
+	 * @param args arguments for the message, or {@code null} if none
+	 * @param defaultMessage the String to return if the lookup fails
+	 * @param htmlEscape if the message should be HTML-escaped
+	 * @return the message
+	 */
+	public String getMessage(String code, @Nullable Object[] args, String defaultMessage, boolean htmlEscape) {
+<span class="fc" id="L655">		String msg = this.webApplicationContext.getMessage(code, args, defaultMessage, getLocale());</span>
+<span class="pc bpc" id="L656" title="1 of 2 branches missed.">		if (msg == null) {</span>
+<span class="nc" id="L657">			return &quot;&quot;;</span>
+		}
+<span class="pc bpc" id="L659" title="1 of 2 branches missed.">		return (htmlEscape ? HtmlUtils.htmlEscape(msg) : msg);</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param code code of the message
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getMessage(String code) throws NoSuchMessageException {
+<span class="fc" id="L669">		return getMessage(code, null, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param code code of the message
+	 * @param args arguments for the message, or {@code null} if none
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getMessage(String code, @Nullable Object[] args) throws NoSuchMessageException {
+<span class="fc" id="L680">		return getMessage(code, args, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param code code of the message
+	 * @param args arguments for the message as a List, or {@code null} if none
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getMessage(String code, @Nullable List&lt;?&gt; args) throws NoSuchMessageException {
+<span class="nc bnc" id="L691" title="All 2 branches missed.">		return getMessage(code, (args != null ? args.toArray() : null), isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the message for the given code.
+	 * @param code code of the message
+	 * @param args arguments for the message, or {@code null} if none
+	 * @param htmlEscape if the message should be HTML-escaped
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getMessage(String code, @Nullable Object[] args, boolean htmlEscape) throws NoSuchMessageException {
+<span class="fc" id="L703">		String msg = this.webApplicationContext.getMessage(code, args, getLocale());</span>
+<span class="pc bpc" id="L704" title="1 of 2 branches missed.">		return (htmlEscape ? HtmlUtils.htmlEscape(msg) : msg);</span>
+	}
+
+	/**
+	 * Retrieve the given MessageSourceResolvable (e.g. an ObjectError instance), using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param resolvable the MessageSourceResolvable
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getMessage(MessageSourceResolvable resolvable) throws NoSuchMessageException {
+<span class="fc" id="L714">		return getMessage(resolvable, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the given MessageSourceResolvable (e.g. an ObjectError instance).
+	 * @param resolvable the MessageSourceResolvable
+	 * @param htmlEscape if the message should be HTML-escaped
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getMessage(MessageSourceResolvable resolvable, boolean htmlEscape) throws NoSuchMessageException {
+<span class="fc" id="L725">		String msg = this.webApplicationContext.getMessage(resolvable, getLocale());</span>
+<span class="fc bfc" id="L726" title="All 2 branches covered.">		return (htmlEscape ? HtmlUtils.htmlEscape(msg) : msg);</span>
+	}
+
+	/**
+	 * Retrieve the theme message for the given code.
+	 * &lt;p&gt;Note that theme messages are never HTML-escaped, as they typically denote
+	 * theme-specific resource paths and not client-visible messages.
+	 * @param code code of the message
+	 * @param defaultMessage the String to return if the lookup fails
+	 * @return the message
+	 */
+	public String getThemeMessage(String code, String defaultMessage) {
+<span class="fc" id="L738">		String msg = getTheme().getMessageSource().getMessage(code, null, defaultMessage, getLocale());</span>
+<span class="pc bpc" id="L739" title="1 of 2 branches missed.">		return (msg != null ? msg : &quot;&quot;);</span>
+	}
+
+	/**
+	 * Retrieve the theme message for the given code.
+	 * &lt;p&gt;Note that theme messages are never HTML-escaped, as they typically denote
+	 * theme-specific resource paths and not client-visible messages.
+	 * @param code code of the message
+	 * @param args arguments for the message, or {@code null} if none
+	 * @param defaultMessage the String to return if the lookup fails
+	 * @return the message
+	 */
+	public String getThemeMessage(String code, @Nullable Object[] args, String defaultMessage) {
+<span class="fc" id="L752">		String msg = getTheme().getMessageSource().getMessage(code, args, defaultMessage, getLocale());</span>
+<span class="pc bpc" id="L753" title="1 of 2 branches missed.">		return (msg != null ? msg : &quot;&quot;);</span>
+	}
+
+	/**
+	 * Retrieve the theme message for the given code.
+	 * &lt;p&gt;Note that theme messages are never HTML-escaped, as they typically denote
+	 * theme-specific resource paths and not client-visible messages.
+	 * @param code code of the message
+	 * @param args arguments for the message as a List, or {@code null} if none
+	 * @param defaultMessage the String to return if the lookup fails
+	 * @return the message
+	 */
+	public String getThemeMessage(String code, @Nullable List&lt;?&gt; args, String defaultMessage) {
+<span class="pc bpc" id="L766" title="1 of 2 branches missed.">		String msg = getTheme().getMessageSource().getMessage(code, (args != null ? args.toArray() : null),</span>
+<span class="fc" id="L767">				defaultMessage, getLocale());</span>
+<span class="pc bpc" id="L768" title="1 of 2 branches missed.">		return (msg != null ? msg : &quot;&quot;);</span>
+	}
+
+	/**
+	 * Retrieve the theme message for the given code.
+	 * &lt;p&gt;Note that theme messages are never HTML-escaped, as they typically denote
+	 * theme-specific resource paths and not client-visible messages.
+	 * @param code code of the message
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getThemeMessage(String code) throws NoSuchMessageException {
+<span class="fc" id="L780">		return getTheme().getMessageSource().getMessage(code, null, getLocale());</span>
+	}
+
+	/**
+	 * Retrieve the theme message for the given code.
+	 * &lt;p&gt;Note that theme messages are never HTML-escaped, as they typically denote
+	 * theme-specific resource paths and not client-visible messages.
+	 * @param code code of the message
+	 * @param args arguments for the message, or {@code null} if none
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getThemeMessage(String code, @Nullable Object[] args) throws NoSuchMessageException {
+<span class="fc" id="L793">		return getTheme().getMessageSource().getMessage(code, args, getLocale());</span>
+	}
+
+	/**
+	 * Retrieve the theme message for the given code.
+	 * &lt;p&gt;Note that theme messages are never HTML-escaped, as they typically denote
+	 * theme-specific resource paths and not client-visible messages.
+	 * @param code code of the message
+	 * @param args arguments for the message as a List, or {@code null} if none
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getThemeMessage(String code, @Nullable List&lt;?&gt; args) throws NoSuchMessageException {
+<span class="pc bpc" id="L806" title="1 of 2 branches missed.">		return getTheme().getMessageSource().getMessage(code, (args != null ? args.toArray() : null), getLocale());</span>
+	}
+
+	/**
+	 * Retrieve the given MessageSourceResolvable in the current theme.
+	 * &lt;p&gt;Note that theme messages are never HTML-escaped, as they typically denote
+	 * theme-specific resource paths and not client-visible messages.
+	 * @param resolvable the MessageSourceResolvable
+	 * @return the message
+	 * @throws org.springframework.context.NoSuchMessageException if not found
+	 */
+	public String getThemeMessage(MessageSourceResolvable resolvable) throws NoSuchMessageException {
+<span class="fc" id="L818">		return getTheme().getMessageSource().getMessage(resolvable, getLocale());</span>
+	}
+
+	/**
+	 * Retrieve the Errors instance for the given bind object, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param name name of the bind object
+	 * @return the Errors instance, or {@code null} if not found
+	 */
+	@Nullable
+	public Errors getErrors(String name) {
+<span class="nc" id="L828">		return getErrors(name, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Retrieve the Errors instance for the given bind object.
+	 * @param name name of the bind object
+	 * @param htmlEscape create an Errors instance with automatic HTML escaping?
+	 * @return the Errors instance, or {@code null} if not found
+	 */
+	@Nullable
+	public Errors getErrors(String name, boolean htmlEscape) {
+<span class="fc bfc" id="L839" title="All 2 branches covered.">		if (this.errorsMap == null) {</span>
+<span class="fc" id="L840">			this.errorsMap = new HashMap&lt;&gt;();</span>
+		}
+<span class="fc" id="L842">		Errors errors = this.errorsMap.get(name);</span>
+<span class="fc" id="L843">		boolean put = false;</span>
+<span class="fc bfc" id="L844" title="All 2 branches covered.">		if (errors == null) {</span>
+<span class="fc" id="L845">			errors = (Errors) getModelObject(BindingResult.MODEL_KEY_PREFIX + name);</span>
+			// Check old BindException prefix for backwards compatibility.
+<span class="fc bfc" id="L847" title="All 2 branches covered.">			if (errors instanceof BindException) {</span>
+<span class="fc" id="L848">				errors = ((BindException) errors).getBindingResult();</span>
+			}
+<span class="fc bfc" id="L850" title="All 2 branches covered.">			if (errors == null) {</span>
+<span class="fc" id="L851">				return null;</span>
+			}
+<span class="fc" id="L853">			put = true;</span>
+		}
+<span class="pc bpc" id="L855" title="3 of 4 branches missed.">		if (htmlEscape &amp;&amp; !(errors instanceof EscapedErrors)) {</span>
+<span class="nc" id="L856">			errors = new EscapedErrors(errors);</span>
+<span class="nc" id="L857">			put = true;</span>
+		}
+<span class="pc bpc" id="L859" title="2 of 4 branches missed.">		else if (!htmlEscape &amp;&amp; errors instanceof EscapedErrors) {</span>
+<span class="nc" id="L860">			errors = ((EscapedErrors) errors).getSource();</span>
+<span class="nc" id="L861">			put = true;</span>
+		}
+<span class="fc bfc" id="L863" title="All 2 branches covered.">		if (put) {</span>
+<span class="fc" id="L864">			this.errorsMap.put(name, errors);</span>
+		}
+<span class="fc" id="L866">		return errors;</span>
+	}
+
+	/**
+	 * Retrieve the model object for the given model name, either from the model
+	 * or from the request attributes.
+	 * @param modelName the name of the model object
+	 * @return the model object
+	 */
+	@Nullable
+	protected Object getModelObject(String modelName) {
+<span class="fc bfc" id="L877" title="All 2 branches covered.">		if (this.model != null) {</span>
+<span class="fc" id="L878">			return this.model.get(modelName);</span>
+		}
+		else {
+<span class="fc" id="L881">			return this.request.getAttribute(modelName);</span>
+		}
+	}
+
+	/**
+	 * Create a BindStatus for the given bind object, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param path the bean and property path for which values and errors will be resolved (e.g. &quot;person.age&quot;)
+	 * @return the new BindStatus instance
+	 * @throws IllegalStateException if no corresponding Errors object found
+	 */
+	public BindStatus getBindStatus(String path) throws IllegalStateException {
+<span class="fc" id="L892">		return new BindStatus(this, path, isDefaultHtmlEscape());</span>
+	}
+
+	/**
+	 * Create a BindStatus for the given bind object, using the &quot;defaultHtmlEscape&quot; setting.
+	 * @param path the bean and property path for which values and errors will be resolved (e.g. &quot;person.age&quot;)
+	 * @param htmlEscape create a BindStatus with automatic HTML escaping?
+	 * @return the new BindStatus instance
+	 * @throws IllegalStateException if no corresponding Errors object found
+	 */
+	public BindStatus getBindStatus(String path, boolean htmlEscape) throws IllegalStateException {
+<span class="nc" id="L903">		return new BindStatus(this, path, htmlEscape);</span>
+	}
+
+
+	/**
+	 * Inner class that isolates the JSTL dependency.
+	 * Just called to resolve the fallback locale if the JSTL API is present.
+	 */
+	private static class JstlLocaleResolver {
+
+		@Nullable
+		public static Locale getJstlLocale(HttpServletRequest request, @Nullable ServletContext servletContext) {
+<span class="fc" id="L915">			Object localeObject = Config.get(request, Config.FMT_LOCALE);</span>
+<span class="pc bpc" id="L916" title="1 of 2 branches missed.">			if (localeObject == null) {</span>
+<span class="fc" id="L917">				HttpSession session = request.getSession(false);</span>
+<span class="pc bpc" id="L918" title="1 of 2 branches missed.">				if (session != null) {</span>
+<span class="nc" id="L919">					localeObject = Config.get(session, Config.FMT_LOCALE);</span>
+				}
+<span class="pc bpc" id="L921" title="2 of 4 branches missed.">				if (localeObject == null &amp;&amp; servletContext != null) {</span>
+<span class="fc" id="L922">					localeObject = Config.get(servletContext, Config.FMT_LOCALE);</span>
+				}
+			}
+<span class="pc bpc" id="L925" title="1 of 2 branches missed.">			return (localeObject instanceof Locale ? (Locale) localeObject : null);</span>
+		}
+
+		@Nullable
+		public static TimeZone getJstlTimeZone(HttpServletRequest request, @Nullable ServletContext servletContext) {
+<span class="fc" id="L930">			Object timeZoneObject = Config.get(request, Config.FMT_TIME_ZONE);</span>
+<span class="pc bpc" id="L931" title="1 of 2 branches missed.">			if (timeZoneObject == null) {</span>
+<span class="fc" id="L932">				HttpSession session = request.getSession(false);</span>
+<span class="fc bfc" id="L933" title="All 2 branches covered.">				if (session != null) {</span>
+<span class="fc" id="L934">					timeZoneObject = Config.get(session, Config.FMT_TIME_ZONE);</span>
+				}
+<span class="pc bpc" id="L936" title="1 of 4 branches missed.">				if (timeZoneObject == null &amp;&amp; servletContext != null) {</span>
+<span class="fc" id="L937">					timeZoneObject = Config.get(servletContext, Config.FMT_TIME_ZONE);</span>
+				}
+			}
+<span class="pc bpc" id="L940" title="1 of 2 branches missed.">			return (timeZoneObject instanceof TimeZone ? (TimeZone) timeZoneObject : null);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

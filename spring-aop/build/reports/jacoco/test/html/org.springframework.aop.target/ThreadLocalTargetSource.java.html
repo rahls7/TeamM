@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ThreadLocalTargetSource.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.target</a> &gt; <span class="el_source">ThreadLocalTargetSource.java</span></div><h1>ThreadLocalTargetSource.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2016 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.target;
+
+import java.util.HashSet;
+import java.util.Set;
+
+import org.springframework.aop.IntroductionAdvisor;
+import org.springframework.aop.support.DefaultIntroductionAdvisor;
+import org.springframework.aop.support.DelegatingIntroductionInterceptor;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.core.NamedThreadLocal;
+
+/**
+ * Alternative to an object pool. This {@link org.springframework.aop.TargetSource}
+ * uses a threading model in which every thread has its own copy of the target.
+ * There's no contention for targets. Target object creation is kept to a minimum
+ * on the running server.
+ *
+ * &lt;p&gt;Application code is written as to a normal pool; callers can't assume they
+ * will be dealing with the same instance in invocations in different threads.
+ * However, state can be relied on during the operations of a single thread:
+ * for example, if one caller makes repeated calls on the AOP proxy.
+ *
+ * &lt;p&gt;Cleanup of thread-bound objects is performed on BeanFactory destruction,
+ * calling their {@code DisposableBean.destroy()} method if available.
+ * Be aware that many thread-bound objects can be around until the application
+ * actually shuts down.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @see ThreadLocalTargetSourceStats
+ * @see org.springframework.beans.factory.DisposableBean#destroy()
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L52">public class ThreadLocalTargetSource extends AbstractPrototypeBasedTargetSource</span>
+		implements ThreadLocalTargetSourceStats, DisposableBean {
+
+	/**
+	 * ThreadLocal holding the target associated with the current
+	 * thread. Unlike most ThreadLocals, which are static, this variable
+	 * is meant to be per thread per instance of the ThreadLocalTargetSource class.
+	 */
+<span class="fc" id="L60">	private final ThreadLocal&lt;Object&gt; targetInThread =</span>
+<span class="fc" id="L61">			new NamedThreadLocal&lt;&gt;(&quot;Thread-local instance of bean '&quot; + getTargetBeanName() + &quot;'&quot;);</span>
+
+	/**
+	 * Set of managed targets, enabling us to keep track of the targets we've created.
+	 */
+<span class="fc" id="L66">	private final Set&lt;Object&gt; targetSet = new HashSet&lt;&gt;();</span>
+
+	private int invocationCount;
+
+	private int hitCount;
+
+
+	/**
+	 * Implementation of abstract getTarget() method.
+	 * We look for a target held in a ThreadLocal. If we don't find one,
+	 * we create one and bind it to the thread. No synchronization is required.
+	 */
+	@Override
+	public Object getTarget() throws BeansException {
+<span class="fc" id="L80">		++this.invocationCount;</span>
+<span class="fc" id="L81">		Object target = this.targetInThread.get();</span>
+<span class="fc bfc" id="L82" title="All 2 branches covered.">		if (target == null) {</span>
+<span class="pc bpc" id="L83" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L84">				logger.debug(&quot;No target for prototype '&quot; + getTargetBeanName() + &quot;' bound to thread: &quot; +</span>
+<span class="nc" id="L85">						&quot;creating one and binding it to thread '&quot; + Thread.currentThread().getName() + &quot;'&quot;);</span>
+			}
+			// Associate target with ThreadLocal.
+<span class="fc" id="L88">			target = newPrototypeInstance();</span>
+<span class="fc" id="L89">			this.targetInThread.set(target);</span>
+<span class="fc" id="L90">			synchronized (this.targetSet) {</span>
+<span class="fc" id="L91">				this.targetSet.add(target);</span>
+<span class="fc" id="L92">			}</span>
+		}
+		else {
+<span class="fc" id="L95">			++this.hitCount;</span>
+		}
+<span class="fc" id="L97">		return target;</span>
+	}
+
+	/**
+	 * Dispose of targets if necessary; clear ThreadLocal.
+	 * @see #destroyPrototypeInstance
+	 */
+	@Override
+	public void destroy() {
+<span class="fc" id="L106">		logger.debug(&quot;Destroying ThreadLocalTargetSource bindings&quot;);</span>
+<span class="fc" id="L107">		synchronized (this.targetSet) {</span>
+<span class="fc bfc" id="L108" title="All 2 branches covered.">			for (Object target : this.targetSet) {</span>
+<span class="fc" id="L109">				destroyPrototypeInstance(target);</span>
+<span class="fc" id="L110">			}</span>
+<span class="fc" id="L111">			this.targetSet.clear();</span>
+<span class="fc" id="L112">		}</span>
+		// Clear ThreadLocal, just in case.
+<span class="fc" id="L114">		this.targetInThread.remove();</span>
+<span class="fc" id="L115">	}</span>
+
+
+	@Override
+	public int getInvocationCount() {
+<span class="fc" id="L120">		return this.invocationCount;</span>
+	}
+
+	@Override
+	public int getHitCount() {
+<span class="fc" id="L125">		return this.hitCount;</span>
+	}
+
+	@Override
+	public int getObjectCount() {
+<span class="fc" id="L130">		synchronized (this.targetSet) {</span>
+<span class="fc" id="L131">			return this.targetSet.size();</span>
+		}
+	}
+
+
+	/**
+	 * Return an introduction advisor mixin that allows the AOP proxy to be
+	 * cast to ThreadLocalInvokerStats.
+	 */
+	public IntroductionAdvisor getStatsMixin() {
+<span class="fc" id="L141">		DelegatingIntroductionInterceptor dii = new DelegatingIntroductionInterceptor(this);</span>
+<span class="fc" id="L142">		return new DefaultIntroductionAdvisor(dii, ThreadLocalTargetSourceStats.class);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

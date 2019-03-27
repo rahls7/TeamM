@@ -1,0 +1,379 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SerializableTypeWrapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core</a> &gt; <span class="el_source">SerializableTypeWrapper.java</span></div><h1>SerializableTypeWrapper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.Serializable;
+import java.lang.reflect.Field;
+import java.lang.reflect.GenericArrayType;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.lang.reflect.WildcardType;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Internal utility class that can be used to obtain wrapped {@link Serializable}
+ * variants of {@link java.lang.reflect.Type java.lang.reflect.Types}.
+ *
+ * &lt;p&gt;{@link #forField(Field) Fields} or {@link #forMethodParameter(MethodParameter)
+ * MethodParameters} can be used as the root source for a serializable type.
+ * Alternatively, a regular {@link Class} can also be used as source.
+ *
+ * &lt;p&gt;The returned type will either be a {@link Class} or a serializable proxy of
+ * {@link GenericArrayType}, {@link ParameterizedType}, {@link TypeVariable} or
+ * {@link WildcardType}. With the exception of {@link Class} (which is final) calls
+ * to methods that return further {@link Type Types} (for example
+ * {@link GenericArrayType#getGenericComponentType()}) will be automatically wrapped.
+ *
+ * @author Phillip Webb
+ * @author Juergen Hoeller
+ * @since 4.0
+ */
+final class SerializableTypeWrapper {
+
+<span class="fc" id="L58">	private static final Class&lt;?&gt;[] SUPPORTED_SERIALIZABLE_TYPES = {</span>
+			GenericArrayType.class, ParameterizedType.class, TypeVariable.class, WildcardType.class};
+
+<span class="fc" id="L61">	static final ConcurrentReferenceHashMap&lt;Type, Type&gt; cache = new ConcurrentReferenceHashMap&lt;&gt;(256);</span>
+
+
+	private SerializableTypeWrapper() {
+	}
+
+
+	/**
+	 * Return a {@link Serializable} variant of {@link Field#getGenericType()}.
+	 */
+	@Nullable
+	public static Type forField(Field field) {
+<span class="fc" id="L73">		return forTypeProvider(new FieldTypeProvider(field));</span>
+	}
+
+	/**
+	 * Return a {@link Serializable} variant of
+	 * {@link MethodParameter#getGenericParameterType()}.
+	 */
+	@Nullable
+	public static Type forMethodParameter(MethodParameter methodParameter) {
+<span class="fc" id="L82">		return forTypeProvider(new MethodParameterTypeProvider(methodParameter));</span>
+	}
+
+	/**
+	 * Unwrap the given type, effectively returning the original non-serializable type.
+	 * @param type the type to unwrap
+	 * @return the original non-serializable type
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public static &lt;T extends Type&gt; T unwrap(T type) {
+<span class="fc" id="L92">		Type unwrapped = type;</span>
+<span class="fc bfc" id="L93" title="All 2 branches covered.">		while (unwrapped instanceof SerializableTypeProxy) {</span>
+<span class="fc" id="L94">			unwrapped = ((SerializableTypeProxy) type).getTypeProvider().getType();</span>
+		}
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">		return (unwrapped != null ? (T) unwrapped : type);</span>
+	}
+
+	/**
+	 * Return a {@link Serializable} {@link Type} backed by a {@link TypeProvider} .
+	 * &lt;p&gt;If type artifacts are generally not serializable in the current runtime
+	 * environment, this delegate will simply return the original {@code Type} as-is.
+	 */
+	@Nullable
+	static Type forTypeProvider(TypeProvider provider) {
+<span class="fc" id="L106">		Type providedType = provider.getType();</span>
+<span class="fc bfc" id="L107" title="All 4 branches covered.">		if (providedType == null || providedType instanceof Serializable) {</span>
+			// No serializable type wrapping necessary (e.g. for java.lang.Class)
+<span class="fc" id="L109">			return providedType;</span>
+		}
+<span class="pc bpc" id="L111" title="2 of 4 branches missed.">		if (GraalDetector.inImageCode() || !Serializable.class.isAssignableFrom(Class.class)) {</span>
+			// Let's skip any wrapping attempts if types are generally not serializable in
+			// the current runtime environment (even java.lang.Class itself, e.g. on Graal)
+<span class="nc" id="L114">			return providedType;</span>
+		}
+
+		// Obtain a serializable type proxy for the given provider...
+<span class="fc" id="L118">		Type cached = cache.get(providedType);</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">		if (cached != null) {</span>
+<span class="fc" id="L120">			return cached;</span>
+		}
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">		for (Class&lt;?&gt; type : SUPPORTED_SERIALIZABLE_TYPES) {</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">			if (type.isInstance(providedType)) {</span>
+<span class="fc" id="L124">				ClassLoader classLoader = provider.getClass().getClassLoader();</span>
+<span class="fc" id="L125">				Class&lt;?&gt;[] interfaces = new Class&lt;?&gt;[] {type, SerializableTypeProxy.class, Serializable.class};</span>
+<span class="fc" id="L126">				InvocationHandler handler = new TypeProxyInvocationHandler(provider);</span>
+<span class="fc" id="L127">				cached = (Type) Proxy.newProxyInstance(classLoader, interfaces, handler);</span>
+<span class="fc" id="L128">				cache.put(providedType, cached);</span>
+<span class="fc" id="L129">				return cached;</span>
+			}
+		}
+<span class="nc" id="L132">		throw new IllegalArgumentException(&quot;Unsupported Type class: &quot; + providedType.getClass().getName());</span>
+	}
+
+
+	/**
+	 * Additional interface implemented by the type proxy.
+	 */
+	interface SerializableTypeProxy {
+
+		/**
+		 * Return the underlying type provider.
+		 */
+		TypeProvider getTypeProvider();
+	}
+
+
+	/**
+	 * A {@link Serializable} interface providing access to a {@link Type}.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	interface TypeProvider extends Serializable {
+
+		/**
+		 * Return the (possibly non {@link Serializable}) {@link Type}.
+		 */
+		@Nullable
+		Type getType();
+
+		/**
+		 * Return the source of the type, or {@code null} if not known.
+		 * &lt;p&gt;The default implementations returns {@code null}.
+		 */
+		@Nullable
+		default Object getSource() {
+<span class="nc" id="L166">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * {@link Serializable} {@link InvocationHandler} used by the proxied {@link Type}.
+	 * Provides serialization support and enhances any methods that return {@code Type}
+	 * or {@code Type[]}.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class TypeProxyInvocationHandler implements InvocationHandler, Serializable {
+
+		private final TypeProvider provider;
+
+<span class="fc" id="L181">		public TypeProxyInvocationHandler(TypeProvider provider) {</span>
+<span class="fc" id="L182">			this.provider = provider;</span>
+<span class="fc" id="L183">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+<span class="pc bpc" id="L188" title="1 of 4 branches missed.">			if (method.getName().equals(&quot;equals&quot;) &amp;&amp; args != null) {</span>
+<span class="fc" id="L189">				Object other = args[0];</span>
+				// Unwrap proxies for speed
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">				if (other instanceof Type) {</span>
+<span class="fc" id="L192">					other = unwrap((Type) other);</span>
+				}
+<span class="fc" id="L194">				return ObjectUtils.nullSafeEquals(this.provider.getType(), other);</span>
+			}
+<span class="fc bfc" id="L196" title="All 2 branches covered.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+<span class="fc" id="L197">				return ObjectUtils.nullSafeHashCode(this.provider.getType());</span>
+			}
+<span class="fc bfc" id="L199" title="All 2 branches covered.">			else if (method.getName().equals(&quot;getTypeProvider&quot;)) {</span>
+<span class="fc" id="L200">				return this.provider;</span>
+			}
+
+<span class="pc bpc" id="L203" title="1 of 4 branches missed.">			if (Type.class == method.getReturnType() &amp;&amp; args == null) {</span>
+<span class="fc" id="L204">				return forTypeProvider(new MethodInvokeTypeProvider(this.provider, method, -1));</span>
+			}
+<span class="pc bpc" id="L206" title="1 of 4 branches missed.">			else if (Type[].class == method.getReturnType() &amp;&amp; args == null) {</span>
+<span class="fc" id="L207">				Type[] result = new Type[((Type[]) method.invoke(this.provider.getType())).length];</span>
+<span class="fc bfc" id="L208" title="All 2 branches covered.">				for (int i = 0; i &lt; result.length; i++) {</span>
+<span class="fc" id="L209">					result[i] = forTypeProvider(new MethodInvokeTypeProvider(this.provider, method, i));</span>
+				}
+<span class="fc" id="L211">				return result;</span>
+			}
+
+			try {
+<span class="fc" id="L215">				return method.invoke(this.provider.getType(), args);</span>
+			}
+<span class="nc" id="L217">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L218">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+
+	/**
+	 * {@link TypeProvider} for {@link Type Types} obtained from a {@link Field}.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	static class FieldTypeProvider implements TypeProvider {
+
+		private final String fieldName;
+
+		private final Class&lt;?&gt; declaringClass;
+
+		private transient Field field;
+
+<span class="fc" id="L236">		public FieldTypeProvider(Field field) {</span>
+<span class="fc" id="L237">			this.fieldName = field.getName();</span>
+<span class="fc" id="L238">			this.declaringClass = field.getDeclaringClass();</span>
+<span class="fc" id="L239">			this.field = field;</span>
+<span class="fc" id="L240">		}</span>
+
+		@Override
+		public Type getType() {
+<span class="fc" id="L244">			return this.field.getGenericType();</span>
+		}
+
+		@Override
+		public Object getSource() {
+<span class="fc" id="L249">			return this.field;</span>
+		}
+
+		private void readObject(ObjectInputStream inputStream) throws IOException, ClassNotFoundException {
+<span class="fc" id="L253">			inputStream.defaultReadObject();</span>
+			try {
+<span class="fc" id="L255">				this.field = this.declaringClass.getDeclaredField(this.fieldName);</span>
+			}
+<span class="nc" id="L257">			catch (Throwable ex) {</span>
+<span class="nc" id="L258">				throw new IllegalStateException(&quot;Could not find original class structure&quot;, ex);</span>
+<span class="fc" id="L259">			}</span>
+<span class="fc" id="L260">		}</span>
+	}
+
+
+	/**
+	 * {@link TypeProvider} for {@link Type Types} obtained from a {@link MethodParameter}.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	static class MethodParameterTypeProvider implements TypeProvider {
+
+		@Nullable
+		private final String methodName;
+
+		private final Class&lt;?&gt;[] parameterTypes;
+
+		private final Class&lt;?&gt; declaringClass;
+
+		private final int parameterIndex;
+
+		private transient MethodParameter methodParameter;
+
+<span class="fc" id="L281">		public MethodParameterTypeProvider(MethodParameter methodParameter) {</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">			this.methodName = (methodParameter.getMethod() != null ? methodParameter.getMethod().getName() : null);</span>
+<span class="fc" id="L283">			this.parameterTypes = methodParameter.getExecutable().getParameterTypes();</span>
+<span class="fc" id="L284">			this.declaringClass = methodParameter.getDeclaringClass();</span>
+<span class="fc" id="L285">			this.parameterIndex = methodParameter.getParameterIndex();</span>
+<span class="fc" id="L286">			this.methodParameter = methodParameter;</span>
+<span class="fc" id="L287">		}</span>
+
+		@Override
+		public Type getType() {
+<span class="fc" id="L291">			return this.methodParameter.getGenericParameterType();</span>
+		}
+
+		@Override
+		public Object getSource() {
+<span class="fc" id="L296">			return this.methodParameter;</span>
+		}
+
+		private void readObject(ObjectInputStream inputStream) throws IOException, ClassNotFoundException {
+<span class="fc" id="L300">			inputStream.defaultReadObject();</span>
+			try {
+<span class="fc bfc" id="L302" title="All 2 branches covered.">				if (this.methodName != null) {</span>
+<span class="fc" id="L303">					this.methodParameter = new MethodParameter(</span>
+<span class="fc" id="L304">							this.declaringClass.getDeclaredMethod(this.methodName, this.parameterTypes), this.parameterIndex);</span>
+				}
+				else {
+<span class="fc" id="L307">					this.methodParameter = new MethodParameter(</span>
+<span class="fc" id="L308">							this.declaringClass.getDeclaredConstructor(this.parameterTypes), this.parameterIndex);</span>
+				}
+			}
+<span class="nc" id="L311">			catch (Throwable ex) {</span>
+<span class="nc" id="L312">				throw new IllegalStateException(&quot;Could not find original class structure&quot;, ex);</span>
+<span class="fc" id="L313">			}</span>
+<span class="fc" id="L314">		}</span>
+	}
+
+
+	/**
+	 * {@link TypeProvider} for {@link Type Types} obtained by invoking a no-arg method.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	static class MethodInvokeTypeProvider implements TypeProvider {
+
+		private final TypeProvider provider;
+
+		private final String methodName;
+
+		private final Class&lt;?&gt; declaringClass;
+
+		private final int index;
+
+		private transient Method method;
+
+		@Nullable
+		private transient volatile Object result;
+
+<span class="fc" id="L337">		public MethodInvokeTypeProvider(TypeProvider provider, Method method, int index) {</span>
+<span class="fc" id="L338">			this.provider = provider;</span>
+<span class="fc" id="L339">			this.methodName = method.getName();</span>
+<span class="fc" id="L340">			this.declaringClass = method.getDeclaringClass();</span>
+<span class="fc" id="L341">			this.index = index;</span>
+<span class="fc" id="L342">			this.method = method;</span>
+<span class="fc" id="L343">		}</span>
+
+		@Override
+		@Nullable
+		public Type getType() {
+<span class="fc" id="L348">			Object result = this.result;</span>
+<span class="fc bfc" id="L349" title="All 2 branches covered.">			if (result == null) {</span>
+				// Lazy invocation of the target method on the provided type
+<span class="fc" id="L351">				result = ReflectionUtils.invokeMethod(this.method, this.provider.getType());</span>
+				// Cache the result for further calls to getType()
+<span class="fc" id="L353">				this.result = result;</span>
+			}
+<span class="fc bfc" id="L355" title="All 2 branches covered.">			return (result instanceof Type[] ? ((Type[]) result)[this.index] : (Type) result);</span>
+		}
+
+		@Override
+		@Nullable
+		public Object getSource() {
+<span class="nc" id="L361">			return null;</span>
+		}
+
+		private void readObject(ObjectInputStream inputStream) throws IOException, ClassNotFoundException {
+<span class="fc" id="L365">			inputStream.defaultReadObject();</span>
+<span class="fc" id="L366">			Method method = ReflectionUtils.findMethod(this.declaringClass, this.methodName);</span>
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">			if (method == null) {</span>
+<span class="nc" id="L368">				throw new IllegalStateException(&quot;Cannot find method on deserialization: &quot; + this.methodName);</span>
+			}
+<span class="pc bpc" id="L370" title="2 of 4 branches missed.">			if (method.getReturnType() != Type.class &amp;&amp; method.getReturnType() != Type[].class) {</span>
+<span class="nc" id="L371">				throw new IllegalStateException(</span>
+						&quot;Invalid return type on deserialized method - needs to be Type or Type[]: &quot; + method);
+			}
+<span class="fc" id="L374">			this.method = method;</span>
+<span class="fc" id="L375">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

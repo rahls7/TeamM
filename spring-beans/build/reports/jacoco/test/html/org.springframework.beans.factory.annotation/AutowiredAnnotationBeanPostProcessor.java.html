@@ -1,0 +1,784 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AutowiredAnnotationBeanPostProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.annotation</a> &gt; <span class="el_source">AutowiredAnnotationBeanPostProcessor.java</span></div><h1>AutowiredAnnotationBeanPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.annotation;
+
+import java.beans.PropertyDescriptor;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AccessibleObject;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.PropertyValues;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.InjectionPoint;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.UnsatisfiedDependencyException;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.config.InstantiationAwareBeanPostProcessorAdapter;
+import org.springframework.beans.factory.support.LookupOverride;
+import org.springframework.beans.factory.support.MergedBeanDefinitionPostProcessor;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.Ordered;
+import org.springframework.core.PriorityOrdered;
+import org.springframework.core.annotation.AnnotationAttributes;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link org.springframework.beans.factory.config.BeanPostProcessor} implementation
+ * that autowires annotated fields, setter methods and arbitrary config methods.
+ * Such members to be injected are detected through a Java 5 annotation: by default,
+ * Spring's {@link Autowired @Autowired} and {@link Value @Value} annotations.
+ *
+ * &lt;p&gt;Also supports JSR-330's {@link javax.inject.Inject @Inject} annotation,
+ * if available, as a direct alternative to Spring's own {@code @Autowired}.
+ *
+ * &lt;p&gt;Only one constructor (at max) of any given bean class may declare this annotation
+ * with the 'required' parameter set to {@code true}, indicating &lt;i&gt;the&lt;/i&gt; constructor
+ * to autowire when used as a Spring bean. If multiple &lt;i&gt;non-required&lt;/i&gt; constructors
+ * declare the annotation, they will be considered as candidates for autowiring.
+ * The constructor with the greatest number of dependencies that can be satisfied by
+ * matching beans in the Spring container will be chosen. If none of the candidates
+ * can be satisfied, then a primary/default constructor (if present) will be used.
+ * If a class only declares a single constructor to begin with, it will always be used,
+ * even if not annotated. An annotated constructor does not have to be public.
+ *
+ * &lt;p&gt;Fields are injected right after construction of a bean, before any
+ * config methods are invoked. Such a config field does not have to be public.
+ *
+ * &lt;p&gt;Config methods may have an arbitrary name and any number of arguments; each of
+ * those arguments will be autowired with a matching bean in the Spring container.
+ * Bean property setter methods are effectively just a special case of such a
+ * general config method. Config methods do not have to be public.
+ *
+ * &lt;p&gt;Note: A default AutowiredAnnotationBeanPostProcessor will be registered
+ * by the &quot;context:annotation-config&quot; and &quot;context:component-scan&quot; XML tags.
+ * Remove or turn off the default annotation configuration there if you intend
+ * to specify a custom AutowiredAnnotationBeanPostProcessor bean definition.
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Annotation injection will be performed &lt;i&gt;before&lt;/i&gt; XML injection;
+ * thus the latter configuration will override the former for properties wired through
+ * both approaches.
+ *
+ * &lt;p&gt;In addition to regular injection points as discussed above, this post-processor
+ * also handles Spring's {@link Lookup @Lookup} annotation which identifies lookup
+ * methods to be replaced by the container at runtime. This is essentially a type-safe
+ * version of {@code getBean(Class, args)} and {@code getBean(String, args)},
+ * See {@link Lookup @Lookup's javadoc} for details.
+ *
+ * @author Juergen Hoeller
+ * @author Mark Fisher
+ * @author Stephane Nicoll
+ * @author Sebastien Deleuze
+ * @since 2.5
+ * @see #setAutowiredAnnotationType
+ * @see Autowired
+ * @see Value
+ */
+public class AutowiredAnnotationBeanPostProcessor extends InstantiationAwareBeanPostProcessorAdapter
+		implements MergedBeanDefinitionPostProcessor, PriorityOrdered, BeanFactoryAware {
+
+<span class="fc" id="L124">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L126">	private final Set&lt;Class&lt;? extends Annotation&gt;&gt; autowiredAnnotationTypes = new LinkedHashSet&lt;&gt;(4);</span>
+
+<span class="fc" id="L128">	private String requiredParameterName = &quot;required&quot;;</span>
+
+<span class="fc" id="L130">	private boolean requiredParameterValue = true;</span>
+
+<span class="fc" id="L132">	private int order = Ordered.LOWEST_PRECEDENCE - 2;</span>
+
+	@Nullable
+	private ConfigurableListableBeanFactory beanFactory;
+
+<span class="fc" id="L137">	private final Set&lt;String&gt; lookupMethodsChecked = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(256));</span>
+
+<span class="fc" id="L139">	private final Map&lt;Class&lt;?&gt;, Constructor&lt;?&gt;[]&gt; candidateConstructorsCache = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+<span class="fc" id="L141">	private final Map&lt;String, InjectionMetadata&gt; injectionMetadataCache = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+
+	/**
+	 * Create a new AutowiredAnnotationBeanPostProcessor
+	 * for Spring's standard {@link Autowired} annotation.
+	 * &lt;p&gt;Also supports JSR-330's {@link javax.inject.Inject} annotation, if available.
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L150">	public AutowiredAnnotationBeanPostProcessor() {</span>
+<span class="fc" id="L151">		this.autowiredAnnotationTypes.add(Autowired.class);</span>
+<span class="fc" id="L152">		this.autowiredAnnotationTypes.add(Value.class);</span>
+		try {
+<span class="fc" id="L154">			this.autowiredAnnotationTypes.add((Class&lt;? extends Annotation&gt;)</span>
+<span class="fc" id="L155">					ClassUtils.forName(&quot;javax.inject.Inject&quot;, AutowiredAnnotationBeanPostProcessor.class.getClassLoader()));</span>
+<span class="fc" id="L156">			logger.trace(&quot;JSR-330 'javax.inject.Inject' annotation found and supported for autowiring&quot;);</span>
+		}
+<span class="nc" id="L158">		catch (ClassNotFoundException ex) {</span>
+			// JSR-330 API not available - simply skip.
+<span class="fc" id="L160">		}</span>
+<span class="fc" id="L161">	}</span>
+
+
+	/**
+	 * Set the 'autowired' annotation type, to be used on constructors, fields,
+	 * setter methods and arbitrary config methods.
+	 * &lt;p&gt;The default autowired annotation type is the Spring-provided {@link Autowired}
+	 * annotation, as well as {@link Value}.
+	 * &lt;p&gt;This setter property exists so that developers can provide their own
+	 * (non-Spring-specific) annotation type to indicate that a member is supposed
+	 * to be autowired.
+	 */
+	public void setAutowiredAnnotationType(Class&lt;? extends Annotation&gt; autowiredAnnotationType) {
+<span class="fc" id="L174">		Assert.notNull(autowiredAnnotationType, &quot;'autowiredAnnotationType' must not be null&quot;);</span>
+<span class="fc" id="L175">		this.autowiredAnnotationTypes.clear();</span>
+<span class="fc" id="L176">		this.autowiredAnnotationTypes.add(autowiredAnnotationType);</span>
+<span class="fc" id="L177">	}</span>
+
+	/**
+	 * Set the 'autowired' annotation types, to be used on constructors, fields,
+	 * setter methods and arbitrary config methods.
+	 * &lt;p&gt;The default autowired annotation type is the Spring-provided {@link Autowired}
+	 * annotation, as well as {@link Value}.
+	 * &lt;p&gt;This setter property exists so that developers can provide their own
+	 * (non-Spring-specific) annotation types to indicate that a member is supposed
+	 * to be autowired.
+	 */
+	public void setAutowiredAnnotationTypes(Set&lt;Class&lt;? extends Annotation&gt;&gt; autowiredAnnotationTypes) {
+<span class="nc" id="L189">		Assert.notEmpty(autowiredAnnotationTypes, &quot;'autowiredAnnotationTypes' must not be empty&quot;);</span>
+<span class="nc" id="L190">		this.autowiredAnnotationTypes.clear();</span>
+<span class="nc" id="L191">		this.autowiredAnnotationTypes.addAll(autowiredAnnotationTypes);</span>
+<span class="nc" id="L192">	}</span>
+
+	/**
+	 * Set the name of a parameter of the annotation that specifies whether it is required.
+	 * @see #setRequiredParameterValue(boolean)
+	 */
+	public void setRequiredParameterName(String requiredParameterName) {
+<span class="fc" id="L199">		this.requiredParameterName = requiredParameterName;</span>
+<span class="fc" id="L200">	}</span>
+
+	/**
+	 * Set the boolean value that marks a dependency as required
+	 * &lt;p&gt;For example if using 'required=true' (the default), this value should be
+	 * {@code true}; but if using 'optional=false', this value should be {@code false}.
+	 * @see #setRequiredParameterName(String)
+	 */
+	public void setRequiredParameterValue(boolean requiredParameterValue) {
+<span class="fc" id="L209">		this.requiredParameterValue = requiredParameterValue;</span>
+<span class="fc" id="L210">	}</span>
+
+	public void setOrder(int order) {
+<span class="nc" id="L213">		this.order = order;</span>
+<span class="nc" id="L214">	}</span>
+
+	@Override
+	public int getOrder() {
+<span class="nc" id="L218">		return this.order;</span>
+	}
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">		if (!(beanFactory instanceof ConfigurableListableBeanFactory)) {</span>
+<span class="nc" id="L224">			throw new IllegalArgumentException(</span>
+					&quot;AutowiredAnnotationBeanPostProcessor requires a ConfigurableListableBeanFactory: &quot; + beanFactory);
+		}
+<span class="fc" id="L227">		this.beanFactory = (ConfigurableListableBeanFactory) beanFactory;</span>
+<span class="fc" id="L228">	}</span>
+
+
+	@Override
+	public void postProcessMergedBeanDefinition(RootBeanDefinition beanDefinition, Class&lt;?&gt; beanType, String beanName) {
+<span class="fc" id="L233">		InjectionMetadata metadata = findAutowiringMetadata(beanName, beanType, null);</span>
+<span class="fc" id="L234">		metadata.checkConfigMembers(beanDefinition);</span>
+<span class="fc" id="L235">	}</span>
+
+	@Override
+	public void resetBeanDefinition(String beanName) {
+<span class="nc" id="L239">		this.lookupMethodsChecked.remove(beanName);</span>
+<span class="nc" id="L240">		this.injectionMetadataCache.remove(beanName);</span>
+<span class="nc" id="L241">	}</span>
+
+	@Override
+	@Nullable
+	public Constructor&lt;?&gt;[] determineCandidateConstructors(Class&lt;?&gt; beanClass, final String beanName)
+			throws BeanCreationException {
+
+		// Let's check for lookup methods here..
+<span class="fc bfc" id="L249" title="All 2 branches covered.">		if (!this.lookupMethodsChecked.contains(beanName)) {</span>
+<span class="fc bfc" id="L250" title="All 2 branches covered.">			if (AnnotationUtils.isCandidateClass(beanClass, Lookup.class)) {</span>
+				try {
+<span class="fc" id="L252">					Class&lt;?&gt; targetClass = beanClass;</span>
+					do {
+<span class="fc" id="L254">						ReflectionUtils.doWithLocalMethods(targetClass, method -&gt; {</span>
+<span class="fc" id="L255">							Lookup lookup = method.getAnnotation(Lookup.class);</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">							if (lookup != null) {</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">								Assert.state(this.beanFactory != null, &quot;No BeanFactory available&quot;);</span>
+<span class="fc" id="L258">								LookupOverride override = new LookupOverride(method, lookup.value());</span>
+								try {
+<span class="fc" id="L260">									RootBeanDefinition mbd = (RootBeanDefinition) this.beanFactory.getMergedBeanDefinition(beanName);</span>
+<span class="fc" id="L261">									mbd.getMethodOverrides().addOverride(override);</span>
+								}
+<span class="nc" id="L263">								catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="nc" id="L264">									throw new BeanCreationException(beanName,</span>
+											&quot;Cannot apply @Lookup to beans without corresponding bean definition&quot;);
+<span class="fc" id="L266">								}</span>
+							}
+<span class="fc" id="L268">						});</span>
+<span class="fc" id="L269">						targetClass = targetClass.getSuperclass();</span>
+					}
+<span class="pc bpc" id="L271" title="1 of 4 branches missed.">					while (targetClass != null &amp;&amp; targetClass != Object.class);</span>
+
+				}
+<span class="nc" id="L274">				catch (IllegalStateException ex) {</span>
+<span class="nc" id="L275">					throw new BeanCreationException(beanName, &quot;Lookup method resolution failed&quot;, ex);</span>
+<span class="fc" id="L276">				}</span>
+			}
+<span class="fc" id="L278">			this.lookupMethodsChecked.add(beanName);</span>
+		}
+
+		// Quick check on the concurrent map first, with minimal locking.
+<span class="fc" id="L282">		Constructor&lt;?&gt;[] candidateConstructors = this.candidateConstructorsCache.get(beanClass);</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">		if (candidateConstructors == null) {</span>
+			// Fully synchronized resolution now...
+<span class="fc" id="L285">			synchronized (this.candidateConstructorsCache) {</span>
+<span class="fc" id="L286">				candidateConstructors = this.candidateConstructorsCache.get(beanClass);</span>
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">				if (candidateConstructors == null) {</span>
+					Constructor&lt;?&gt;[] rawCandidates;
+					try {
+<span class="fc" id="L290">						rawCandidates = beanClass.getDeclaredConstructors();</span>
+					}
+<span class="nc" id="L292">					catch (Throwable ex) {</span>
+<span class="nc" id="L293">						throw new BeanCreationException(beanName,</span>
+<span class="nc" id="L294">								&quot;Resolution of declared constructors on bean Class [&quot; + beanClass.getName() +</span>
+<span class="nc" id="L295">								&quot;] from ClassLoader [&quot; + beanClass.getClassLoader() + &quot;] failed&quot;, ex);</span>
+<span class="fc" id="L296">					}</span>
+<span class="fc" id="L297">					List&lt;Constructor&lt;?&gt;&gt; candidates = new ArrayList&lt;&gt;(rawCandidates.length);</span>
+<span class="fc" id="L298">					Constructor&lt;?&gt; requiredConstructor = null;</span>
+<span class="fc" id="L299">					Constructor&lt;?&gt; defaultConstructor = null;</span>
+<span class="fc" id="L300">					Constructor&lt;?&gt; primaryConstructor = BeanUtils.findPrimaryConstructor(beanClass);</span>
+<span class="fc" id="L301">					int nonSyntheticConstructors = 0;</span>
+<span class="fc bfc" id="L302" title="All 2 branches covered.">					for (Constructor&lt;?&gt; candidate : rawCandidates) {</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">						if (!candidate.isSynthetic()) {</span>
+<span class="fc" id="L304">							nonSyntheticConstructors++;</span>
+						}
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">						else if (primaryConstructor != null) {</span>
+<span class="fc" id="L307">							continue;</span>
+						}
+<span class="fc" id="L309">						MergedAnnotation&lt;?&gt; ann = findAutowiredAnnotation(candidate);</span>
+<span class="fc bfc" id="L310" title="All 2 branches covered.">						if (ann == null) {</span>
+<span class="fc" id="L311">							Class&lt;?&gt; userClass = ClassUtils.getUserClass(beanClass);</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">							if (userClass != beanClass) {</span>
+								try {
+<span class="nc" id="L314">									Constructor&lt;?&gt; superCtor =</span>
+<span class="nc" id="L315">											userClass.getDeclaredConstructor(candidate.getParameterTypes());</span>
+<span class="nc" id="L316">									ann = findAutowiredAnnotation(superCtor);</span>
+								}
+<span class="nc" id="L318">								catch (NoSuchMethodException ex) {</span>
+									// Simply proceed, no equivalent superclass constructor found...
+<span class="nc" id="L320">								}</span>
+							}
+						}
+<span class="fc bfc" id="L323" title="All 2 branches covered.">						if (ann != null) {</span>
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">							if (requiredConstructor != null) {</span>
+<span class="nc" id="L325">								throw new BeanCreationException(beanName,</span>
+										&quot;Invalid autowire-marked constructor: &quot; + candidate +
+										&quot;. Found constructor with 'required' Autowired annotation already: &quot; +
+										requiredConstructor);
+							}
+<span class="fc" id="L330">							boolean required = determineRequiredStatus(ann);</span>
+<span class="fc bfc" id="L331" title="All 2 branches covered.">							if (required) {</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">								if (!candidates.isEmpty()) {</span>
+<span class="nc" id="L333">									throw new BeanCreationException(beanName,</span>
+											&quot;Invalid autowire-marked constructors: &quot; + candidates +
+											&quot;. Found constructor with 'required' Autowired annotation: &quot; +
+											candidate);
+								}
+<span class="fc" id="L338">								requiredConstructor = candidate;</span>
+							}
+<span class="fc" id="L340">							candidates.add(candidate);</span>
+<span class="fc" id="L341">						}</span>
+<span class="fc bfc" id="L342" title="All 2 branches covered.">						else if (candidate.getParameterCount() == 0) {</span>
+<span class="fc" id="L343">							defaultConstructor = candidate;</span>
+						}
+					}
+<span class="fc bfc" id="L346" title="All 2 branches covered.">					if (!candidates.isEmpty()) {</span>
+						// Add default constructor to list of optional constructors, as fallback.
+<span class="fc bfc" id="L348" title="All 2 branches covered.">						if (requiredConstructor == null) {</span>
+<span class="fc bfc" id="L349" title="All 2 branches covered.">							if (defaultConstructor != null) {</span>
+<span class="fc" id="L350">								candidates.add(defaultConstructor);</span>
+							}
+<span class="pc bpc" id="L352" title="2 of 4 branches missed.">							else if (candidates.size() == 1 &amp;&amp; logger.isInfoEnabled()) {</span>
+<span class="nc" id="L353">								logger.info(&quot;Inconsistent constructor declaration on bean with name '&quot; + beanName +</span>
+										&quot;': single autowire-marked constructor flagged as optional - &quot; +
+										&quot;this constructor is effectively required since there is no &quot; +
+<span class="nc" id="L356">										&quot;default constructor to fall back to: &quot; + candidates.get(0));</span>
+							}
+						}
+<span class="fc" id="L359">						candidateConstructors = candidates.toArray(new Constructor&lt;?&gt;[0]);</span>
+					}
+<span class="fc bfc" id="L361" title="All 4 branches covered.">					else if (rawCandidates.length == 1 &amp;&amp; rawCandidates[0].getParameterCount() &gt; 0) {</span>
+<span class="fc" id="L362">						candidateConstructors = new Constructor&lt;?&gt;[] {rawCandidates[0]};</span>
+					}
+<span class="pc bpc" id="L364" title="1 of 6 branches missed.">					else if (nonSyntheticConstructors == 2 &amp;&amp; primaryConstructor != null &amp;&amp;</span>
+<span class="fc bfc" id="L365" title="All 2 branches covered.">							defaultConstructor != null &amp;&amp; !primaryConstructor.equals(defaultConstructor)) {</span>
+<span class="fc" id="L366">						candidateConstructors = new Constructor&lt;?&gt;[] {primaryConstructor, defaultConstructor};</span>
+					}
+<span class="fc bfc" id="L368" title="All 4 branches covered.">					else if (nonSyntheticConstructors == 1 &amp;&amp; primaryConstructor != null) {</span>
+<span class="fc" id="L369">						candidateConstructors = new Constructor&lt;?&gt;[] {primaryConstructor};</span>
+					}
+					else {
+<span class="fc" id="L372">						candidateConstructors = new Constructor&lt;?&gt;[0];</span>
+					}
+<span class="fc" id="L374">					this.candidateConstructorsCache.put(beanClass, candidateConstructors);</span>
+				}
+<span class="fc" id="L376">			}</span>
+		}
+<span class="fc bfc" id="L378" title="All 2 branches covered.">		return (candidateConstructors.length &gt; 0 ? candidateConstructors : null);</span>
+	}
+
+	@Override
+	public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) {
+<span class="fc" id="L383">		InjectionMetadata metadata = findAutowiringMetadata(beanName, bean.getClass(), pvs);</span>
+		try {
+<span class="fc" id="L385">			metadata.inject(bean, beanName, pvs);</span>
+		}
+<span class="fc" id="L387">		catch (BeanCreationException ex) {</span>
+<span class="fc" id="L388">			throw ex;</span>
+		}
+<span class="nc" id="L390">		catch (Throwable ex) {</span>
+<span class="nc" id="L391">			throw new BeanCreationException(beanName, &quot;Injection of autowired dependencies failed&quot;, ex);</span>
+<span class="fc" id="L392">		}</span>
+<span class="fc" id="L393">		return pvs;</span>
+	}
+
+	@Deprecated
+	@Override
+	public PropertyValues postProcessPropertyValues(
+			PropertyValues pvs, PropertyDescriptor[] pds, Object bean, String beanName) {
+
+<span class="nc" id="L401">		return postProcessProperties(pvs, bean, beanName);</span>
+	}
+
+	/**
+	 * 'Native' processing method for direct calls with an arbitrary target instance,
+	 * resolving all of its fields and methods which are annotated with {@code @Autowired}.
+	 * @param bean the target instance to process
+	 * @throws BeanCreationException if autowiring failed
+	 */
+	public void processInjection(Object bean) throws BeanCreationException {
+<span class="nc" id="L411">		Class&lt;?&gt; clazz = bean.getClass();</span>
+<span class="nc" id="L412">		InjectionMetadata metadata = findAutowiringMetadata(clazz.getName(), clazz, null);</span>
+		try {
+<span class="nc" id="L414">			metadata.inject(bean, null, null);</span>
+		}
+<span class="nc" id="L416">		catch (BeanCreationException ex) {</span>
+<span class="nc" id="L417">			throw ex;</span>
+		}
+<span class="nc" id="L419">		catch (Throwable ex) {</span>
+<span class="nc" id="L420">			throw new BeanCreationException(</span>
+					&quot;Injection of autowired dependencies failed for class [&quot; + clazz + &quot;]&quot;, ex);
+<span class="nc" id="L422">		}</span>
+<span class="nc" id="L423">	}</span>
+
+
+	private InjectionMetadata findAutowiringMetadata(String beanName, Class&lt;?&gt; clazz, @Nullable PropertyValues pvs) {
+		// Fall back to class name as cache key, for backwards compatibility with custom callers.
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">		String cacheKey = (StringUtils.hasLength(beanName) ? beanName : clazz.getName());</span>
+		// Quick check on the concurrent map first, with minimal locking.
+<span class="fc" id="L430">		InjectionMetadata metadata = this.injectionMetadataCache.get(cacheKey);</span>
+<span class="fc bfc" id="L431" title="All 2 branches covered.">		if (InjectionMetadata.needsRefresh(metadata, clazz)) {</span>
+<span class="fc" id="L432">			synchronized (this.injectionMetadataCache) {</span>
+<span class="fc" id="L433">				metadata = this.injectionMetadataCache.get(cacheKey);</span>
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">				if (InjectionMetadata.needsRefresh(metadata, clazz)) {</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">					if (metadata != null) {</span>
+<span class="fc" id="L436">						metadata.clear(pvs);</span>
+					}
+<span class="fc" id="L438">					metadata = buildAutowiringMetadata(clazz);</span>
+<span class="fc" id="L439">					this.injectionMetadataCache.put(cacheKey, metadata);</span>
+				}
+<span class="fc" id="L441">			}</span>
+		}
+<span class="fc" id="L443">		return metadata;</span>
+	}
+
+	private InjectionMetadata buildAutowiringMetadata(final Class&lt;?&gt; clazz) {
+<span class="fc bfc" id="L447" title="All 2 branches covered.">		if (!AnnotationUtils.isCandidateClass(clazz, this.autowiredAnnotationTypes)) {</span>
+<span class="fc" id="L448">			return InjectionMetadata.EMPTY;</span>
+		}
+
+<span class="fc" id="L451">		List&lt;InjectionMetadata.InjectedElement&gt; elements = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L452">		Class&lt;?&gt; targetClass = clazz;</span>
+
+		do {
+<span class="fc" id="L455">			final List&lt;InjectionMetadata.InjectedElement&gt; currElements = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L457">			ReflectionUtils.doWithLocalFields(targetClass, field -&gt; {</span>
+<span class="fc" id="L458">				MergedAnnotation&lt;?&gt; ann = findAutowiredAnnotation(field);</span>
+<span class="fc bfc" id="L459" title="All 2 branches covered.">				if (ann != null) {</span>
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">					if (Modifier.isStatic(field.getModifiers())) {</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">						if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L462">							logger.info(&quot;Autowired annotation is not supported on static fields: &quot; + field);</span>
+						}
+<span class="nc" id="L464">						return;</span>
+					}
+<span class="fc" id="L466">					boolean required = determineRequiredStatus(ann);</span>
+<span class="fc" id="L467">					currElements.add(new AutowiredFieldElement(field, required));</span>
+				}
+<span class="fc" id="L469">			});</span>
+
+<span class="fc" id="L471">			ReflectionUtils.doWithLocalMethods(targetClass, method -&gt; {</span>
+<span class="fc" id="L472">				Method bridgedMethod = BridgeMethodResolver.findBridgedMethod(method);</span>
+<span class="fc bfc" id="L473" title="All 2 branches covered.">				if (!BridgeMethodResolver.isVisibilityBridgeMethodPair(method, bridgedMethod)) {</span>
+<span class="fc" id="L474">					return;</span>
+				}
+<span class="fc" id="L476">				MergedAnnotation&lt;?&gt; ann = findAutowiredAnnotation(bridgedMethod);</span>
+<span class="fc bfc" id="L477" title="All 4 branches covered.">				if (ann != null &amp;&amp; method.equals(ClassUtils.getMostSpecificMethod(method, clazz))) {</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">					if (Modifier.isStatic(method.getModifiers())) {</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">						if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L480">							logger.info(&quot;Autowired annotation is not supported on static methods: &quot; + method);</span>
+						}
+<span class="nc" id="L482">						return;</span>
+					}
+<span class="pc bpc" id="L484" title="1 of 2 branches missed.">					if (method.getParameterCount() == 0) {</span>
+<span class="nc bnc" id="L485" title="All 2 branches missed.">						if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L486">							logger.info(&quot;Autowired annotation should only be used on methods with parameters: &quot; +</span>
+									method);
+						}
+					}
+<span class="fc" id="L490">					boolean required = determineRequiredStatus(ann);</span>
+<span class="fc" id="L491">					PropertyDescriptor pd = BeanUtils.findPropertyForMethod(bridgedMethod, clazz);</span>
+<span class="fc" id="L492">					currElements.add(new AutowiredMethodElement(method, required, pd));</span>
+				}
+<span class="fc" id="L494">			});</span>
+
+<span class="fc" id="L496">			elements.addAll(0, currElements);</span>
+<span class="fc" id="L497">			targetClass = targetClass.getSuperclass();</span>
+		}
+<span class="pc bpc" id="L499" title="1 of 4 branches missed.">		while (targetClass != null &amp;&amp; targetClass != Object.class);</span>
+
+<span class="fc" id="L501">		return InjectionMetadata.forElements(elements, clazz);</span>
+	}
+
+	@Nullable
+	private MergedAnnotation&lt;?&gt; findAutowiredAnnotation(AccessibleObject ao) {
+<span class="fc" id="L506">		MergedAnnotations annotations = MergedAnnotations.from(ao, SearchStrategy.INHERITED_ANNOTATIONS);</span>
+<span class="fc bfc" id="L507" title="All 2 branches covered.">		for (Class&lt;? extends Annotation&gt; type : this.autowiredAnnotationTypes) {</span>
+<span class="fc" id="L508">			MergedAnnotation&lt;?&gt; annotation = annotations.get(type);</span>
+<span class="fc bfc" id="L509" title="All 2 branches covered.">			if (annotation.isPresent()) {</span>
+<span class="fc" id="L510">				return annotation;</span>
+			}
+<span class="fc" id="L512">		}</span>
+<span class="fc" id="L513">		return null;</span>
+	}
+
+	/**
+	 * Determine if the annotated field or method requires its dependency.
+	 * &lt;p&gt;A 'required' dependency means that autowiring should fail when no beans
+	 * are found. Otherwise, the autowiring process will simply bypass the field
+	 * or method when no beans are found.
+	 * @param ann the Autowired annotation
+	 * @return whether the annotation indicates that a dependency is required
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	protected boolean determineRequiredStatus(MergedAnnotation&lt;?&gt; ann) {
+<span class="fc" id="L526">		return determineRequiredStatus((AnnotationAttributes)</span>
+<span class="fc" id="L527">				ann.asMap(mergedAnnotation -&gt; new AnnotationAttributes(mergedAnnotation.getType())));</span>
+	}
+
+	/**
+	 * Determine if the annotated field or method requires its dependency.
+	 * &lt;p&gt;A 'required' dependency means that autowiring should fail when no beans
+	 * are found. Otherwise, the autowiring process will simply bypass the field
+	 * or method when no beans are found.
+	 * @param ann the Autowired annotation
+	 * @return whether the annotation indicates that a dependency is required
+	 * @deprecated since 5.2, in favor of {@link #determineRequiredStatus(MergedAnnotation)}
+	 */
+	@Deprecated
+	protected boolean determineRequiredStatus(AnnotationAttributes ann) {
+<span class="fc bfc" id="L541" title="All 2 branches covered.">		return (!ann.containsKey(this.requiredParameterName) ||</span>
+<span class="fc bfc" id="L542" title="All 2 branches covered.">				this.requiredParameterValue == ann.getBoolean(this.requiredParameterName));</span>
+	}
+
+	/**
+	 * Obtain all beans of the given type as autowire candidates.
+	 * @param type the type of the bean
+	 * @return the target beans, or an empty Collection if no bean of this type is found
+	 * @throws BeansException if bean retrieval failed
+	 */
+	protected &lt;T&gt; Map&lt;String, T&gt; findAutowireCandidates(Class&lt;T&gt; type) throws BeansException {
+<span class="nc bnc" id="L552" title="All 2 branches missed.">		if (this.beanFactory == null) {</span>
+<span class="nc" id="L553">			throw new IllegalStateException(&quot;No BeanFactory configured - &quot; +</span>
+					&quot;override the getBeanOfType method or specify the 'beanFactory' property&quot;);
+		}
+<span class="nc" id="L556">		return BeanFactoryUtils.beansOfTypeIncludingAncestors(this.beanFactory, type);</span>
+	}
+
+	/**
+	 * Register the specified bean as dependent on the autowired beans.
+	 */
+	private void registerDependentBeans(@Nullable String beanName, Set&lt;String&gt; autowiredBeanNames) {
+<span class="pc bpc" id="L563" title="1 of 2 branches missed.">		if (beanName != null) {</span>
+<span class="fc bfc" id="L564" title="All 2 branches covered.">			for (String autowiredBeanName : autowiredBeanNames) {</span>
+<span class="pc bpc" id="L565" title="1 of 4 branches missed.">				if (this.beanFactory != null &amp;&amp; this.beanFactory.containsBean(autowiredBeanName)) {</span>
+<span class="fc" id="L566">					this.beanFactory.registerDependentBean(autowiredBeanName, beanName);</span>
+				}
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L569">					logger.trace(&quot;Autowiring by type from bean name '&quot; + beanName +</span>
+							&quot;' to bean named '&quot; + autowiredBeanName + &quot;'&quot;);
+				}
+<span class="fc" id="L572">			}</span>
+		}
+<span class="fc" id="L574">	}</span>
+
+	/**
+	 * Resolve the specified cached method argument or field value.
+	 */
+	@Nullable
+	private Object resolvedCachedArgument(@Nullable String beanName, @Nullable Object cachedArgument) {
+<span class="fc bfc" id="L581" title="All 2 branches covered.">		if (cachedArgument instanceof DependencyDescriptor) {</span>
+<span class="fc" id="L582">			DependencyDescriptor descriptor = (DependencyDescriptor) cachedArgument;</span>
+<span class="pc bpc" id="L583" title="1 of 2 branches missed.">			Assert.state(this.beanFactory != null, &quot;No BeanFactory available&quot;);</span>
+<span class="fc" id="L584">			return this.beanFactory.resolveDependency(descriptor, beanName, null, null);</span>
+		}
+		else {
+<span class="fc" id="L587">			return cachedArgument;</span>
+		}
+	}
+
+
+	/**
+	 * Class representing injection information about an annotated field.
+	 */
+	private class AutowiredFieldElement extends InjectionMetadata.InjectedElement {
+
+		private final boolean required;
+
+<span class="fc" id="L599">		private volatile boolean cached = false;</span>
+
+		@Nullable
+		private volatile Object cachedFieldValue;
+
+<span class="fc" id="L604">		public AutowiredFieldElement(Field field, boolean required) {</span>
+<span class="fc" id="L605">			super(field, null);</span>
+<span class="fc" id="L606">			this.required = required;</span>
+<span class="fc" id="L607">		}</span>
+
+		@Override
+		protected void inject(Object bean, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
+<span class="fc" id="L611">			Field field = (Field) this.member;</span>
+			Object value;
+<span class="fc bfc" id="L613" title="All 2 branches covered.">			if (this.cached) {</span>
+<span class="fc" id="L614">				value = resolvedCachedArgument(beanName, this.cachedFieldValue);</span>
+			}
+			else {
+<span class="fc" id="L617">				DependencyDescriptor desc = new DependencyDescriptor(field, this.required);</span>
+<span class="fc" id="L618">				desc.setContainingClass(bean.getClass());</span>
+<span class="fc" id="L619">				Set&lt;String&gt; autowiredBeanNames = new LinkedHashSet&lt;&gt;(1);</span>
+<span class="pc bpc" id="L620" title="1 of 2 branches missed.">				Assert.state(beanFactory != null, &quot;No BeanFactory available&quot;);</span>
+<span class="fc" id="L621">				TypeConverter typeConverter = beanFactory.getTypeConverter();</span>
+				try {
+<span class="fc" id="L623">					value = beanFactory.resolveDependency(desc, beanName, autowiredBeanNames, typeConverter);</span>
+				}
+<span class="fc" id="L625">				catch (BeansException ex) {</span>
+<span class="fc" id="L626">					throw new UnsatisfiedDependencyException(null, beanName, new InjectionPoint(field), ex);</span>
+<span class="fc" id="L627">				}</span>
+<span class="fc" id="L628">				synchronized (this) {</span>
+<span class="pc bpc" id="L629" title="1 of 2 branches missed.">					if (!this.cached) {</span>
+<span class="fc bfc" id="L630" title="All 4 branches covered.">						if (value != null || this.required) {</span>
+<span class="fc" id="L631">							this.cachedFieldValue = desc;</span>
+<span class="fc" id="L632">							registerDependentBeans(beanName, autowiredBeanNames);</span>
+<span class="fc bfc" id="L633" title="All 2 branches covered.">							if (autowiredBeanNames.size() == 1) {</span>
+<span class="fc" id="L634">								String autowiredBeanName = autowiredBeanNames.iterator().next();</span>
+<span class="pc bpc" id="L635" title="1 of 2 branches missed.">								if (beanFactory.containsBean(autowiredBeanName) &amp;&amp;</span>
+<span class="fc bfc" id="L636" title="All 2 branches covered.">										beanFactory.isTypeMatch(autowiredBeanName, field.getType())) {</span>
+<span class="fc" id="L637">									this.cachedFieldValue = new ShortcutDependencyDescriptor(</span>
+<span class="fc" id="L638">											desc, autowiredBeanName, field.getType());</span>
+								}
+<span class="fc" id="L640">							}</span>
+						}
+						else {
+<span class="fc" id="L643">							this.cachedFieldValue = null;</span>
+						}
+<span class="fc" id="L645">						this.cached = true;</span>
+					}
+<span class="fc" id="L647">				}</span>
+			}
+<span class="fc bfc" id="L649" title="All 2 branches covered.">			if (value != null) {</span>
+<span class="fc" id="L650">				ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L651">				field.set(bean, value);</span>
+			}
+<span class="fc" id="L653">		}</span>
+	}
+
+
+	/**
+	 * Class representing injection information about an annotated method.
+	 */
+	private class AutowiredMethodElement extends InjectionMetadata.InjectedElement {
+
+		private final boolean required;
+
+<span class="fc" id="L664">		private volatile boolean cached = false;</span>
+
+		@Nullable
+		private volatile Object[] cachedMethodArguments;
+
+<span class="fc" id="L669">		public AutowiredMethodElement(Method method, boolean required, @Nullable PropertyDescriptor pd) {</span>
+<span class="fc" id="L670">			super(method, pd);</span>
+<span class="fc" id="L671">			this.required = required;</span>
+<span class="fc" id="L672">		}</span>
+
+		@Override
+		protected void inject(Object bean, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
+<span class="fc bfc" id="L676" title="All 2 branches covered.">			if (checkPropertySkipping(pvs)) {</span>
+<span class="fc" id="L677">				return;</span>
+			}
+<span class="fc" id="L679">			Method method = (Method) this.member;</span>
+			Object[] arguments;
+<span class="fc bfc" id="L681" title="All 2 branches covered.">			if (this.cached) {</span>
+				// Shortcut for avoiding synchronization...
+<span class="fc" id="L683">				arguments = resolveCachedArguments(beanName);</span>
+			}
+			else {
+<span class="fc" id="L686">				Class&lt;?&gt;[] paramTypes = method.getParameterTypes();</span>
+<span class="fc" id="L687">				arguments = new Object[paramTypes.length];</span>
+<span class="fc" id="L688">				DependencyDescriptor[] descriptors = new DependencyDescriptor[paramTypes.length];</span>
+<span class="fc" id="L689">				Set&lt;String&gt; autowiredBeans = new LinkedHashSet&lt;&gt;(paramTypes.length);</span>
+<span class="pc bpc" id="L690" title="1 of 2 branches missed.">				Assert.state(beanFactory != null, &quot;No BeanFactory available&quot;);</span>
+<span class="fc" id="L691">				TypeConverter typeConverter = beanFactory.getTypeConverter();</span>
+<span class="fc bfc" id="L692" title="All 2 branches covered.">				for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="fc" id="L693">					MethodParameter methodParam = new MethodParameter(method, i);</span>
+<span class="fc" id="L694">					DependencyDescriptor currDesc = new DependencyDescriptor(methodParam, this.required);</span>
+<span class="fc" id="L695">					currDesc.setContainingClass(bean.getClass());</span>
+<span class="fc" id="L696">					descriptors[i] = currDesc;</span>
+					try {
+<span class="fc" id="L698">						Object arg = beanFactory.resolveDependency(currDesc, beanName, autowiredBeans, typeConverter);</span>
+<span class="fc bfc" id="L699" title="All 4 branches covered.">						if (arg == null &amp;&amp; !this.required) {</span>
+<span class="fc" id="L700">							arguments = null;</span>
+<span class="fc" id="L701">							break;</span>
+						}
+<span class="fc" id="L703">						arguments[i] = arg;</span>
+					}
+<span class="fc" id="L705">					catch (BeansException ex) {</span>
+<span class="fc" id="L706">						throw new UnsatisfiedDependencyException(null, beanName, new InjectionPoint(methodParam), ex);</span>
+<span class="fc" id="L707">					}</span>
+				}
+<span class="fc" id="L709">				synchronized (this) {</span>
+<span class="pc bpc" id="L710" title="1 of 2 branches missed.">					if (!this.cached) {</span>
+<span class="fc bfc" id="L711" title="All 2 branches covered.">						if (arguments != null) {</span>
+<span class="fc" id="L712">							Object[] cachedMethodArguments = new Object[paramTypes.length];</span>
+<span class="fc" id="L713">							System.arraycopy(descriptors, 0, cachedMethodArguments, 0, arguments.length);</span>
+<span class="fc" id="L714">							registerDependentBeans(beanName, autowiredBeans);</span>
+<span class="fc bfc" id="L715" title="All 2 branches covered.">							if (autowiredBeans.size() == paramTypes.length) {</span>
+<span class="fc" id="L716">								Iterator&lt;String&gt; it = autowiredBeans.iterator();</span>
+<span class="fc bfc" id="L717" title="All 2 branches covered.">								for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="fc" id="L718">									String autowiredBeanName = it.next();</span>
+<span class="fc bfc" id="L719" title="All 2 branches covered.">									if (beanFactory.containsBean(autowiredBeanName) &amp;&amp;</span>
+<span class="fc bfc" id="L720" title="All 2 branches covered.">											beanFactory.isTypeMatch(autowiredBeanName, paramTypes[i])) {</span>
+<span class="fc" id="L721">										cachedMethodArguments[i] = new ShortcutDependencyDescriptor(</span>
+												descriptors[i], autowiredBeanName, paramTypes[i]);
+									}
+								}
+							}
+<span class="fc" id="L726">							this.cachedMethodArguments = cachedMethodArguments;</span>
+<span class="fc" id="L727">						}</span>
+						else {
+<span class="fc" id="L729">							this.cachedMethodArguments = null;</span>
+						}
+<span class="fc" id="L731">						this.cached = true;</span>
+					}
+<span class="fc" id="L733">				}</span>
+			}
+<span class="fc bfc" id="L735" title="All 2 branches covered.">			if (arguments != null) {</span>
+				try {
+<span class="fc" id="L737">					ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L738">					method.invoke(bean, arguments);</span>
+				}
+<span class="nc" id="L740">				catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L741">					throw ex.getTargetException();</span>
+<span class="fc" id="L742">				}</span>
+			}
+<span class="fc" id="L744">		}</span>
+
+		@Nullable
+		private Object[] resolveCachedArguments(@Nullable String beanName) {
+<span class="fc" id="L748">			Object[] cachedMethodArguments = this.cachedMethodArguments;</span>
+<span class="fc bfc" id="L749" title="All 2 branches covered.">			if (cachedMethodArguments == null) {</span>
+<span class="fc" id="L750">				return null;</span>
+			}
+<span class="fc" id="L752">			Object[] arguments = new Object[cachedMethodArguments.length];</span>
+<span class="fc bfc" id="L753" title="All 2 branches covered.">			for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="fc" id="L754">				arguments[i] = resolvedCachedArgument(beanName, cachedMethodArguments[i]);</span>
+			}
+<span class="fc" id="L756">			return arguments;</span>
+		}
+	}
+
+
+	/**
+	 * DependencyDescriptor variant with a pre-resolved target bean name.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class ShortcutDependencyDescriptor extends DependencyDescriptor {
+
+		private final String shortcut;
+
+		private final Class&lt;?&gt; requiredType;
+
+		public ShortcutDependencyDescriptor(DependencyDescriptor original, String shortcut, Class&lt;?&gt; requiredType) {
+<span class="fc" id="L772">			super(original);</span>
+<span class="fc" id="L773">			this.shortcut = shortcut;</span>
+<span class="fc" id="L774">			this.requiredType = requiredType;</span>
+<span class="fc" id="L775">		}</span>
+
+		@Override
+		public Object resolveShortcut(BeanFactory beanFactory) {
+<span class="fc" id="L779">			return beanFactory.getBean(this.shortcut, this.requiredType);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

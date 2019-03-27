@@ -1,0 +1,2019 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultListableBeanFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">DefaultListableBeanFactory.java</span></div><h1>DefaultListableBeanFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.io.IOException;
+import java.io.NotSerializableException;
+import java.io.ObjectInputStream;
+import java.io.ObjectStreamException;
+import java.io.Serializable;
+import java.lang.annotation.Annotation;
+import java.lang.ref.Reference;
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.IdentityHashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
+import javax.inject.Provider;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanCurrentlyInCreationException;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.BeanNotOfRequiredTypeException;
+import org.springframework.beans.factory.CannotLoadBeanClassException;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.InjectionPoint;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
+import org.springframework.beans.factory.ObjectFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartFactoryBean;
+import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinitionHolder;
+import org.springframework.beans.factory.config.BeanPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.config.NamedBeanHolder;
+import org.springframework.core.OrderComparator;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CompositeIterator;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Spring's default implementation of the {@link ConfigurableListableBeanFactory}
+ * and {@link BeanDefinitionRegistry} interfaces: a full-fledged bean factory
+ * based on bean definition metadata, extensible through post-processors.
+ *
+ * &lt;p&gt;Typical usage is registering all bean definitions first (possibly read
+ * from a bean definition file), before accessing beans. Bean lookup by name
+ * is therefore an inexpensive operation in a local bean definition table,
+ * operating on pre-resolved bean definition metadata objects.
+ *
+ * &lt;p&gt;Note that readers for specific bean definition formats are typically
+ * implemented separately rather than as bean factory subclasses:
+ * see for example {@link PropertiesBeanDefinitionReader} and
+ * {@link org.springframework.beans.factory.xml.XmlBeanDefinitionReader}.
+ *
+ * &lt;p&gt;For an alternative implementation of the
+ * {@link org.springframework.beans.factory.ListableBeanFactory} interface,
+ * have a look at {@link StaticListableBeanFactory}, which manages existing
+ * bean instances rather than creating new ones based on bean definitions.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @author Costin Leau
+ * @author Chris Beams
+ * @author Phillip Webb
+ * @author Stephane Nicoll
+ * @since 16 April 2001
+ * @see #registerBeanDefinition
+ * @see #addBeanPostProcessor
+ * @see #getBean
+ * @see #resolveDependency
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class DefaultListableBeanFactory extends AbstractAutowireCapableBeanFactory
+		implements ConfigurableListableBeanFactory, BeanDefinitionRegistry, Serializable {
+
+	@Nullable
+	private static Class&lt;?&gt; javaxInjectProviderClass;
+
+	static {
+		try {
+<span class="fc" id="L127">			javaxInjectProviderClass =</span>
+<span class="fc" id="L128">					ClassUtils.forName(&quot;javax.inject.Provider&quot;, DefaultListableBeanFactory.class.getClassLoader());</span>
+		}
+<span class="nc" id="L130">		catch (ClassNotFoundException ex) {</span>
+			// JSR-330 API not available - Provider interface simply not supported then.
+<span class="nc" id="L132">			javaxInjectProviderClass = null;</span>
+<span class="fc" id="L133">		}</span>
+	}
+
+
+	/** Map from serialized id to factory instance. */
+<span class="fc" id="L138">	private static final Map&lt;String, Reference&lt;DefaultListableBeanFactory&gt;&gt; serializableFactories =</span>
+			new ConcurrentHashMap&lt;&gt;(8);
+
+	/** Optional id for this factory, for serialization purposes. */
+	@Nullable
+	private String serializationId;
+
+	/** Whether to allow re-registration of a different definition with the same name. */
+<span class="fc" id="L146">	private boolean allowBeanDefinitionOverriding = true;</span>
+
+	/** Whether to allow eager class loading even for lazy-init beans. */
+<span class="fc" id="L149">	private boolean allowEagerClassLoading = true;</span>
+
+	/** Optional OrderComparator for dependency Lists and arrays. */
+	@Nullable
+	private Comparator&lt;Object&gt; dependencyComparator;
+
+	/** Resolver to use for checking if a bean definition is an autowire candidate. */
+<span class="fc" id="L156">	private AutowireCandidateResolver autowireCandidateResolver = new SimpleAutowireCandidateResolver();</span>
+
+	/** Map from dependency type to corresponding autowired value. */
+<span class="fc" id="L159">	private final Map&lt;Class&lt;?&gt;, Object&gt; resolvableDependencies = new ConcurrentHashMap&lt;&gt;(16);</span>
+
+	/** Map of bean definition objects, keyed by bean name. */
+<span class="fc" id="L162">	private final Map&lt;String, BeanDefinition&gt; beanDefinitionMap = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+	/** Map of singleton and non-singleton bean names, keyed by dependency type. */
+<span class="fc" id="L165">	private final Map&lt;Class&lt;?&gt;, String[]&gt; allBeanNamesByType = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+	/** Map of singleton-only bean names, keyed by dependency type. */
+<span class="fc" id="L168">	private final Map&lt;Class&lt;?&gt;, String[]&gt; singletonBeanNamesByType = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+	/** List of bean definition names, in registration order. */
+<span class="fc" id="L171">	private volatile List&lt;String&gt; beanDefinitionNames = new ArrayList&lt;&gt;(256);</span>
+
+	/** List of names of manually registered singletons, in registration order. */
+<span class="fc" id="L174">	private volatile Set&lt;String&gt; manualSingletonNames = new LinkedHashSet&lt;&gt;(16);</span>
+
+	/** Cached array of bean definition names in case of frozen configuration. */
+	@Nullable
+	private volatile String[] frozenBeanDefinitionNames;
+
+	/** Whether bean definition metadata may be cached for all beans. */
+<span class="fc" id="L181">	private volatile boolean configurationFrozen = false;</span>
+
+
+	/**
+	 * Create a new DefaultListableBeanFactory.
+	 */
+	public DefaultListableBeanFactory() {
+<span class="fc" id="L188">		super();</span>
+<span class="fc" id="L189">	}</span>
+
+	/**
+	 * Create a new DefaultListableBeanFactory with the given parent.
+	 * @param parentBeanFactory the parent BeanFactory
+	 */
+	public DefaultListableBeanFactory(@Nullable BeanFactory parentBeanFactory) {
+<span class="fc" id="L196">		super(parentBeanFactory);</span>
+<span class="fc" id="L197">	}</span>
+
+
+	/**
+	 * Specify an id for serialization purposes, allowing this BeanFactory to be
+	 * deserialized from this id back into the BeanFactory object, if needed.
+	 */
+	public void setSerializationId(@Nullable String serializationId) {
+<span class="fc bfc" id="L205" title="All 2 branches covered.">		if (serializationId != null) {</span>
+<span class="fc" id="L206">			serializableFactories.put(serializationId, new WeakReference&lt;&gt;(this));</span>
+		}
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">		else if (this.serializationId != null) {</span>
+<span class="fc" id="L209">			serializableFactories.remove(this.serializationId);</span>
+		}
+<span class="fc" id="L211">		this.serializationId = serializationId;</span>
+<span class="fc" id="L212">	}</span>
+
+	/**
+	 * Return an id for serialization purposes, if specified, allowing this BeanFactory
+	 * to be deserialized from this id back into the BeanFactory object, if needed.
+	 * @since 4.1.2
+	 */
+	@Nullable
+	public String getSerializationId() {
+<span class="nc" id="L221">		return this.serializationId;</span>
+	}
+
+	/**
+	 * Set whether it should be allowed to override bean definitions by registering
+	 * a different definition with the same name, automatically replacing the former.
+	 * If not, an exception will be thrown. This also applies to overriding aliases.
+	 * &lt;p&gt;Default is &quot;true&quot;.
+	 * @see #registerBeanDefinition
+	 */
+	public void setAllowBeanDefinitionOverriding(boolean allowBeanDefinitionOverriding) {
+<span class="fc" id="L232">		this.allowBeanDefinitionOverriding = allowBeanDefinitionOverriding;</span>
+<span class="fc" id="L233">	}</span>
+
+	/**
+	 * Return whether it should be allowed to override bean definitions by registering
+	 * a different definition with the same name, automatically replacing the former.
+	 * @since 4.1.2
+	 */
+	public boolean isAllowBeanDefinitionOverriding() {
+<span class="fc" id="L241">		return this.allowBeanDefinitionOverriding;</span>
+	}
+
+	/**
+	 * Set whether the factory is allowed to eagerly load bean classes
+	 * even for bean definitions that are marked as &quot;lazy-init&quot;.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this flag off to suppress class loading
+	 * for lazy-init beans unless such a bean is explicitly requested.
+	 * In particular, by-type lookups will then simply ignore bean definitions
+	 * without resolved class name, instead of loading the bean classes on
+	 * demand just to perform a type check.
+	 * @see AbstractBeanDefinition#setLazyInit
+	 */
+	public void setAllowEagerClassLoading(boolean allowEagerClassLoading) {
+<span class="nc" id="L255">		this.allowEagerClassLoading = allowEagerClassLoading;</span>
+<span class="nc" id="L256">	}</span>
+
+	/**
+	 * Return whether the factory is allowed to eagerly load bean classes
+	 * even for bean definitions that are marked as &quot;lazy-init&quot;.
+	 * @since 4.1.2
+	 */
+	public boolean isAllowEagerClassLoading() {
+<span class="nc" id="L264">		return this.allowEagerClassLoading;</span>
+	}
+
+	/**
+	 * Set a {@link java.util.Comparator} for dependency Lists and arrays.
+	 * @since 4.0
+	 * @see org.springframework.core.OrderComparator
+	 * @see org.springframework.core.annotation.AnnotationAwareOrderComparator
+	 */
+	public void setDependencyComparator(@Nullable Comparator&lt;Object&gt; dependencyComparator) {
+<span class="fc" id="L274">		this.dependencyComparator = dependencyComparator;</span>
+<span class="fc" id="L275">	}</span>
+
+	/**
+	 * Return the dependency comparator for this BeanFactory (may be {@code null}.
+	 * @since 4.0
+	 */
+	@Nullable
+	public Comparator&lt;Object&gt; getDependencyComparator() {
+<span class="fc" id="L283">		return this.dependencyComparator;</span>
+	}
+
+	/**
+	 * Set a custom autowire candidate resolver for this BeanFactory to use
+	 * when deciding whether a bean definition should be considered as a
+	 * candidate for autowiring.
+	 */
+	public void setAutowireCandidateResolver(final AutowireCandidateResolver autowireCandidateResolver) {
+<span class="fc" id="L292">		Assert.notNull(autowireCandidateResolver, &quot;AutowireCandidateResolver must not be null&quot;);</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">		if (autowireCandidateResolver instanceof BeanFactoryAware) {</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">			if (System.getSecurityManager() != null) {</span>
+<span class="nc" id="L295">				AccessController.doPrivileged((PrivilegedAction&lt;Object&gt;) () -&gt; {</span>
+<span class="nc" id="L296">					((BeanFactoryAware) autowireCandidateResolver).setBeanFactory(DefaultListableBeanFactory.this);</span>
+<span class="nc" id="L297">					return null;</span>
+<span class="nc" id="L298">				}, getAccessControlContext());</span>
+			}
+			else {
+<span class="fc" id="L301">				((BeanFactoryAware) autowireCandidateResolver).setBeanFactory(this);</span>
+			}
+		}
+<span class="fc" id="L304">		this.autowireCandidateResolver = autowireCandidateResolver;</span>
+<span class="fc" id="L305">	}</span>
+
+	/**
+	 * Return the autowire candidate resolver for this BeanFactory (never {@code null}).
+	 */
+	public AutowireCandidateResolver getAutowireCandidateResolver() {
+<span class="fc" id="L311">		return this.autowireCandidateResolver;</span>
+	}
+
+
+	@Override
+	public void copyConfigurationFrom(ConfigurableBeanFactory otherFactory) {
+<span class="nc" id="L317">		super.copyConfigurationFrom(otherFactory);</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">		if (otherFactory instanceof DefaultListableBeanFactory) {</span>
+<span class="nc" id="L319">			DefaultListableBeanFactory otherListableFactory = (DefaultListableBeanFactory) otherFactory;</span>
+<span class="nc" id="L320">			this.allowBeanDefinitionOverriding = otherListableFactory.allowBeanDefinitionOverriding;</span>
+<span class="nc" id="L321">			this.allowEagerClassLoading = otherListableFactory.allowEagerClassLoading;</span>
+<span class="nc" id="L322">			this.dependencyComparator = otherListableFactory.dependencyComparator;</span>
+			// A clone of the AutowireCandidateResolver since it is potentially BeanFactoryAware...
+<span class="nc" id="L324">			setAutowireCandidateResolver(BeanUtils.instantiateClass(getAutowireCandidateResolver().getClass()));</span>
+			// Make resolvable dependencies (e.g. ResourceLoader) available here as well...
+<span class="nc" id="L326">			this.resolvableDependencies.putAll(otherListableFactory.resolvableDependencies);</span>
+		}
+<span class="nc" id="L328">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of remaining BeanFactory methods
+	//---------------------------------------------------------------------
+
+	@Override
+	public &lt;T&gt; T getBean(Class&lt;T&gt; requiredType) throws BeansException {
+<span class="fc" id="L337">		return getBean(requiredType, (Object[]) null);</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; T getBean(Class&lt;T&gt; requiredType, @Nullable Object... args) throws BeansException {
+<span class="fc" id="L343">		Object resolved = resolveBean(ResolvableType.forRawClass(requiredType), args, false);</span>
+<span class="fc bfc" id="L344" title="All 2 branches covered.">		if (resolved == null) {</span>
+<span class="fc" id="L345">			throw new NoSuchBeanDefinitionException(requiredType);</span>
+		}
+<span class="fc" id="L347">		return (T) resolved;</span>
+	}
+
+	@Override
+	public &lt;T&gt; ObjectProvider&lt;T&gt; getBeanProvider(Class&lt;T&gt; requiredType) throws BeansException {
+<span class="fc" id="L352">		return getBeanProvider(ResolvableType.forRawClass(requiredType));</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; ObjectProvider&lt;T&gt; getBeanProvider(ResolvableType requiredType) {
+<span class="fc" id="L358">		return new BeanObjectProvider&lt;T&gt;() {</span>
+			@Override
+			public T getObject() throws BeansException {
+<span class="fc" id="L361">				T resolved = resolveBean(requiredType, null, false);</span>
+<span class="fc bfc" id="L362" title="All 2 branches covered.">				if (resolved == null) {</span>
+<span class="fc" id="L363">					throw new NoSuchBeanDefinitionException(requiredType);</span>
+				}
+<span class="fc" id="L365">				return resolved;</span>
+			}
+			@Override
+			public T getObject(Object... args) throws BeansException {
+<span class="fc" id="L369">				T resolved = resolveBean(requiredType, args, false);</span>
+<span class="fc bfc" id="L370" title="All 2 branches covered.">				if (resolved == null) {</span>
+<span class="fc" id="L371">					throw new NoSuchBeanDefinitionException(requiredType);</span>
+				}
+<span class="fc" id="L373">				return resolved;</span>
+			}
+			@Override
+			@Nullable
+			public T getIfAvailable() throws BeansException {
+<span class="fc" id="L378">				return resolveBean(requiredType, null, false);</span>
+			}
+			@Override
+			@Nullable
+			public T getIfUnique() throws BeansException {
+<span class="fc" id="L383">				return resolveBean(requiredType, null, true);</span>
+			}
+			@Override
+			public Stream&lt;T&gt; stream() {
+<span class="fc" id="L387">				return Arrays.stream(getBeanNamesForTypedStream(requiredType))</span>
+<span class="fc" id="L388">						.map(name -&gt; (T) getBean(name))</span>
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">						.filter(bean -&gt; !(bean instanceof NullBean));</span>
+			}
+			@Override
+			public Stream&lt;T&gt; orderedStream() {
+<span class="fc" id="L393">				String[] beanNames = getBeanNamesForTypedStream(requiredType);</span>
+<span class="fc" id="L394">				Map&lt;String, T&gt; matchingBeans = new LinkedHashMap&lt;&gt;(beanNames.length);</span>
+<span class="fc bfc" id="L395" title="All 2 branches covered.">				for (String beanName : beanNames) {</span>
+<span class="fc" id="L396">					Object beanInstance = getBean(beanName);</span>
+<span class="pc bpc" id="L397" title="1 of 2 branches missed.">					if (!(beanInstance instanceof NullBean)) {</span>
+<span class="fc" id="L398">						matchingBeans.put(beanName, (T) beanInstance);</span>
+					}
+				}
+<span class="fc" id="L401">				Stream&lt;T&gt; stream = matchingBeans.values().stream();</span>
+<span class="fc" id="L402">				return stream.sorted(adaptOrderComparator(matchingBeans));</span>
+			}
+		};
+	}
+
+	@Nullable
+	private &lt;T&gt; T resolveBean(ResolvableType requiredType, @Nullable Object[] args, boolean nonUniqueAsNull) {
+<span class="fc" id="L409">		NamedBeanHolder&lt;T&gt; namedBean = resolveNamedBean(requiredType, args, nonUniqueAsNull);</span>
+<span class="fc bfc" id="L410" title="All 2 branches covered.">		if (namedBean != null) {</span>
+<span class="fc" id="L411">			return namedBean.getBeanInstance();</span>
+		}
+<span class="fc" id="L413">		BeanFactory parent = getParentBeanFactory();</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">		if (parent instanceof DefaultListableBeanFactory) {</span>
+<span class="fc" id="L415">			return ((DefaultListableBeanFactory) parent).resolveBean(requiredType, args, nonUniqueAsNull);</span>
+		}
+<span class="pc bpc" id="L417" title="1 of 2 branches missed.">		else if (parent != null) {</span>
+<span class="nc" id="L418">			ObjectProvider&lt;T&gt; parentProvider = parent.getBeanProvider(requiredType);</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">			if (args != null) {</span>
+<span class="nc" id="L420">				return parentProvider.getObject(args);</span>
+			}
+			else {
+<span class="nc bnc" id="L423" title="All 2 branches missed.">				return (nonUniqueAsNull ? parentProvider.getIfUnique() : parentProvider.getIfAvailable());</span>
+			}
+		}
+<span class="fc" id="L426">		return null;</span>
+	}
+
+	private String[] getBeanNamesForTypedStream(ResolvableType requiredType) {
+<span class="fc" id="L430">		return BeanFactoryUtils.beanNamesForTypeIncludingAncestors(this, requiredType);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ListableBeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public boolean containsBeanDefinition(String beanName) {
+<span class="fc" id="L440">		Assert.notNull(beanName, &quot;Bean name must not be null&quot;);</span>
+<span class="fc" id="L441">		return this.beanDefinitionMap.containsKey(beanName);</span>
+	}
+
+	@Override
+	public int getBeanDefinitionCount() {
+<span class="fc" id="L446">		return this.beanDefinitionMap.size();</span>
+	}
+
+	@Override
+	public String[] getBeanDefinitionNames() {
+<span class="fc" id="L451">		String[] frozenNames = this.frozenBeanDefinitionNames;</span>
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">		if (frozenNames != null) {</span>
+<span class="nc" id="L453">			return frozenNames.clone();</span>
+		}
+		else {
+<span class="fc" id="L456">			return StringUtils.toStringArray(this.beanDefinitionNames);</span>
+		}
+	}
+
+	@Override
+	public String[] getBeanNamesForType(ResolvableType type) {
+<span class="fc" id="L462">		Class&lt;?&gt; resolved = type.resolve();</span>
+<span class="pc bpc" id="L463" title="1 of 4 branches missed.">		if (resolved != null &amp;&amp; !type.hasGenerics()) {</span>
+<span class="fc" id="L464">			return getBeanNamesForType(resolved, true, true);</span>
+		}
+		else {
+<span class="fc" id="L467">			return doGetBeanNamesForType(type, true, true);</span>
+		}
+	}
+
+	@Override
+	public String[] getBeanNamesForType(@Nullable Class&lt;?&gt; type) {
+<span class="fc" id="L473">		return getBeanNamesForType(type, true, true);</span>
+	}
+
+	@Override
+	public String[] getBeanNamesForType(@Nullable Class&lt;?&gt; type, boolean includeNonSingletons, boolean allowEagerInit) {
+<span class="pc bpc" id="L478" title="5 of 6 branches missed.">		if (!isConfigurationFrozen() || type == null || !allowEagerInit) {</span>
+<span class="fc" id="L479">			return doGetBeanNamesForType(ResolvableType.forRawClass(type), includeNonSingletons, allowEagerInit);</span>
+		}
+<span class="nc bnc" id="L481" title="All 2 branches missed.">		Map&lt;Class&lt;?&gt;, String[]&gt; cache =</span>
+				(includeNonSingletons ? this.allBeanNamesByType : this.singletonBeanNamesByType);
+<span class="nc" id="L483">		String[] resolvedBeanNames = cache.get(type);</span>
+<span class="nc bnc" id="L484" title="All 2 branches missed.">		if (resolvedBeanNames != null) {</span>
+<span class="nc" id="L485">			return resolvedBeanNames;</span>
+		}
+<span class="nc" id="L487">		resolvedBeanNames = doGetBeanNamesForType(ResolvableType.forRawClass(type), includeNonSingletons, true);</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">		if (ClassUtils.isCacheSafe(type, getBeanClassLoader())) {</span>
+<span class="nc" id="L489">			cache.put(type, resolvedBeanNames);</span>
+		}
+<span class="nc" id="L491">		return resolvedBeanNames;</span>
+	}
+
+	private String[] doGetBeanNamesForType(ResolvableType type, boolean includeNonSingletons, boolean allowEagerInit) {
+<span class="fc" id="L495">		List&lt;String&gt; result = new ArrayList&lt;&gt;();</span>
+
+		// Check all bean definitions.
+<span class="fc bfc" id="L498" title="All 2 branches covered.">		for (String beanName : this.beanDefinitionNames) {</span>
+			// Only consider bean as eligible if the bean name
+			// is not defined as alias for some other bean.
+<span class="pc bpc" id="L501" title="1 of 2 branches missed.">			if (!isAlias(beanName)) {</span>
+				try {
+<span class="fc" id="L503">					RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+					// Only check bean definition if it is complete.
+<span class="fc bfc" id="L505" title="All 4 branches covered.">					if (!mbd.isAbstract() &amp;&amp; (allowEagerInit ||</span>
+<span class="pc bpc" id="L506" title="3 of 6 branches missed.">							(mbd.hasBeanClass() || !mbd.isLazyInit() || isAllowEagerClassLoading()) &amp;&amp;</span>
+<span class="pc bpc" id="L507" title="1 of 2 branches missed.">									!requiresEagerInitForType(mbd.getFactoryBeanName()))) {</span>
+						// In case of FactoryBean, match object created by FactoryBean.
+<span class="fc" id="L509">						boolean isFactoryBean = isFactoryBean(beanName, mbd);</span>
+<span class="fc" id="L510">						BeanDefinitionHolder dbd = mbd.getDecoratedDefinition();</span>
+<span class="pc bpc" id="L511" title="1 of 6 branches missed.">						boolean matchFound =</span>
+								(allowEagerInit || !isFactoryBean ||
+<span class="pc bpc" id="L513" title="3 of 8 branches missed.">										(dbd != null &amp;&amp; !mbd.isLazyInit()) || containsSingleton(beanName)) &amp;&amp;</span>
+								(includeNonSingletons ||
+<span class="pc bpc" id="L515" title="2 of 4 branches missed.">										(dbd != null ? mbd.isSingleton() : isSingleton(beanName))) &amp;&amp;</span>
+<span class="fc bfc" id="L516" title="All 2 branches covered.">								isTypeMatch(beanName, type);</span>
+<span class="fc bfc" id="L517" title="All 4 branches covered.">						if (!matchFound &amp;&amp; isFactoryBean) {</span>
+							// In case of FactoryBean, try to match FactoryBean instance itself next.
+<span class="fc" id="L519">							beanName = FACTORY_BEAN_PREFIX + beanName;</span>
+<span class="pc bpc" id="L520" title="1 of 6 branches missed.">							matchFound = (includeNonSingletons || mbd.isSingleton()) &amp;&amp; isTypeMatch(beanName, type);</span>
+						}
+<span class="fc bfc" id="L522" title="All 2 branches covered.">						if (matchFound) {</span>
+<span class="fc" id="L523">							result.add(beanName);</span>
+						}
+					}
+				}
+<span class="nc" id="L527">				catch (CannotLoadBeanClassException ex) {</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">					if (allowEagerInit) {</span>
+<span class="nc" id="L529">						throw ex;</span>
+					}
+					// Probably a class name with a placeholder: let's ignore it for type matching purposes.
+<span class="nc bnc" id="L532" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L533">						logger.trace(&quot;Ignoring bean class loading failure for bean '&quot; + beanName + &quot;'&quot;, ex);</span>
+					}
+<span class="nc" id="L535">					onSuppressedException(ex);</span>
+				}
+<span class="nc" id="L537">				catch (BeanDefinitionStoreException ex) {</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">					if (allowEagerInit) {</span>
+<span class="nc" id="L539">						throw ex;</span>
+					}
+					// Probably some metadata with a placeholder: let's ignore it for type matching purposes.
+<span class="nc bnc" id="L542" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L543">						logger.trace(&quot;Ignoring unresolvable metadata in bean definition '&quot; + beanName + &quot;'&quot;, ex);</span>
+					}
+<span class="nc" id="L545">					onSuppressedException(ex);</span>
+<span class="pc" id="L546">				}</span>
+			}
+<span class="fc" id="L548">		}</span>
+
+		// Check manually registered singletons too.
+<span class="fc bfc" id="L551" title="All 2 branches covered.">		for (String beanName : this.manualSingletonNames) {</span>
+			try {
+				// In case of FactoryBean, match object created by FactoryBean.
+<span class="fc bfc" id="L554" title="All 2 branches covered.">				if (isFactoryBean(beanName)) {</span>
+<span class="fc bfc" id="L555" title="All 6 branches covered.">					if ((includeNonSingletons || isSingleton(beanName)) &amp;&amp; isTypeMatch(beanName, type)) {</span>
+<span class="fc" id="L556">						result.add(beanName);</span>
+						// Match found for this bean: do not match FactoryBean itself anymore.
+<span class="fc" id="L558">						continue;</span>
+					}
+					// In case of FactoryBean, try to match FactoryBean itself next.
+<span class="fc" id="L561">					beanName = FACTORY_BEAN_PREFIX + beanName;</span>
+				}
+				// Match raw bean instance (might be raw FactoryBean).
+<span class="fc bfc" id="L564" title="All 2 branches covered.">				if (isTypeMatch(beanName, type)) {</span>
+<span class="fc" id="L565">					result.add(beanName);</span>
+				}
+			}
+<span class="nc" id="L568">			catch (NoSuchBeanDefinitionException ex) {</span>
+				// Shouldn't happen - probably a result of circular reference resolution...
+<span class="nc bnc" id="L570" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L571">					logger.trace(&quot;Failed to check manually registered singleton with name '&quot; + beanName + &quot;'&quot;, ex);</span>
+				}
+<span class="fc" id="L573">			}</span>
+<span class="fc" id="L574">		}</span>
+
+<span class="fc" id="L576">		return StringUtils.toStringArray(result);</span>
+	}
+
+	/**
+	 * Check whether the specified bean would need to be eagerly initialized
+	 * in order to determine its type.
+	 * @param factoryBeanName a factory-bean reference that the bean definition
+	 * defines a factory method for
+	 * @return whether eager initialization is necessary
+	 */
+	private boolean requiresEagerInitForType(@Nullable String factoryBeanName) {
+<span class="pc bpc" id="L587" title="3 of 6 branches missed.">		return (factoryBeanName != null &amp;&amp; isFactoryBean(factoryBeanName) &amp;&amp; !containsSingleton(factoryBeanName));</span>
+	}
+
+	@Override
+	public &lt;T&gt; Map&lt;String, T&gt; getBeansOfType(@Nullable Class&lt;T&gt; type) throws BeansException {
+<span class="fc" id="L592">		return getBeansOfType(type, true, true);</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public &lt;T&gt; Map&lt;String, T&gt; getBeansOfType(@Nullable Class&lt;T&gt; type, boolean includeNonSingletons, boolean allowEagerInit)
+			throws BeansException {
+
+<span class="fc" id="L600">		String[] beanNames = getBeanNamesForType(type, includeNonSingletons, allowEagerInit);</span>
+<span class="fc" id="L601">		Map&lt;String, T&gt; result = new LinkedHashMap&lt;&gt;(beanNames.length);</span>
+<span class="fc bfc" id="L602" title="All 2 branches covered.">		for (String beanName : beanNames) {</span>
+			try {
+<span class="fc" id="L604">				Object beanInstance = getBean(beanName);</span>
+<span class="fc bfc" id="L605" title="All 2 branches covered.">				if (!(beanInstance instanceof NullBean)) {</span>
+<span class="fc" id="L606">					result.put(beanName, (T) beanInstance);</span>
+				}
+			}
+<span class="nc" id="L609">			catch (BeanCreationException ex) {</span>
+<span class="nc" id="L610">				Throwable rootCause = ex.getMostSpecificCause();</span>
+<span class="nc bnc" id="L611" title="All 2 branches missed.">				if (rootCause instanceof BeanCurrentlyInCreationException) {</span>
+<span class="nc" id="L612">					BeanCreationException bce = (BeanCreationException) rootCause;</span>
+<span class="nc" id="L613">					String exBeanName = bce.getBeanName();</span>
+<span class="nc bnc" id="L614" title="All 4 branches missed.">					if (exBeanName != null &amp;&amp; isCurrentlyInCreation(exBeanName)) {</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L616">							logger.trace(&quot;Ignoring match to currently created bean '&quot; + exBeanName + &quot;': &quot; +</span>
+<span class="nc" id="L617">									ex.getMessage());</span>
+						}
+<span class="nc" id="L619">						onSuppressedException(ex);</span>
+						// Ignore: indicates a circular reference when autowiring constructors.
+						// We want to find matches other than the currently created bean itself.
+<span class="nc" id="L622">						continue;</span>
+					}
+				}
+<span class="nc" id="L625">				throw ex;</span>
+<span class="fc" id="L626">			}</span>
+		}
+<span class="fc" id="L628">		return result;</span>
+	}
+
+	@Override
+	public String[] getBeanNamesForAnnotation(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L633">		List&lt;String&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L634" title="All 2 branches covered.">		for (String beanName : this.beanDefinitionNames) {</span>
+<span class="fc" id="L635">			BeanDefinition beanDefinition = getBeanDefinition(beanName);</span>
+<span class="fc bfc" id="L636" title="All 4 branches covered.">			if (!beanDefinition.isAbstract() &amp;&amp; findAnnotationOnBean(beanName, annotationType) != null) {</span>
+<span class="fc" id="L637">				result.add(beanName);</span>
+			}
+<span class="fc" id="L639">		}</span>
+<span class="fc bfc" id="L640" title="All 2 branches covered.">		for (String beanName : this.manualSingletonNames) {</span>
+<span class="pc bpc" id="L641" title="2 of 4 branches missed.">			if (!result.contains(beanName) &amp;&amp; findAnnotationOnBean(beanName, annotationType) != null) {</span>
+<span class="fc" id="L642">				result.add(beanName);</span>
+			}
+<span class="fc" id="L644">		}</span>
+<span class="fc" id="L645">		return StringUtils.toStringArray(result);</span>
+	}
+
+	@Override
+	public Map&lt;String, Object&gt; getBeansWithAnnotation(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L650">		String[] beanNames = getBeanNamesForAnnotation(annotationType);</span>
+<span class="fc" id="L651">		Map&lt;String, Object&gt; result = new LinkedHashMap&lt;&gt;(beanNames.length);</span>
+<span class="pc bpc" id="L652" title="1 of 2 branches missed.">		for (String beanName : beanNames) {</span>
+<span class="nc" id="L653">			Object beanInstance = getBean(beanName);</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">			if (!(beanInstance instanceof NullBean)) {</span>
+<span class="nc" id="L655">				result.put(beanName, beanInstance);</span>
+			}
+		}
+<span class="fc" id="L658">		return result;</span>
+	}
+
+	/**
+	 * Find a {@link Annotation} of {@code annotationType} on the specified
+	 * bean, traversing its interfaces and super classes if no annotation can be
+	 * found on the given class itself, as well as checking its raw bean class
+	 * if not found on the exposed bean reference (e.g. in case of a proxy).
+	 */
+	@Override
+	@Nullable
+	public &lt;A extends Annotation&gt; A findAnnotationOnBean(String beanName, Class&lt;A&gt; annotationType)
+			throws NoSuchBeanDefinitionException {
+
+<span class="fc" id="L672">		return findMergedAnnotationOnBean(beanName, annotationType)</span>
+<span class="fc" id="L673">				.synthesize(MergedAnnotation::isPresent).orElse(null);</span>
+	}
+
+	private &lt;A extends Annotation&gt; MergedAnnotation&lt;A&gt; findMergedAnnotationOnBean(
+			String beanName, Class&lt;A&gt; annotationType) {
+
+<span class="fc" id="L679">		Class&lt;?&gt; beanType = getType(beanName);</span>
+<span class="pc bpc" id="L680" title="1 of 2 branches missed.">		if (beanType != null) {</span>
+<span class="fc" id="L681">			MergedAnnotation&lt;A&gt; annotation = MergedAnnotations.from(beanType,</span>
+<span class="fc" id="L682">					SearchStrategy.EXHAUSTIVE).get(annotationType);</span>
+<span class="fc bfc" id="L683" title="All 2 branches covered.">			if (annotation.isPresent()) {</span>
+<span class="fc" id="L684">				return annotation;</span>
+			}
+		}
+<span class="pc bpc" id="L687" title="1 of 2 branches missed.">		if (containsBeanDefinition(beanName)) {</span>
+<span class="fc" id="L688">			BeanDefinition bd = getMergedBeanDefinition(beanName);</span>
+<span class="pc bpc" id="L689" title="1 of 2 branches missed.">			if (bd instanceof AbstractBeanDefinition) {</span>
+<span class="fc" id="L690">				AbstractBeanDefinition abd = (AbstractBeanDefinition) bd;</span>
+<span class="pc bpc" id="L691" title="1 of 2 branches missed.">				if (abd.hasBeanClass()) {</span>
+<span class="fc" id="L692">					Class&lt;?&gt; beanClass = abd.getBeanClass();</span>
+<span class="fc bfc" id="L693" title="All 2 branches covered.">					if (beanClass != beanType) {</span>
+<span class="fc" id="L694">						return MergedAnnotations.from(beanClass, SearchStrategy.EXHAUSTIVE).get(annotationType);</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L699">		return MergedAnnotation.missing();</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ConfigurableListableBeanFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public void registerResolvableDependency(Class&lt;?&gt; dependencyType, @Nullable Object autowiredValue) {
+<span class="fc" id="L709">		Assert.notNull(dependencyType, &quot;Dependency type must not be null&quot;);</span>
+<span class="pc bpc" id="L710" title="1 of 2 branches missed.">		if (autowiredValue != null) {</span>
+<span class="pc bpc" id="L711" title="2 of 4 branches missed.">			if (!(autowiredValue instanceof ObjectFactory || dependencyType.isInstance(autowiredValue))) {</span>
+<span class="nc" id="L712">				throw new IllegalArgumentException(&quot;Value [&quot; + autowiredValue +</span>
+<span class="nc" id="L713">						&quot;] does not implement specified dependency type [&quot; + dependencyType.getName() + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L715">			this.resolvableDependencies.put(dependencyType, autowiredValue);</span>
+		}
+<span class="fc" id="L717">	}</span>
+
+	@Override
+	public boolean isAutowireCandidate(String beanName, DependencyDescriptor descriptor)
+			throws NoSuchBeanDefinitionException {
+
+<span class="fc" id="L723">		return isAutowireCandidate(beanName, descriptor, getAutowireCandidateResolver());</span>
+	}
+
+	/**
+	 * Determine whether the specified bean definition qualifies as an autowire candidate,
+	 * to be injected into other beans which declare a dependency of matching type.
+	 * @param beanName the name of the bean definition to check
+	 * @param descriptor the descriptor of the dependency to resolve
+	 * @param resolver the AutowireCandidateResolver to use for the actual resolution algorithm
+	 * @return whether the bean should be considered as autowire candidate
+	 */
+	protected boolean isAutowireCandidate(String beanName, DependencyDescriptor descriptor, AutowireCandidateResolver resolver)
+			throws NoSuchBeanDefinitionException {
+
+<span class="fc" id="L737">		String beanDefinitionName = BeanFactoryUtils.transformedBeanName(beanName);</span>
+<span class="fc bfc" id="L738" title="All 2 branches covered.">		if (containsBeanDefinition(beanDefinitionName)) {</span>
+<span class="fc" id="L739">			return isAutowireCandidate(beanName, getMergedLocalBeanDefinition(beanDefinitionName), descriptor, resolver);</span>
+		}
+<span class="fc bfc" id="L741" title="All 2 branches covered.">		else if (containsSingleton(beanName)) {</span>
+<span class="fc" id="L742">			return isAutowireCandidate(beanName, new RootBeanDefinition(getType(beanName)), descriptor, resolver);</span>
+		}
+
+<span class="fc" id="L745">		BeanFactory parent = getParentBeanFactory();</span>
+<span class="fc bfc" id="L746" title="All 2 branches covered.">		if (parent instanceof DefaultListableBeanFactory) {</span>
+			// No bean definition found in this factory -&gt; delegate to parent.
+<span class="fc" id="L748">			return ((DefaultListableBeanFactory) parent).isAutowireCandidate(beanName, descriptor, resolver);</span>
+		}
+<span class="pc bpc" id="L750" title="1 of 2 branches missed.">		else if (parent instanceof ConfigurableListableBeanFactory) {</span>
+			// If no DefaultListableBeanFactory, can't pass the resolver along.
+<span class="nc" id="L752">			return ((ConfigurableListableBeanFactory) parent).isAutowireCandidate(beanName, descriptor);</span>
+		}
+		else {
+<span class="fc" id="L755">			return true;</span>
+		}
+	}
+
+	/**
+	 * Determine whether the specified bean definition qualifies as an autowire candidate,
+	 * to be injected into other beans which declare a dependency of matching type.
+	 * @param beanName the name of the bean definition to check
+	 * @param mbd the merged bean definition to check
+	 * @param descriptor the descriptor of the dependency to resolve
+	 * @param resolver the AutowireCandidateResolver to use for the actual resolution algorithm
+	 * @return whether the bean should be considered as autowire candidate
+	 */
+	protected boolean isAutowireCandidate(String beanName, RootBeanDefinition mbd,
+			DependencyDescriptor descriptor, AutowireCandidateResolver resolver) {
+
+<span class="fc" id="L771">		String beanDefinitionName = BeanFactoryUtils.transformedBeanName(beanName);</span>
+<span class="fc" id="L772">		resolveBeanClass(mbd, beanDefinitionName);</span>
+<span class="pc bpc" id="L773" title="1 of 4 branches missed.">		if (mbd.isFactoryMethodUnique &amp;&amp; mbd.factoryMethodToIntrospect == null) {</span>
+<span class="nc" id="L774">			new ConstructorResolver(this).resolveFactoryMethodIfPossible(mbd);</span>
+		}
+<span class="fc" id="L776">		return resolver.isAutowireCandidate(</span>
+<span class="fc" id="L777">				new BeanDefinitionHolder(mbd, beanName, getAliases(beanDefinitionName)), descriptor);</span>
+	}
+
+	@Override
+	public BeanDefinition getBeanDefinition(String beanName) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L782">		BeanDefinition bd = this.beanDefinitionMap.get(beanName);</span>
+<span class="fc bfc" id="L783" title="All 2 branches covered.">		if (bd == null) {</span>
+<span class="pc bpc" id="L784" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L785">				logger.trace(&quot;No bean named '&quot; + beanName + &quot;' found in &quot; + this);</span>
+			}
+<span class="fc" id="L787">			throw new NoSuchBeanDefinitionException(beanName);</span>
+		}
+<span class="fc" id="L789">		return bd;</span>
+	}
+
+	@Override
+	public Iterator&lt;String&gt; getBeanNamesIterator() {
+<span class="fc" id="L794">		CompositeIterator&lt;String&gt; iterator = new CompositeIterator&lt;&gt;();</span>
+<span class="fc" id="L795">		iterator.add(this.beanDefinitionNames.iterator());</span>
+<span class="fc" id="L796">		iterator.add(this.manualSingletonNames.iterator());</span>
+<span class="fc" id="L797">		return iterator;</span>
+	}
+
+	@Override
+	public void clearMetadataCache() {
+<span class="nc" id="L802">		super.clearMetadataCache();</span>
+<span class="nc" id="L803">		clearByTypeCache();</span>
+<span class="nc" id="L804">	}</span>
+
+	@Override
+	public void freezeConfiguration() {
+<span class="fc" id="L808">		this.configurationFrozen = true;</span>
+<span class="fc" id="L809">		this.frozenBeanDefinitionNames = StringUtils.toStringArray(this.beanDefinitionNames);</span>
+<span class="fc" id="L810">	}</span>
+
+	@Override
+	public boolean isConfigurationFrozen() {
+<span class="fc" id="L814">		return this.configurationFrozen;</span>
+	}
+
+	/**
+	 * Considers all beans as eligible for metadata caching
+	 * if the factory's configuration has been marked as frozen.
+	 * @see #freezeConfiguration()
+	 */
+	@Override
+	protected boolean isBeanEligibleForMetadataCaching(String beanName) {
+<span class="nc bnc" id="L824" title="All 4 branches missed.">		return (this.configurationFrozen || super.isBeanEligibleForMetadataCaching(beanName));</span>
+	}
+
+	@Override
+	public void preInstantiateSingletons() throws BeansException {
+<span class="pc bpc" id="L829" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L830">			logger.trace(&quot;Pre-instantiating singletons in &quot; + this);</span>
+		}
+
+		// Iterate over a copy to allow for init methods which in turn register new bean definitions.
+		// While this may not be part of the regular factory bootstrap, it does otherwise work fine.
+<span class="fc" id="L835">		List&lt;String&gt; beanNames = new ArrayList&lt;&gt;(this.beanDefinitionNames);</span>
+
+		// Trigger initialization of all non-lazy singleton beans...
+<span class="fc bfc" id="L838" title="All 2 branches covered.">		for (String beanName : beanNames) {</span>
+<span class="fc" id="L839">			RootBeanDefinition bd = getMergedLocalBeanDefinition(beanName);</span>
+<span class="pc bpc" id="L840" title="1 of 6 branches missed.">			if (!bd.isAbstract() &amp;&amp; bd.isSingleton() &amp;&amp; !bd.isLazyInit()) {</span>
+<span class="fc bfc" id="L841" title="All 2 branches covered.">				if (isFactoryBean(beanName)) {</span>
+<span class="fc" id="L842">					Object bean = getBean(FACTORY_BEAN_PREFIX + beanName);</span>
+<span class="pc bpc" id="L843" title="1 of 2 branches missed.">					if (bean instanceof FactoryBean) {</span>
+<span class="fc" id="L844">						final FactoryBean&lt;?&gt; factory = (FactoryBean&lt;?&gt;) bean;</span>
+						boolean isEagerInit;
+<span class="pc bpc" id="L846" title="3 of 4 branches missed.">						if (System.getSecurityManager() != null &amp;&amp; factory instanceof SmartFactoryBean) {</span>
+<span class="nc" id="L847">							isEagerInit = AccessController.doPrivileged((PrivilegedAction&lt;Boolean&gt;)</span>
+											((SmartFactoryBean&lt;?&gt;) factory)::isEagerInit,
+<span class="nc" id="L849">									getAccessControlContext());</span>
+						}
+						else {
+<span class="fc bfc" id="L852" title="All 2 branches covered.">							isEagerInit = (factory instanceof SmartFactoryBean &amp;&amp;</span>
+<span class="pc bpc" id="L853" title="1 of 2 branches missed.">									((SmartFactoryBean&lt;?&gt;) factory).isEagerInit());</span>
+						}
+<span class="fc bfc" id="L855" title="All 2 branches covered.">						if (isEagerInit) {</span>
+<span class="fc" id="L856">							getBean(beanName);</span>
+						}
+					}
+<span class="fc" id="L859">				}</span>
+				else {
+<span class="fc" id="L861">					getBean(beanName);</span>
+				}
+			}
+<span class="fc" id="L864">		}</span>
+
+		// Trigger post-initialization callback for all applicable beans...
+<span class="fc bfc" id="L867" title="All 2 branches covered.">		for (String beanName : beanNames) {</span>
+<span class="fc" id="L868">			Object singletonInstance = getSingleton(beanName);</span>
+<span class="pc bpc" id="L869" title="1 of 2 branches missed.">			if (singletonInstance instanceof SmartInitializingSingleton) {</span>
+<span class="nc" id="L870">				final SmartInitializingSingleton smartSingleton = (SmartInitializingSingleton) singletonInstance;</span>
+<span class="nc bnc" id="L871" title="All 2 branches missed.">				if (System.getSecurityManager() != null) {</span>
+<span class="nc" id="L872">					AccessController.doPrivileged((PrivilegedAction&lt;Object&gt;) () -&gt; {</span>
+<span class="nc" id="L873">						smartSingleton.afterSingletonsInstantiated();</span>
+<span class="nc" id="L874">						return null;</span>
+<span class="nc" id="L875">					}, getAccessControlContext());</span>
+				}
+				else {
+<span class="nc" id="L878">					smartSingleton.afterSingletonsInstantiated();</span>
+				}
+			}
+<span class="fc" id="L881">		}</span>
+<span class="fc" id="L882">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of BeanDefinitionRegistry interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public void registerBeanDefinition(String beanName, BeanDefinition beanDefinition)
+			throws BeanDefinitionStoreException {
+
+<span class="fc" id="L893">		Assert.hasText(beanName, &quot;Bean name must not be empty&quot;);</span>
+<span class="fc" id="L894">		Assert.notNull(beanDefinition, &quot;BeanDefinition must not be null&quot;);</span>
+
+<span class="pc bpc" id="L896" title="1 of 2 branches missed.">		if (beanDefinition instanceof AbstractBeanDefinition) {</span>
+			try {
+<span class="fc" id="L898">				((AbstractBeanDefinition) beanDefinition).validate();</span>
+			}
+<span class="nc" id="L900">			catch (BeanDefinitionValidationException ex) {</span>
+<span class="nc" id="L901">				throw new BeanDefinitionStoreException(beanDefinition.getResourceDescription(), beanName,</span>
+						&quot;Validation of bean definition failed&quot;, ex);
+<span class="fc" id="L903">			}</span>
+		}
+
+<span class="fc" id="L906">		BeanDefinition existingDefinition = this.beanDefinitionMap.get(beanName);</span>
+<span class="fc bfc" id="L907" title="All 2 branches covered.">		if (existingDefinition != null) {</span>
+<span class="fc bfc" id="L908" title="All 2 branches covered.">			if (!isAllowBeanDefinitionOverriding()) {</span>
+<span class="fc" id="L909">				throw new BeanDefinitionOverrideException(beanName, beanDefinition, existingDefinition);</span>
+			}
+<span class="pc bpc" id="L911" title="1 of 2 branches missed.">			else if (existingDefinition.getRole() &lt; beanDefinition.getRole()) {</span>
+				// e.g. was ROLE_APPLICATION, now overriding with ROLE_SUPPORT or ROLE_INFRASTRUCTURE
+<span class="nc bnc" id="L913" title="All 2 branches missed.">				if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L914">					logger.info(&quot;Overriding user-defined bean definition for bean '&quot; + beanName +</span>
+							&quot;' with a framework-generated bean definition: replacing [&quot; +
+							existingDefinition + &quot;] with [&quot; + beanDefinition + &quot;]&quot;);
+				}
+			}
+<span class="pc bpc" id="L919" title="1 of 2 branches missed.">			else if (!beanDefinition.equals(existingDefinition)) {</span>
+<span class="pc bpc" id="L920" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L921">					logger.debug(&quot;Overriding bean definition for bean '&quot; + beanName +</span>
+							&quot;' with a different definition: replacing [&quot; + existingDefinition +
+							&quot;] with [&quot; + beanDefinition + &quot;]&quot;);
+				}
+			}
+			else {
+<span class="nc bnc" id="L927" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L928">					logger.trace(&quot;Overriding bean definition for bean '&quot; + beanName +</span>
+							&quot;' with an equivalent definition: replacing [&quot; + existingDefinition +
+							&quot;] with [&quot; + beanDefinition + &quot;]&quot;);
+				}
+			}
+<span class="fc" id="L933">			this.beanDefinitionMap.put(beanName, beanDefinition);</span>
+		}
+		else {
+<span class="fc bfc" id="L936" title="All 2 branches covered.">			if (hasBeanCreationStarted()) {</span>
+				// Cannot modify startup-time collection elements anymore (for stable iteration)
+<span class="fc" id="L938">				synchronized (this.beanDefinitionMap) {</span>
+<span class="fc" id="L939">					this.beanDefinitionMap.put(beanName, beanDefinition);</span>
+<span class="fc" id="L940">					List&lt;String&gt; updatedDefinitions = new ArrayList&lt;&gt;(this.beanDefinitionNames.size() + 1);</span>
+<span class="fc" id="L941">					updatedDefinitions.addAll(this.beanDefinitionNames);</span>
+<span class="fc" id="L942">					updatedDefinitions.add(beanName);</span>
+<span class="fc" id="L943">					this.beanDefinitionNames = updatedDefinitions;</span>
+<span class="pc bpc" id="L944" title="1 of 2 branches missed.">					if (this.manualSingletonNames.contains(beanName)) {</span>
+<span class="nc" id="L945">						Set&lt;String&gt; updatedSingletons = new LinkedHashSet&lt;&gt;(this.manualSingletonNames);</span>
+<span class="nc" id="L946">						updatedSingletons.remove(beanName);</span>
+<span class="nc" id="L947">						this.manualSingletonNames = updatedSingletons;</span>
+					}
+<span class="fc" id="L949">				}</span>
+			}
+			else {
+				// Still in startup registration phase
+<span class="fc" id="L953">				this.beanDefinitionMap.put(beanName, beanDefinition);</span>
+<span class="fc" id="L954">				this.beanDefinitionNames.add(beanName);</span>
+<span class="fc" id="L955">				this.manualSingletonNames.remove(beanName);</span>
+			}
+<span class="fc" id="L957">			this.frozenBeanDefinitionNames = null;</span>
+		}
+
+<span class="pc bpc" id="L960" title="1 of 4 branches missed.">		if (existingDefinition != null || containsSingleton(beanName)) {</span>
+<span class="fc" id="L961">			resetBeanDefinition(beanName);</span>
+		}
+<span class="fc" id="L963">	}</span>
+
+	@Override
+	public void removeBeanDefinition(String beanName) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L967">		Assert.hasText(beanName, &quot;'beanName' must not be empty&quot;);</span>
+
+<span class="fc" id="L969">		BeanDefinition bd = this.beanDefinitionMap.remove(beanName);</span>
+<span class="pc bpc" id="L970" title="1 of 2 branches missed.">		if (bd == null) {</span>
+<span class="nc bnc" id="L971" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L972">				logger.trace(&quot;No bean named '&quot; + beanName + &quot;' found in &quot; + this);</span>
+			}
+<span class="nc" id="L974">			throw new NoSuchBeanDefinitionException(beanName);</span>
+		}
+
+<span class="pc bpc" id="L977" title="1 of 2 branches missed.">		if (hasBeanCreationStarted()) {</span>
+			// Cannot modify startup-time collection elements anymore (for stable iteration)
+<span class="fc" id="L979">			synchronized (this.beanDefinitionMap) {</span>
+<span class="fc" id="L980">				List&lt;String&gt; updatedDefinitions = new ArrayList&lt;&gt;(this.beanDefinitionNames);</span>
+<span class="fc" id="L981">				updatedDefinitions.remove(beanName);</span>
+<span class="fc" id="L982">				this.beanDefinitionNames = updatedDefinitions;</span>
+<span class="fc" id="L983">			}</span>
+		}
+		else {
+			// Still in startup registration phase
+<span class="nc" id="L987">			this.beanDefinitionNames.remove(beanName);</span>
+		}
+<span class="fc" id="L989">		this.frozenBeanDefinitionNames = null;</span>
+
+<span class="fc" id="L991">		resetBeanDefinition(beanName);</span>
+<span class="fc" id="L992">	}</span>
+
+	/**
+	 * Reset all bean definition caches for the given bean,
+	 * including the caches of beans that are derived from it.
+	 * &lt;p&gt;Called after an existing bean definition has been replaced or removed,
+	 * triggering {@link #clearMergedBeanDefinition}, {@link #destroySingleton}
+	 * and {@link MergedBeanDefinitionPostProcessor#resetBeanDefinition} on the
+	 * given bean and on all bean definitions that have the given bean as parent.
+	 * @param beanName the name of the bean to reset
+	 * @see #registerBeanDefinition
+	 * @see #removeBeanDefinition
+	 */
+	protected void resetBeanDefinition(String beanName) {
+		// Remove the merged bean definition for the given bean, if already created.
+<span class="fc" id="L1007">		clearMergedBeanDefinition(beanName);</span>
+
+		// Remove corresponding bean from singleton cache, if any. Shouldn't usually
+		// be necessary, rather just meant for overriding a context's default beans
+		// (e.g. the default StaticMessageSource in a StaticApplicationContext).
+<span class="fc" id="L1012">		destroySingleton(beanName);</span>
+
+		// Notify all post-processors that the specified bean definition has been reset.
+<span class="pc bpc" id="L1015" title="1 of 2 branches missed.">		for (BeanPostProcessor processor : getBeanPostProcessors()) {</span>
+<span class="nc bnc" id="L1016" title="All 2 branches missed.">			if (processor instanceof MergedBeanDefinitionPostProcessor) {</span>
+<span class="nc" id="L1017">				((MergedBeanDefinitionPostProcessor) processor).resetBeanDefinition(beanName);</span>
+			}
+<span class="nc" id="L1019">		}</span>
+
+		// Reset all bean definitions that have the given bean as parent (recursively).
+<span class="fc bfc" id="L1022" title="All 2 branches covered.">		for (String bdName : this.beanDefinitionNames) {</span>
+<span class="pc bpc" id="L1023" title="1 of 2 branches missed.">			if (!beanName.equals(bdName)) {</span>
+<span class="nc" id="L1024">				BeanDefinition bd = this.beanDefinitionMap.get(bdName);</span>
+<span class="nc bnc" id="L1025" title="All 2 branches missed.">				if (beanName.equals(bd.getParentName())) {</span>
+<span class="nc" id="L1026">					resetBeanDefinition(bdName);</span>
+				}
+			}
+<span class="fc" id="L1029">		}</span>
+<span class="fc" id="L1030">	}</span>
+
+	/**
+	 * Only allows alias overriding if bean definition overriding is allowed.
+	 */
+	@Override
+	protected boolean allowAliasOverriding() {
+<span class="fc" id="L1037">		return isAllowBeanDefinitionOverriding();</span>
+	}
+
+	@Override
+	public void registerSingleton(String beanName, Object singletonObject) throws IllegalStateException {
+<span class="fc" id="L1042">		super.registerSingleton(beanName, singletonObject);</span>
+
+<span class="fc bfc" id="L1044" title="All 2 branches covered.">		if (hasBeanCreationStarted()) {</span>
+			// Cannot modify startup-time collection elements anymore (for stable iteration)
+<span class="fc" id="L1046">			synchronized (this.beanDefinitionMap) {</span>
+<span class="pc bpc" id="L1047" title="1 of 2 branches missed.">				if (!this.beanDefinitionMap.containsKey(beanName)) {</span>
+<span class="fc" id="L1048">					Set&lt;String&gt; updatedSingletons = new LinkedHashSet&lt;&gt;(this.manualSingletonNames.size() + 1);</span>
+<span class="fc" id="L1049">					updatedSingletons.addAll(this.manualSingletonNames);</span>
+<span class="fc" id="L1050">					updatedSingletons.add(beanName);</span>
+<span class="fc" id="L1051">					this.manualSingletonNames = updatedSingletons;</span>
+				}
+<span class="fc" id="L1053">			}</span>
+		}
+		else {
+			// Still in startup registration phase
+<span class="fc bfc" id="L1057" title="All 2 branches covered.">			if (!this.beanDefinitionMap.containsKey(beanName)) {</span>
+<span class="fc" id="L1058">				this.manualSingletonNames.add(beanName);</span>
+			}
+		}
+
+<span class="fc" id="L1062">		clearByTypeCache();</span>
+<span class="fc" id="L1063">	}</span>
+
+	@Override
+	public void destroySingleton(String beanName) {
+<span class="fc" id="L1067">		super.destroySingleton(beanName);</span>
+<span class="fc" id="L1068">		this.manualSingletonNames.remove(beanName);</span>
+<span class="fc" id="L1069">		clearByTypeCache();</span>
+<span class="fc" id="L1070">	}</span>
+
+	@Override
+	public void destroySingletons() {
+<span class="fc" id="L1074">		super.destroySingletons();</span>
+<span class="fc" id="L1075">		this.manualSingletonNames.clear();</span>
+<span class="fc" id="L1076">		clearByTypeCache();</span>
+<span class="fc" id="L1077">	}</span>
+
+	/**
+	 * Remove any assumptions about by-type mappings.
+	 */
+	private void clearByTypeCache() {
+<span class="fc" id="L1083">		this.allBeanNamesByType.clear();</span>
+<span class="fc" id="L1084">		this.singletonBeanNamesByType.clear();</span>
+<span class="fc" id="L1085">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Dependency resolution functionality
+	//---------------------------------------------------------------------
+
+	@Override
+	public &lt;T&gt; NamedBeanHolder&lt;T&gt; resolveNamedBean(Class&lt;T&gt; requiredType) throws BeansException {
+<span class="nc" id="L1094">		NamedBeanHolder&lt;T&gt; namedBean = resolveNamedBean(ResolvableType.forRawClass(requiredType), null, false);</span>
+<span class="nc bnc" id="L1095" title="All 2 branches missed.">		if (namedBean != null) {</span>
+<span class="nc" id="L1096">			return namedBean;</span>
+		}
+<span class="nc" id="L1098">		BeanFactory parent = getParentBeanFactory();</span>
+<span class="nc bnc" id="L1099" title="All 2 branches missed.">		if (parent instanceof AutowireCapableBeanFactory) {</span>
+<span class="nc" id="L1100">			return ((AutowireCapableBeanFactory) parent).resolveNamedBean(requiredType);</span>
+		}
+<span class="nc" id="L1102">		throw new NoSuchBeanDefinitionException(requiredType);</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Nullable
+	private &lt;T&gt; NamedBeanHolder&lt;T&gt; resolveNamedBean(
+			ResolvableType requiredType, @Nullable Object[] args, boolean nonUniqueAsNull) throws BeansException {
+
+<span class="fc" id="L1110">		Assert.notNull(requiredType, &quot;Required type must not be null&quot;);</span>
+<span class="fc" id="L1111">		String[] candidateNames = getBeanNamesForType(requiredType);</span>
+
+<span class="fc bfc" id="L1113" title="All 2 branches covered.">		if (candidateNames.length &gt; 1) {</span>
+<span class="fc" id="L1114">			List&lt;String&gt; autowireCandidates = new ArrayList&lt;&gt;(candidateNames.length);</span>
+<span class="fc bfc" id="L1115" title="All 2 branches covered.">			for (String beanName : candidateNames) {</span>
+<span class="pc bpc" id="L1116" title="1 of 4 branches missed.">				if (!containsBeanDefinition(beanName) || getBeanDefinition(beanName).isAutowireCandidate()) {</span>
+<span class="fc" id="L1117">					autowireCandidates.add(beanName);</span>
+				}
+			}
+<span class="pc bpc" id="L1120" title="1 of 2 branches missed.">			if (!autowireCandidates.isEmpty()) {</span>
+<span class="fc" id="L1121">				candidateNames = StringUtils.toStringArray(autowireCandidates);</span>
+			}
+		}
+
+<span class="fc bfc" id="L1125" title="All 2 branches covered.">		if (candidateNames.length == 1) {</span>
+<span class="fc" id="L1126">			String beanName = candidateNames[0];</span>
+<span class="fc" id="L1127">			return new NamedBeanHolder&lt;&gt;(beanName, (T) getBean(beanName, requiredType.toClass(), args));</span>
+		}
+<span class="fc bfc" id="L1129" title="All 2 branches covered.">		else if (candidateNames.length &gt; 1) {</span>
+<span class="fc" id="L1130">			Map&lt;String, Object&gt; candidates = new LinkedHashMap&lt;&gt;(candidateNames.length);</span>
+<span class="fc bfc" id="L1131" title="All 2 branches covered.">			for (String beanName : candidateNames) {</span>
+<span class="pc bpc" id="L1132" title="1 of 4 branches missed.">				if (containsSingleton(beanName) &amp;&amp; args == null) {</span>
+<span class="fc" id="L1133">					Object beanInstance = getBean(beanName);</span>
+<span class="fc bfc" id="L1134" title="All 2 branches covered.">					candidates.put(beanName, (beanInstance instanceof NullBean ? null : beanInstance));</span>
+<span class="fc" id="L1135">				}</span>
+				else {
+<span class="fc" id="L1137">					candidates.put(beanName, getType(beanName));</span>
+				}
+			}
+<span class="fc" id="L1140">			String candidateName = determinePrimaryCandidate(candidates, requiredType.toClass());</span>
+<span class="fc bfc" id="L1141" title="All 2 branches covered.">			if (candidateName == null) {</span>
+<span class="fc" id="L1142">				candidateName = determineHighestPriorityCandidate(candidates, requiredType.toClass());</span>
+			}
+<span class="fc bfc" id="L1144" title="All 2 branches covered.">			if (candidateName != null) {</span>
+<span class="fc" id="L1145">				Object beanInstance = candidates.get(candidateName);</span>
+<span class="pc bpc" id="L1146" title="1 of 4 branches missed.">				if (beanInstance == null || beanInstance instanceof Class) {</span>
+<span class="fc" id="L1147">					beanInstance = getBean(candidateName, requiredType.toClass(), args);</span>
+				}
+<span class="fc" id="L1149">				return new NamedBeanHolder&lt;&gt;(candidateName, (T) beanInstance);</span>
+			}
+<span class="fc bfc" id="L1151" title="All 2 branches covered.">			if (!nonUniqueAsNull) {</span>
+<span class="fc" id="L1152">				throw new NoUniqueBeanDefinitionException(requiredType, candidates.keySet());</span>
+			}
+		}
+
+<span class="fc" id="L1156">		return null;</span>
+	}
+
+	@Override
+	@Nullable
+	public Object resolveDependency(DependencyDescriptor descriptor, @Nullable String requestingBeanName,
+			@Nullable Set&lt;String&gt; autowiredBeanNames, @Nullable TypeConverter typeConverter) throws BeansException {
+
+<span class="fc" id="L1164">		descriptor.initParameterNameDiscovery(getParameterNameDiscoverer());</span>
+<span class="fc bfc" id="L1165" title="All 2 branches covered.">		if (Optional.class == descriptor.getDependencyType()) {</span>
+<span class="fc" id="L1166">			return createOptionalDependency(descriptor, requestingBeanName);</span>
+		}
+<span class="fc bfc" id="L1168" title="All 2 branches covered.">		else if (ObjectFactory.class == descriptor.getDependencyType() ||</span>
+<span class="fc bfc" id="L1169" title="All 2 branches covered.">				ObjectProvider.class == descriptor.getDependencyType()) {</span>
+<span class="fc" id="L1170">			return new DependencyObjectProvider(descriptor, requestingBeanName);</span>
+		}
+<span class="fc bfc" id="L1172" title="All 2 branches covered.">		else if (javaxInjectProviderClass == descriptor.getDependencyType()) {</span>
+<span class="fc" id="L1173">			return new Jsr330Factory().createDependencyProvider(descriptor, requestingBeanName);</span>
+		}
+		else {
+<span class="fc" id="L1176">			Object result = getAutowireCandidateResolver().getLazyResolutionProxyIfNecessary(</span>
+					descriptor, requestingBeanName);
+<span class="pc bpc" id="L1178" title="1 of 2 branches missed.">			if (result == null) {</span>
+<span class="fc" id="L1179">				result = doResolveDependency(descriptor, requestingBeanName, autowiredBeanNames, typeConverter);</span>
+			}
+<span class="fc" id="L1181">			return result;</span>
+		}
+	}
+
+	@Nullable
+	public Object doResolveDependency(DependencyDescriptor descriptor, @Nullable String beanName,
+			@Nullable Set&lt;String&gt; autowiredBeanNames, @Nullable TypeConverter typeConverter) throws BeansException {
+
+<span class="fc" id="L1189">		InjectionPoint previousInjectionPoint = ConstructorResolver.setCurrentInjectionPoint(descriptor);</span>
+		try {
+<span class="fc" id="L1191">			Object shortcut = descriptor.resolveShortcut(this);</span>
+<span class="fc bfc" id="L1192" title="All 2 branches covered.">			if (shortcut != null) {</span>
+<span class="fc" id="L1193">				return shortcut;</span>
+			}
+
+<span class="fc" id="L1196">			Class&lt;?&gt; type = descriptor.getDependencyType();</span>
+<span class="fc" id="L1197">			Object value = getAutowireCandidateResolver().getSuggestedValue(descriptor);</span>
+<span class="pc bpc" id="L1198" title="1 of 2 branches missed.">			if (value != null) {</span>
+<span class="nc bnc" id="L1199" title="All 2 branches missed.">				if (value instanceof String) {</span>
+<span class="nc" id="L1200">					String strVal = resolveEmbeddedValue((String) value);</span>
+<span class="nc bnc" id="L1201" title="All 4 branches missed.">					BeanDefinition bd = (beanName != null &amp;&amp; containsBean(beanName) ?</span>
+<span class="nc" id="L1202">							getMergedBeanDefinition(beanName) : null);</span>
+<span class="nc" id="L1203">					value = evaluateBeanDefinitionString(strVal, bd);</span>
+				}
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">				TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());</span>
+				try {
+<span class="nc" id="L1207">					return converter.convertIfNecessary(value, type, descriptor.getTypeDescriptor());</span>
+				}
+<span class="nc" id="L1209">				catch (UnsupportedOperationException ex) {</span>
+					// A custom TypeConverter which does not support TypeDescriptor resolution...
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">					return (descriptor.getField() != null ?</span>
+<span class="nc" id="L1212">							converter.convertIfNecessary(value, type, descriptor.getField()) :</span>
+<span class="nc" id="L1213">							converter.convertIfNecessary(value, type, descriptor.getMethodParameter()));</span>
+				}
+			}
+
+<span class="fc" id="L1217">			Object multipleBeans = resolveMultipleBeans(descriptor, beanName, autowiredBeanNames, typeConverter);</span>
+<span class="fc bfc" id="L1218" title="All 2 branches covered.">			if (multipleBeans != null) {</span>
+<span class="fc" id="L1219">				return multipleBeans;</span>
+			}
+
+<span class="fc" id="L1222">			Map&lt;String, Object&gt; matchingBeans = findAutowireCandidates(beanName, type, descriptor);</span>
+<span class="fc bfc" id="L1223" title="All 2 branches covered.">			if (matchingBeans.isEmpty()) {</span>
+<span class="fc bfc" id="L1224" title="All 2 branches covered.">				if (isRequired(descriptor)) {</span>
+<span class="nc" id="L1225">					raiseNoMatchingBeanFound(type, descriptor.getResolvableType(), descriptor);</span>
+				}
+<span class="fc" id="L1227">				return null;</span>
+			}
+
+			String autowiredBeanName;
+			Object instanceCandidate;
+
+<span class="fc bfc" id="L1233" title="All 2 branches covered.">			if (matchingBeans.size() &gt; 1) {</span>
+<span class="fc" id="L1234">				autowiredBeanName = determineAutowireCandidate(matchingBeans, descriptor);</span>
+<span class="fc bfc" id="L1235" title="All 2 branches covered.">				if (autowiredBeanName == null) {</span>
+<span class="pc bpc" id="L1236" title="1 of 4 branches missed.">					if (isRequired(descriptor) || !indicatesMultipleBeans(type)) {</span>
+<span class="fc" id="L1237">						return descriptor.resolveNotUnique(descriptor.getResolvableType(), matchingBeans);</span>
+					}
+					else {
+						// In case of an optional Collection/Map, silently ignore a non-unique case:
+						// possibly it was meant to be an empty collection of multiple regular beans
+						// (before 4.3 in particular when we didn't even look for collection beans).
+<span class="nc" id="L1243">						return null;</span>
+					}
+				}
+<span class="fc" id="L1246">				instanceCandidate = matchingBeans.get(autowiredBeanName);</span>
+			}
+			else {
+				// We have exactly one match.
+<span class="fc" id="L1250">				Map.Entry&lt;String, Object&gt; entry = matchingBeans.entrySet().iterator().next();</span>
+<span class="fc" id="L1251">				autowiredBeanName = entry.getKey();</span>
+<span class="fc" id="L1252">				instanceCandidate = entry.getValue();</span>
+			}
+
+<span class="fc bfc" id="L1255" title="All 2 branches covered.">			if (autowiredBeanNames != null) {</span>
+<span class="fc" id="L1256">				autowiredBeanNames.add(autowiredBeanName);</span>
+			}
+<span class="fc bfc" id="L1258" title="All 2 branches covered.">			if (instanceCandidate instanceof Class) {</span>
+<span class="fc" id="L1259">				instanceCandidate = descriptor.resolveCandidate(autowiredBeanName, type, this);</span>
+			}
+<span class="fc" id="L1261">			Object result = instanceCandidate;</span>
+<span class="fc bfc" id="L1262" title="All 2 branches covered.">			if (result instanceof NullBean) {</span>
+<span class="fc bfc" id="L1263" title="All 2 branches covered.">				if (isRequired(descriptor)) {</span>
+<span class="nc" id="L1264">					raiseNoMatchingBeanFound(type, descriptor.getResolvableType(), descriptor);</span>
+				}
+<span class="fc" id="L1266">				result = null;</span>
+			}
+<span class="pc bpc" id="L1268" title="1 of 2 branches missed.">			if (!ClassUtils.isAssignableValue(type, result)) {</span>
+<span class="nc" id="L1269">				throw new BeanNotOfRequiredTypeException(autowiredBeanName, type, instanceCandidate.getClass());</span>
+			}
+<span class="fc" id="L1271">			return result;</span>
+		}
+		finally {
+<span class="fc" id="L1274">			ConstructorResolver.setCurrentInjectionPoint(previousInjectionPoint);</span>
+		}
+	}
+
+	@Nullable
+	private Object resolveMultipleBeans(DependencyDescriptor descriptor, @Nullable String beanName,
+			@Nullable Set&lt;String&gt; autowiredBeanNames, @Nullable TypeConverter typeConverter) {
+
+<span class="fc" id="L1282">		final Class&lt;?&gt; type = descriptor.getDependencyType();</span>
+
+<span class="fc bfc" id="L1284" title="All 2 branches covered.">		if (descriptor instanceof StreamDependencyDescriptor) {</span>
+<span class="fc" id="L1285">			Map&lt;String, Object&gt; matchingBeans = findAutowireCandidates(beanName, type, descriptor);</span>
+<span class="pc bpc" id="L1286" title="1 of 2 branches missed.">			if (autowiredBeanNames != null) {</span>
+<span class="nc" id="L1287">				autowiredBeanNames.addAll(matchingBeans.keySet());</span>
+			}
+<span class="fc" id="L1289">			Stream&lt;Object&gt; stream = matchingBeans.keySet().stream()</span>
+<span class="fc" id="L1290">					.map(name -&gt; descriptor.resolveCandidate(name, type, this))</span>
+<span class="pc bpc" id="L1291" title="1 of 2 branches missed.">					.filter(bean -&gt; !(bean instanceof NullBean));</span>
+<span class="fc bfc" id="L1292" title="All 2 branches covered.">			if (((StreamDependencyDescriptor) descriptor).isOrdered()) {</span>
+<span class="fc" id="L1293">				stream = stream.sorted(adaptOrderComparator(matchingBeans));</span>
+			}
+<span class="fc" id="L1295">			return stream;</span>
+		}
+<span class="fc bfc" id="L1297" title="All 2 branches covered.">		else if (type.isArray()) {</span>
+<span class="fc" id="L1298">			Class&lt;?&gt; componentType = type.getComponentType();</span>
+<span class="fc" id="L1299">			ResolvableType resolvableType = descriptor.getResolvableType();</span>
+<span class="fc" id="L1300">			Class&lt;?&gt; resolvedArrayType = resolvableType.resolve(type);</span>
+<span class="fc bfc" id="L1301" title="All 2 branches covered.">			if (resolvedArrayType != type) {</span>
+<span class="fc" id="L1302">				componentType = resolvableType.getComponentType().resolve();</span>
+			}
+<span class="pc bpc" id="L1304" title="1 of 2 branches missed.">			if (componentType == null) {</span>
+<span class="nc" id="L1305">				return null;</span>
+			}
+<span class="fc" id="L1307">			Map&lt;String, Object&gt; matchingBeans = findAutowireCandidates(beanName, componentType,</span>
+					new MultiElementDescriptor(descriptor));
+<span class="fc bfc" id="L1309" title="All 2 branches covered.">			if (matchingBeans.isEmpty()) {</span>
+<span class="fc" id="L1310">				return null;</span>
+			}
+<span class="pc bpc" id="L1312" title="1 of 2 branches missed.">			if (autowiredBeanNames != null) {</span>
+<span class="fc" id="L1313">				autowiredBeanNames.addAll(matchingBeans.keySet());</span>
+			}
+<span class="pc bpc" id="L1315" title="1 of 2 branches missed.">			TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());</span>
+<span class="fc" id="L1316">			Object result = converter.convertIfNecessary(matchingBeans.values(), resolvedArrayType);</span>
+<span class="pc bpc" id="L1317" title="1 of 2 branches missed.">			if (result instanceof Object[]) {</span>
+<span class="fc" id="L1318">				Comparator&lt;Object&gt; comparator = adaptDependencyComparator(matchingBeans);</span>
+<span class="fc bfc" id="L1319" title="All 2 branches covered.">				if (comparator != null) {</span>
+<span class="fc" id="L1320">					Arrays.sort((Object[]) result, comparator);</span>
+				}
+			}
+<span class="fc" id="L1323">			return result;</span>
+		}
+<span class="fc bfc" id="L1325" title="All 4 branches covered.">		else if (Collection.class.isAssignableFrom(type) &amp;&amp; type.isInterface()) {</span>
+<span class="fc" id="L1326">			Class&lt;?&gt; elementType = descriptor.getResolvableType().asCollection().resolveGeneric();</span>
+<span class="fc bfc" id="L1327" title="All 2 branches covered.">			if (elementType == null) {</span>
+<span class="fc" id="L1328">				return null;</span>
+			}
+<span class="fc" id="L1330">			Map&lt;String, Object&gt; matchingBeans = findAutowireCandidates(beanName, elementType,</span>
+					new MultiElementDescriptor(descriptor));
+<span class="fc bfc" id="L1332" title="All 2 branches covered.">			if (matchingBeans.isEmpty()) {</span>
+<span class="fc" id="L1333">				return null;</span>
+			}
+<span class="fc bfc" id="L1335" title="All 2 branches covered.">			if (autowiredBeanNames != null) {</span>
+<span class="fc" id="L1336">				autowiredBeanNames.addAll(matchingBeans.keySet());</span>
+			}
+<span class="fc bfc" id="L1338" title="All 2 branches covered.">			TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());</span>
+<span class="fc" id="L1339">			Object result = converter.convertIfNecessary(matchingBeans.values(), type);</span>
+<span class="fc bfc" id="L1340" title="All 2 branches covered.">			if (result instanceof List) {</span>
+<span class="fc" id="L1341">				Comparator&lt;Object&gt; comparator = adaptDependencyComparator(matchingBeans);</span>
+<span class="fc bfc" id="L1342" title="All 2 branches covered.">				if (comparator != null) {</span>
+<span class="fc" id="L1343">					((List&lt;?&gt;) result).sort(comparator);</span>
+				}
+			}
+<span class="fc" id="L1346">			return result;</span>
+		}
+<span class="fc bfc" id="L1348" title="All 2 branches covered.">		else if (Map.class == type) {</span>
+<span class="fc" id="L1349">			ResolvableType mapType = descriptor.getResolvableType().asMap();</span>
+<span class="fc" id="L1350">			Class&lt;?&gt; keyType = mapType.resolveGeneric(0);</span>
+<span class="fc bfc" id="L1351" title="All 2 branches covered.">			if (String.class != keyType) {</span>
+<span class="fc" id="L1352">				return null;</span>
+			}
+<span class="fc" id="L1354">			Class&lt;?&gt; valueType = mapType.resolveGeneric(1);</span>
+<span class="pc bpc" id="L1355" title="1 of 2 branches missed.">			if (valueType == null) {</span>
+<span class="nc" id="L1356">				return null;</span>
+			}
+<span class="fc" id="L1358">			Map&lt;String, Object&gt; matchingBeans = findAutowireCandidates(beanName, valueType,</span>
+					new MultiElementDescriptor(descriptor));
+<span class="fc bfc" id="L1360" title="All 2 branches covered.">			if (matchingBeans.isEmpty()) {</span>
+<span class="fc" id="L1361">				return null;</span>
+			}
+<span class="fc bfc" id="L1363" title="All 2 branches covered.">			if (autowiredBeanNames != null) {</span>
+<span class="fc" id="L1364">				autowiredBeanNames.addAll(matchingBeans.keySet());</span>
+			}
+<span class="fc" id="L1366">			return matchingBeans;</span>
+		}
+		else {
+<span class="fc" id="L1369">			return null;</span>
+		}
+	}
+
+	private boolean isRequired(DependencyDescriptor descriptor) {
+<span class="fc" id="L1374">		return getAutowireCandidateResolver().isRequired(descriptor);</span>
+	}
+
+	private boolean indicatesMultipleBeans(Class&lt;?&gt; type) {
+<span class="fc bfc" id="L1378" title="All 4 branches covered.">		return (type.isArray() || (type.isInterface() &amp;&amp;</span>
+<span class="fc bfc" id="L1379" title="All 4 branches covered.">				(Collection.class.isAssignableFrom(type) || Map.class.isAssignableFrom(type))));</span>
+	}
+
+	@Nullable
+	private Comparator&lt;Object&gt; adaptDependencyComparator(Map&lt;String, ?&gt; matchingBeans) {
+<span class="fc" id="L1384">		Comparator&lt;Object&gt; comparator = getDependencyComparator();</span>
+<span class="fc bfc" id="L1385" title="All 2 branches covered.">		if (comparator instanceof OrderComparator) {</span>
+<span class="fc" id="L1386">			return ((OrderComparator) comparator).withSourceProvider(</span>
+<span class="fc" id="L1387">					createFactoryAwareOrderSourceProvider(matchingBeans));</span>
+		}
+		else {
+<span class="fc" id="L1390">			return comparator;</span>
+		}
+	}
+
+	private Comparator&lt;Object&gt; adaptOrderComparator(Map&lt;String, ?&gt; matchingBeans) {
+<span class="fc" id="L1395">		Comparator&lt;Object&gt; dependencyComparator = getDependencyComparator();</span>
+<span class="pc bpc" id="L1396" title="1 of 2 branches missed.">		OrderComparator comparator = (dependencyComparator instanceof OrderComparator ?</span>
+				(OrderComparator) dependencyComparator : OrderComparator.INSTANCE);
+<span class="fc" id="L1398">		return comparator.withSourceProvider(createFactoryAwareOrderSourceProvider(matchingBeans));</span>
+	}
+
+	private OrderComparator.OrderSourceProvider createFactoryAwareOrderSourceProvider(Map&lt;String, ?&gt; beans) {
+<span class="fc" id="L1402">		IdentityHashMap&lt;Object, String&gt; instancesToBeanNames = new IdentityHashMap&lt;&gt;();</span>
+<span class="fc" id="L1403">		beans.forEach((beanName, instance) -&gt; instancesToBeanNames.put(instance, beanName));</span>
+<span class="fc" id="L1404">		return new FactoryAwareOrderSourceProvider(instancesToBeanNames);</span>
+	}
+
+	/**
+	 * Find bean instances that match the required type.
+	 * Called during autowiring for the specified bean.
+	 * @param beanName the name of the bean that is about to be wired
+	 * @param requiredType the actual type of bean to look for
+	 * (may be an array component type or collection element type)
+	 * @param descriptor the descriptor of the dependency to resolve
+	 * @return a Map of candidate names and candidate instances that match
+	 * the required type (never {@code null})
+	 * @throws BeansException in case of errors
+	 * @see #autowireByType
+	 * @see #autowireConstructor
+	 */
+	protected Map&lt;String, Object&gt; findAutowireCandidates(
+			@Nullable String beanName, Class&lt;?&gt; requiredType, DependencyDescriptor descriptor) {
+
+<span class="fc" id="L1423">		String[] candidateNames = BeanFactoryUtils.beanNamesForTypeIncludingAncestors(</span>
+<span class="fc" id="L1424">				this, requiredType, true, descriptor.isEager());</span>
+<span class="fc" id="L1425">		Map&lt;String, Object&gt; result = new LinkedHashMap&lt;&gt;(candidateNames.length);</span>
+<span class="fc bfc" id="L1426" title="All 2 branches covered.">		for (Map.Entry&lt;Class&lt;?&gt;, Object&gt; classObjectEntry : this.resolvableDependencies.entrySet()) {</span>
+<span class="fc" id="L1427">			Class&lt;?&gt; autowiringType = classObjectEntry.getKey();</span>
+<span class="fc bfc" id="L1428" title="All 2 branches covered.">			if (autowiringType.isAssignableFrom(requiredType)) {</span>
+<span class="fc" id="L1429">				Object autowiringValue = classObjectEntry.getValue();</span>
+<span class="fc" id="L1430">				autowiringValue = AutowireUtils.resolveAutowiringValue(autowiringValue, requiredType);</span>
+<span class="pc bpc" id="L1431" title="1 of 2 branches missed.">				if (requiredType.isInstance(autowiringValue)) {</span>
+<span class="fc" id="L1432">					result.put(ObjectUtils.identityToString(autowiringValue), autowiringValue);</span>
+<span class="fc" id="L1433">					break;</span>
+				}
+			}
+<span class="fc" id="L1436">		}</span>
+<span class="fc bfc" id="L1437" title="All 2 branches covered.">		for (String candidate : candidateNames) {</span>
+<span class="fc bfc" id="L1438" title="All 4 branches covered.">			if (!isSelfReference(beanName, candidate) &amp;&amp; isAutowireCandidate(candidate, descriptor)) {</span>
+<span class="fc" id="L1439">				addCandidateEntry(result, candidate, descriptor, requiredType);</span>
+			}
+		}
+<span class="fc bfc" id="L1442" title="All 2 branches covered.">		if (result.isEmpty()) {</span>
+<span class="fc" id="L1443">			boolean multiple = indicatesMultipleBeans(requiredType);</span>
+			// Consider fallback matches if the first pass failed to find anything...
+<span class="fc" id="L1445">			DependencyDescriptor fallbackDescriptor = descriptor.forFallbackMatch();</span>
+<span class="fc bfc" id="L1446" title="All 2 branches covered.">			for (String candidate : candidateNames) {</span>
+<span class="fc bfc" id="L1447" title="All 6 branches covered.">				if (!isSelfReference(beanName, candidate) &amp;&amp; isAutowireCandidate(candidate, fallbackDescriptor) &amp;&amp;</span>
+<span class="pc bpc" id="L1448" title="1 of 2 branches missed.">						(!multiple || getAutowireCandidateResolver().hasQualifier(descriptor))) {</span>
+<span class="fc" id="L1449">					addCandidateEntry(result, candidate, descriptor, requiredType);</span>
+				}
+			}
+<span class="fc bfc" id="L1452" title="All 4 branches covered.">			if (result.isEmpty() &amp;&amp; !multiple) {</span>
+				// Consider self references as a final pass...
+				// but in the case of a dependency collection, not the very same bean itself.
+<span class="fc bfc" id="L1455" title="All 2 branches covered.">				for (String candidate : candidateNames) {</span>
+<span class="pc bpc" id="L1456" title="1 of 4 branches missed.">					if (isSelfReference(beanName, candidate) &amp;&amp;</span>
+<span class="pc bpc" id="L1457" title="1 of 2 branches missed.">							(!(descriptor instanceof MultiElementDescriptor) || !beanName.equals(candidate)) &amp;&amp;</span>
+<span class="pc bpc" id="L1458" title="1 of 2 branches missed.">							isAutowireCandidate(candidate, fallbackDescriptor)) {</span>
+<span class="fc" id="L1459">						addCandidateEntry(result, candidate, descriptor, requiredType);</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L1464">		return result;</span>
+	}
+
+	/**
+	 * Add an entry to the candidate map: a bean instance if available or just the resolved
+	 * type, preventing early bean initialization ahead of primary candidate selection.
+	 */
+	private void addCandidateEntry(Map&lt;String, Object&gt; candidates, String candidateName,
+			DependencyDescriptor descriptor, Class&lt;?&gt; requiredType) {
+
+<span class="fc bfc" id="L1474" title="All 2 branches covered.">		if (descriptor instanceof MultiElementDescriptor) {</span>
+<span class="fc" id="L1475">			Object beanInstance = descriptor.resolveCandidate(candidateName, requiredType, this);</span>
+<span class="fc bfc" id="L1476" title="All 2 branches covered.">			if (!(beanInstance instanceof NullBean)) {</span>
+<span class="fc" id="L1477">				candidates.put(candidateName, beanInstance);</span>
+			}
+<span class="fc" id="L1479">		}</span>
+<span class="fc bfc" id="L1480" title="All 4 branches covered.">		else if (containsSingleton(candidateName) || (descriptor instanceof StreamDependencyDescriptor &amp;&amp;</span>
+<span class="fc bfc" id="L1481" title="All 2 branches covered.">				((StreamDependencyDescriptor) descriptor).isOrdered())) {</span>
+<span class="fc" id="L1482">			Object beanInstance = descriptor.resolveCandidate(candidateName, requiredType, this);</span>
+<span class="fc bfc" id="L1483" title="All 2 branches covered.">			candidates.put(candidateName, (beanInstance instanceof NullBean ? null : beanInstance));</span>
+<span class="fc" id="L1484">		}</span>
+		else {
+<span class="fc" id="L1486">			candidates.put(candidateName, getType(candidateName));</span>
+		}
+<span class="fc" id="L1488">	}</span>
+
+	/**
+	 * Determine the autowire candidate in the given set of beans.
+	 * &lt;p&gt;Looks for {@code @Primary} and {@code @Priority} (in that order).
+	 * @param candidates a Map of candidate names and candidate instances
+	 * that match the required type, as returned by {@link #findAutowireCandidates}
+	 * @param descriptor the target dependency to match against
+	 * @return the name of the autowire candidate, or {@code null} if none found
+	 */
+	@Nullable
+	protected String determineAutowireCandidate(Map&lt;String, Object&gt; candidates, DependencyDescriptor descriptor) {
+<span class="fc" id="L1500">		Class&lt;?&gt; requiredType = descriptor.getDependencyType();</span>
+<span class="fc" id="L1501">		String primaryCandidate = determinePrimaryCandidate(candidates, requiredType);</span>
+<span class="fc bfc" id="L1502" title="All 2 branches covered.">		if (primaryCandidate != null) {</span>
+<span class="fc" id="L1503">			return primaryCandidate;</span>
+		}
+<span class="fc" id="L1505">		String priorityCandidate = determineHighestPriorityCandidate(candidates, requiredType);</span>
+<span class="fc bfc" id="L1506" title="All 2 branches covered.">		if (priorityCandidate != null) {</span>
+<span class="fc" id="L1507">			return priorityCandidate;</span>
+		}
+		// Fallback
+<span class="fc bfc" id="L1510" title="All 2 branches covered.">		for (Map.Entry&lt;String, Object&gt; entry : candidates.entrySet()) {</span>
+<span class="fc" id="L1511">			String candidateName = entry.getKey();</span>
+<span class="fc" id="L1512">			Object beanInstance = entry.getValue();</span>
+<span class="pc bpc" id="L1513" title="1 of 4 branches missed.">			if ((beanInstance != null &amp;&amp; this.resolvableDependencies.containsValue(beanInstance)) ||</span>
+<span class="fc bfc" id="L1514" title="All 2 branches covered.">					matchesBeanName(candidateName, descriptor.getDependencyName())) {</span>
+<span class="fc" id="L1515">				return candidateName;</span>
+			}
+<span class="fc" id="L1517">		}</span>
+<span class="fc" id="L1518">		return null;</span>
+	}
+
+	/**
+	 * Determine the primary candidate in the given set of beans.
+	 * @param candidates a Map of candidate names and candidate instances
+	 * (or candidate classes if not created yet) that match the required type
+	 * @param requiredType the target dependency type to match against
+	 * @return the name of the primary candidate, or {@code null} if none found
+	 * @see #isPrimary(String, Object)
+	 */
+	@Nullable
+	protected String determinePrimaryCandidate(Map&lt;String, Object&gt; candidates, Class&lt;?&gt; requiredType) {
+<span class="fc" id="L1531">		String primaryBeanName = null;</span>
+<span class="fc bfc" id="L1532" title="All 2 branches covered.">		for (Map.Entry&lt;String, Object&gt; entry : candidates.entrySet()) {</span>
+<span class="fc" id="L1533">			String candidateBeanName = entry.getKey();</span>
+<span class="fc" id="L1534">			Object beanInstance = entry.getValue();</span>
+<span class="fc bfc" id="L1535" title="All 2 branches covered.">			if (isPrimary(candidateBeanName, beanInstance)) {</span>
+<span class="fc bfc" id="L1536" title="All 2 branches covered.">				if (primaryBeanName != null) {</span>
+<span class="fc" id="L1537">					boolean candidateLocal = containsBeanDefinition(candidateBeanName);</span>
+<span class="fc" id="L1538">					boolean primaryLocal = containsBeanDefinition(primaryBeanName);</span>
+<span class="pc bpc" id="L1539" title="1 of 4 branches missed.">					if (candidateLocal &amp;&amp; primaryLocal) {</span>
+<span class="fc" id="L1540">						throw new NoUniqueBeanDefinitionException(requiredType, candidates.size(),</span>
+<span class="fc" id="L1541">								&quot;more than one 'primary' bean found among candidates: &quot; + candidates.keySet());</span>
+					}
+<span class="pc bpc" id="L1543" title="1 of 2 branches missed.">					else if (candidateLocal) {</span>
+<span class="nc" id="L1544">						primaryBeanName = candidateBeanName;</span>
+					}
+<span class="fc" id="L1546">				}</span>
+				else {
+<span class="fc" id="L1548">					primaryBeanName = candidateBeanName;</span>
+				}
+			}
+<span class="fc" id="L1551">		}</span>
+<span class="fc" id="L1552">		return primaryBeanName;</span>
+	}
+
+	/**
+	 * Determine the candidate with the highest priority in the given set of beans.
+	 * &lt;p&gt;Based on {@code @javax.annotation.Priority}. As defined by the related
+	 * {@link org.springframework.core.Ordered} interface, the lowest value has
+	 * the highest priority.
+	 * @param candidates a Map of candidate names and candidate instances
+	 * (or candidate classes if not created yet) that match the required type
+	 * @param requiredType the target dependency type to match against
+	 * @return the name of the candidate with the highest priority,
+	 * or {@code null} if none found
+	 * @see #getPriority(Object)
+	 */
+	@Nullable
+	protected String determineHighestPriorityCandidate(Map&lt;String, Object&gt; candidates, Class&lt;?&gt; requiredType) {
+<span class="fc" id="L1569">		String highestPriorityBeanName = null;</span>
+<span class="fc" id="L1570">		Integer highestPriority = null;</span>
+<span class="fc bfc" id="L1571" title="All 2 branches covered.">		for (Map.Entry&lt;String, Object&gt; entry : candidates.entrySet()) {</span>
+<span class="fc" id="L1572">			String candidateBeanName = entry.getKey();</span>
+<span class="fc" id="L1573">			Object beanInstance = entry.getValue();</span>
+<span class="fc bfc" id="L1574" title="All 2 branches covered.">			if (beanInstance != null) {</span>
+<span class="fc" id="L1575">				Integer candidatePriority = getPriority(beanInstance);</span>
+<span class="fc bfc" id="L1576" title="All 2 branches covered.">				if (candidatePriority != null) {</span>
+<span class="fc bfc" id="L1577" title="All 2 branches covered.">					if (highestPriorityBeanName != null) {</span>
+<span class="fc bfc" id="L1578" title="All 2 branches covered.">						if (candidatePriority.equals(highestPriority)) {</span>
+<span class="fc" id="L1579">							throw new NoUniqueBeanDefinitionException(requiredType, candidates.size(),</span>
+									&quot;Multiple beans found with the same priority ('&quot; + highestPriority +
+<span class="fc" id="L1581">									&quot;') among candidates: &quot; + candidates.keySet());</span>
+						}
+<span class="pc bpc" id="L1583" title="1 of 2 branches missed.">						else if (candidatePriority &lt; highestPriority) {</span>
+<span class="nc" id="L1584">							highestPriorityBeanName = candidateBeanName;</span>
+<span class="nc" id="L1585">							highestPriority = candidatePriority;</span>
+						}
+					}
+					else {
+<span class="fc" id="L1589">						highestPriorityBeanName = candidateBeanName;</span>
+<span class="fc" id="L1590">						highestPriority = candidatePriority;</span>
+					}
+				}
+			}
+<span class="fc" id="L1594">		}</span>
+<span class="fc" id="L1595">		return highestPriorityBeanName;</span>
+	}
+
+	/**
+	 * Return whether the bean definition for the given bean name has been
+	 * marked as a primary bean.
+	 * @param beanName the name of the bean
+	 * @param beanInstance the corresponding bean instance (can be null)
+	 * @return whether the given bean qualifies as primary
+	 */
+	protected boolean isPrimary(String beanName, Object beanInstance) {
+<span class="fc bfc" id="L1606" title="All 2 branches covered.">		if (containsBeanDefinition(beanName)) {</span>
+<span class="fc" id="L1607">			return getMergedLocalBeanDefinition(beanName).isPrimary();</span>
+		}
+<span class="fc" id="L1609">		BeanFactory parent = getParentBeanFactory();</span>
+<span class="fc bfc" id="L1610" title="All 2 branches covered.">		return (parent instanceof DefaultListableBeanFactory &amp;&amp;</span>
+<span class="fc bfc" id="L1611" title="All 2 branches covered.">				((DefaultListableBeanFactory) parent).isPrimary(beanName, beanInstance));</span>
+	}
+
+	/**
+	 * Return the priority assigned for the given bean instance by
+	 * the {@code javax.annotation.Priority} annotation.
+	 * &lt;p&gt;The default implementation delegates to the specified
+	 * {@link #setDependencyComparator dependency comparator}, checking its
+	 * {@link OrderComparator#getPriority method} if it is an extension of
+	 * Spring's common {@link OrderComparator} - typically, an
+	 * {@link org.springframework.core.annotation.AnnotationAwareOrderComparator}.
+	 * If no such comparator is present, this implementation returns {@code null}.
+	 * @param beanInstance the bean instance to check (can be {@code null})
+	 * @return the priority assigned to that bean or {@code null} if none is set
+	 */
+	@Nullable
+	protected Integer getPriority(Object beanInstance) {
+<span class="fc" id="L1628">		Comparator&lt;Object&gt; comparator = getDependencyComparator();</span>
+<span class="fc bfc" id="L1629" title="All 2 branches covered.">		if (comparator instanceof OrderComparator) {</span>
+<span class="fc" id="L1630">			return ((OrderComparator) comparator).getPriority(beanInstance);</span>
+		}
+<span class="fc" id="L1632">		return null;</span>
+	}
+
+	/**
+	 * Determine whether the given candidate name matches the bean name or the aliases
+	 * stored in this bean definition.
+	 */
+	protected boolean matchesBeanName(String beanName, @Nullable String candidateName) {
+<span class="fc bfc" id="L1640" title="All 2 branches covered.">		return (candidateName != null &amp;&amp;</span>
+<span class="pc bpc" id="L1641" title="1 of 4 branches missed.">				(candidateName.equals(beanName) || ObjectUtils.containsElement(getAliases(beanName), candidateName)));</span>
+	}
+
+	/**
+	 * Determine whether the given beanName/candidateName pair indicates a self reference,
+	 * i.e. whether the candidate points back to the original bean or to a factory method
+	 * on the original bean.
+	 */
+	private boolean isSelfReference(@Nullable String beanName, @Nullable String candidateName) {
+<span class="pc bpc" id="L1650" title="2 of 4 branches missed.">		return (beanName != null &amp;&amp; candidateName != null &amp;&amp;</span>
+<span class="fc bfc" id="L1651" title="All 4 branches covered.">				(beanName.equals(candidateName) || (containsBeanDefinition(candidateName) &amp;&amp;</span>
+<span class="pc bpc" id="L1652" title="1 of 2 branches missed.">						beanName.equals(getMergedLocalBeanDefinition(candidateName).getFactoryBeanName()))));</span>
+	}
+
+	/**
+	 * Raise a NoSuchBeanDefinitionException or BeanNotOfRequiredTypeException
+	 * for an unresolvable dependency.
+	 */
+	private void raiseNoMatchingBeanFound(
+			Class&lt;?&gt; type, ResolvableType resolvableType, DependencyDescriptor descriptor) throws BeansException {
+
+<span class="fc" id="L1662">		checkBeanNotOfRequiredType(type, descriptor);</span>
+
+<span class="fc" id="L1664">		throw new NoSuchBeanDefinitionException(resolvableType,</span>
+				&quot;expected at least 1 bean which qualifies as autowire candidate. &quot; +
+<span class="fc" id="L1666">				&quot;Dependency annotations: &quot; + ObjectUtils.nullSafeToString(descriptor.getAnnotations()));</span>
+	}
+
+	/**
+	 * Raise a BeanNotOfRequiredTypeException for an unresolvable dependency, if applicable,
+	 * i.e. if the target type of the bean would match but an exposed proxy doesn't.
+	 */
+	private void checkBeanNotOfRequiredType(Class&lt;?&gt; type, DependencyDescriptor descriptor) {
+<span class="fc bfc" id="L1674" title="All 2 branches covered.">		for (String beanName : this.beanDefinitionNames) {</span>
+<span class="fc" id="L1675">			RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);</span>
+<span class="fc" id="L1676">			Class&lt;?&gt; targetType = mbd.getTargetType();</span>
+<span class="fc bfc" id="L1677" title="All 4 branches covered.">			if (targetType != null &amp;&amp; type.isAssignableFrom(targetType) &amp;&amp;</span>
+<span class="pc bpc" id="L1678" title="1 of 2 branches missed.">					isAutowireCandidate(beanName, mbd, descriptor, getAutowireCandidateResolver())) {</span>
+				// Probably a proxy interfering with target type match -&gt; throw meaningful exception.
+<span class="fc" id="L1680">				Object beanInstance = getSingleton(beanName, false);</span>
+<span class="pc bpc" id="L1681" title="2 of 4 branches missed.">				Class&lt;?&gt; beanType = (beanInstance != null &amp;&amp; beanInstance.getClass() != NullBean.class ?</span>
+<span class="pc" id="L1682">						beanInstance.getClass() : predictBeanType(beanName, mbd));</span>
+<span class="pc bpc" id="L1683" title="2 of 4 branches missed.">				if (beanType != null &amp;&amp; !type.isAssignableFrom(beanType)) {</span>
+<span class="nc" id="L1684">					throw new BeanNotOfRequiredTypeException(beanName, type, beanType);</span>
+				}
+			}
+<span class="fc" id="L1687">		}</span>
+
+<span class="fc" id="L1689">		BeanFactory parent = getParentBeanFactory();</span>
+<span class="pc bpc" id="L1690" title="1 of 2 branches missed.">		if (parent instanceof DefaultListableBeanFactory) {</span>
+<span class="nc" id="L1691">			((DefaultListableBeanFactory) parent).checkBeanNotOfRequiredType(type, descriptor);</span>
+		}
+<span class="fc" id="L1693">	}</span>
+
+	/**
+	 * Create an {@link Optional} wrapper for the specified dependency.
+	 */
+	private Optional&lt;?&gt; createOptionalDependency(
+			DependencyDescriptor descriptor, @Nullable String beanName, final Object... args) {
+
+<span class="fc" id="L1701">		DependencyDescriptor descriptorToUse = new NestedDependencyDescriptor(descriptor) {</span>
+			@Override
+			public boolean isRequired() {
+<span class="fc" id="L1704">				return false;</span>
+			}
+			@Override
+			public Object resolveCandidate(String beanName, Class&lt;?&gt; requiredType, BeanFactory beanFactory) {
+<span class="pc bpc" id="L1708" title="1 of 2 branches missed.">				return (!ObjectUtils.isEmpty(args) ? beanFactory.getBean(beanName, args) :</span>
+<span class="fc" id="L1709">						super.resolveCandidate(beanName, requiredType, beanFactory));</span>
+			}
+		};
+<span class="fc" id="L1712">		Object result = doResolveDependency(descriptorToUse, beanName, null, null);</span>
+<span class="pc bpc" id="L1713" title="1 of 2 branches missed.">		return (result instanceof Optional ? (Optional&lt;?&gt;) result : Optional.ofNullable(result));</span>
+	}
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L1719">		StringBuilder sb = new StringBuilder(ObjectUtils.identityToString(this));</span>
+<span class="nc" id="L1720">		sb.append(&quot;: defining beans [&quot;);</span>
+<span class="nc" id="L1721">		sb.append(StringUtils.collectionToCommaDelimitedString(this.beanDefinitionNames));</span>
+<span class="nc" id="L1722">		sb.append(&quot;]; &quot;);</span>
+<span class="nc" id="L1723">		BeanFactory parent = getParentBeanFactory();</span>
+<span class="nc bnc" id="L1724" title="All 2 branches missed.">		if (parent == null) {</span>
+<span class="nc" id="L1725">			sb.append(&quot;root of factory hierarchy&quot;);</span>
+		}
+		else {
+<span class="nc" id="L1728">			sb.append(&quot;parent: &quot;).append(ObjectUtils.identityToString(parent));</span>
+		}
+<span class="nc" id="L1730">		return sb.toString();</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+<span class="nc" id="L1739">		throw new NotSerializableException(&quot;DefaultListableBeanFactory itself is not deserializable - &quot; +</span>
+				&quot;just a SerializedBeanFactoryReference is&quot;);
+	}
+
+	protected Object writeReplace() throws ObjectStreamException {
+<span class="pc bpc" id="L1744" title="1 of 2 branches missed.">		if (this.serializationId != null) {</span>
+<span class="fc" id="L1745">			return new SerializedBeanFactoryReference(this.serializationId);</span>
+		}
+		else {
+<span class="nc" id="L1748">			throw new NotSerializableException(&quot;DefaultListableBeanFactory has no serialization id&quot;);</span>
+		}
+	}
+
+
+	/**
+	 * Minimal id reference to the factory.
+	 * Resolved to the actual factory instance on deserialization.
+	 */
+	private static class SerializedBeanFactoryReference implements Serializable {
+
+		private final String id;
+
+<span class="fc" id="L1761">		public SerializedBeanFactoryReference(String id) {</span>
+<span class="fc" id="L1762">			this.id = id;</span>
+<span class="fc" id="L1763">		}</span>
+
+		private Object readResolve() {
+<span class="fc" id="L1766">			Reference&lt;?&gt; ref = serializableFactories.get(this.id);</span>
+<span class="pc bpc" id="L1767" title="1 of 2 branches missed.">			if (ref != null) {</span>
+<span class="fc" id="L1768">				Object result = ref.get();</span>
+<span class="pc bpc" id="L1769" title="1 of 2 branches missed.">				if (result != null) {</span>
+<span class="fc" id="L1770">					return result;</span>
+				}
+			}
+			// Lenient fallback: dummy factory in case of original factory not found...
+<span class="nc" id="L1774">			DefaultListableBeanFactory dummyFactory = new DefaultListableBeanFactory();</span>
+<span class="nc" id="L1775">			dummyFactory.serializationId = this.id;</span>
+<span class="nc" id="L1776">			return dummyFactory;</span>
+		}
+	}
+
+
+	/**
+	 * A dependency descriptor marker for nested elements.
+	 */
+	private static class NestedDependencyDescriptor extends DependencyDescriptor {
+
+		public NestedDependencyDescriptor(DependencyDescriptor original) {
+<span class="fc" id="L1787">			super(original);</span>
+<span class="fc" id="L1788">			increaseNestingLevel();</span>
+<span class="fc" id="L1789">		}</span>
+	}
+
+
+	/**
+	 * A dependency descriptor for a multi-element declaration with nested elements.
+	 */
+	private static class MultiElementDescriptor extends NestedDependencyDescriptor {
+
+		public MultiElementDescriptor(DependencyDescriptor original) {
+<span class="fc" id="L1799">			super(original);</span>
+<span class="fc" id="L1800">		}</span>
+	}
+
+
+	/**
+	 * A dependency descriptor marker for stream access to multiple elements.
+	 */
+	private static class StreamDependencyDescriptor extends DependencyDescriptor {
+
+		private final boolean ordered;
+
+		public StreamDependencyDescriptor(DependencyDescriptor original, boolean ordered) {
+<span class="fc" id="L1812">			super(original);</span>
+<span class="fc" id="L1813">			this.ordered = ordered;</span>
+<span class="fc" id="L1814">		}</span>
+
+		public boolean isOrdered() {
+<span class="fc" id="L1817">			return this.ordered;</span>
+		}
+	}
+
+
+	private interface BeanObjectProvider&lt;T&gt; extends ObjectProvider&lt;T&gt;, Serializable {
+	}
+
+
+	/**
+	 * Serializable ObjectFactory/ObjectProvider for lazy resolution of a dependency.
+	 */
+	private class DependencyObjectProvider implements BeanObjectProvider&lt;Object&gt; {
+
+		private final DependencyDescriptor descriptor;
+
+		private final boolean optional;
+
+		@Nullable
+		private final String beanName;
+
+<span class="fc" id="L1838">		public DependencyObjectProvider(DependencyDescriptor descriptor, @Nullable String beanName) {</span>
+<span class="fc" id="L1839">			this.descriptor = new NestedDependencyDescriptor(descriptor);</span>
+<span class="fc bfc" id="L1840" title="All 2 branches covered.">			this.optional = (this.descriptor.getDependencyType() == Optional.class);</span>
+<span class="fc" id="L1841">			this.beanName = beanName;</span>
+<span class="fc" id="L1842">		}</span>
+
+		@Override
+		public Object getObject() throws BeansException {
+<span class="pc bpc" id="L1846" title="1 of 2 branches missed.">			if (this.optional) {</span>
+<span class="nc" id="L1847">				return createOptionalDependency(this.descriptor, this.beanName);</span>
+			}
+			else {
+<span class="fc" id="L1850">				Object result = doResolveDependency(this.descriptor, this.beanName, null, null);</span>
+<span class="pc bpc" id="L1851" title="1 of 2 branches missed.">				if (result == null) {</span>
+<span class="nc" id="L1852">					throw new NoSuchBeanDefinitionException(this.descriptor.getResolvableType());</span>
+				}
+<span class="fc" id="L1854">				return result;</span>
+			}
+		}
+
+		@Override
+		public Object getObject(final Object... args) throws BeansException {
+<span class="pc bpc" id="L1860" title="1 of 2 branches missed.">			if (this.optional) {</span>
+<span class="nc" id="L1861">				return createOptionalDependency(this.descriptor, this.beanName, args);</span>
+			}
+			else {
+<span class="fc" id="L1864">				DependencyDescriptor descriptorToUse = new DependencyDescriptor(this.descriptor) {</span>
+					@Override
+					public Object resolveCandidate(String beanName, Class&lt;?&gt; requiredType, BeanFactory beanFactory) {
+<span class="fc" id="L1867">						return beanFactory.getBean(beanName, args);</span>
+					}
+				};
+<span class="fc" id="L1870">				Object result = doResolveDependency(descriptorToUse, this.beanName, null, null);</span>
+<span class="pc bpc" id="L1871" title="1 of 2 branches missed.">				if (result == null) {</span>
+<span class="nc" id="L1872">					throw new NoSuchBeanDefinitionException(this.descriptor.getResolvableType());</span>
+				}
+<span class="fc" id="L1874">				return result;</span>
+			}
+		}
+
+		@Override
+		@Nullable
+		public Object getIfAvailable() throws BeansException {
+<span class="pc bpc" id="L1881" title="1 of 2 branches missed.">			if (this.optional) {</span>
+<span class="nc" id="L1882">				return createOptionalDependency(this.descriptor, this.beanName);</span>
+			}
+			else {
+<span class="fc" id="L1885">				DependencyDescriptor descriptorToUse = new DependencyDescriptor(this.descriptor) {</span>
+					@Override
+					public boolean isRequired() {
+<span class="fc" id="L1888">						return false;</span>
+					}
+				};
+<span class="fc" id="L1891">				return doResolveDependency(descriptorToUse, this.beanName, null, null);</span>
+			}
+		}
+
+		@Override
+		@Nullable
+		public Object getIfUnique() throws BeansException {
+<span class="fc" id="L1898">			DependencyDescriptor descriptorToUse = new DependencyDescriptor(this.descriptor) {</span>
+				@Override
+				public boolean isRequired() {
+<span class="fc" id="L1901">					return false;</span>
+				}
+				@Override
+				@Nullable
+				public Object resolveNotUnique(ResolvableType type, Map&lt;String, Object&gt; matchingBeans) {
+<span class="fc" id="L1906">					return null;</span>
+				}
+			};
+<span class="pc bpc" id="L1909" title="1 of 2 branches missed.">			if (this.optional) {</span>
+<span class="nc" id="L1910">				return createOptionalDependency(descriptorToUse, this.beanName);</span>
+			}
+			else {
+<span class="fc" id="L1913">				return doResolveDependency(descriptorToUse, this.beanName, null, null);</span>
+			}
+		}
+
+		@Nullable
+		protected Object getValue() throws BeansException {
+<span class="fc bfc" id="L1919" title="All 2 branches covered.">			if (this.optional) {</span>
+<span class="fc" id="L1920">				return createOptionalDependency(this.descriptor, this.beanName);</span>
+			}
+			else {
+<span class="fc" id="L1923">				return doResolveDependency(this.descriptor, this.beanName, null, null);</span>
+			}
+		}
+
+		@Override
+		public Stream&lt;Object&gt; stream() {
+<span class="fc" id="L1929">			return resolveStream(false);</span>
+		}
+
+		@Override
+		public Stream&lt;Object&gt; orderedStream() {
+<span class="fc" id="L1934">			return resolveStream(true);</span>
+		}
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		private Stream&lt;Object&gt; resolveStream(boolean ordered) {
+<span class="fc" id="L1939">			DependencyDescriptor descriptorToUse = new StreamDependencyDescriptor(this.descriptor, ordered);</span>
+<span class="fc" id="L1940">			Object result = doResolveDependency(descriptorToUse, this.beanName, null, null);</span>
+<span class="pc bpc" id="L1941" title="1 of 2 branches missed.">			return (result instanceof Stream ? (Stream&lt;Object&gt;) result : Stream.of(result));</span>
+		}
+	}
+
+
+	/**
+	 * Separate inner class for avoiding a hard dependency on the {@code javax.inject} API.
+	 * Actual {@code javax.inject.Provider} implementation is nested here in order to make it
+	 * invisible for Graal's introspection of DefaultListableBeanFactory's nested classes.
+	 */
+<span class="fc" id="L1951">	private class Jsr330Factory implements Serializable {</span>
+
+		public Object createDependencyProvider(DependencyDescriptor descriptor, @Nullable String beanName) {
+<span class="fc" id="L1954">			return new Jsr330Provider(descriptor, beanName);</span>
+		}
+
+		private class Jsr330Provider extends DependencyObjectProvider implements Provider&lt;Object&gt; {
+
+<span class="fc" id="L1959">			public Jsr330Provider(DependencyDescriptor descriptor, @Nullable String beanName) {</span>
+<span class="fc" id="L1960">				super(descriptor, beanName);</span>
+<span class="fc" id="L1961">			}</span>
+
+			@Override
+			@Nullable
+			public Object get() throws BeansException {
+<span class="fc" id="L1966">				return getValue();</span>
+			}
+		}
+	}
+
+
+	/**
+	 * An {@link org.springframework.core.OrderComparator.OrderSourceProvider} implementation
+	 * that is aware of the bean metadata of the instances to sort.
+	 * &lt;p&gt;Lookup for the method factory of an instance to sort, if any, and let the
+	 * comparator retrieve the {@link org.springframework.core.annotation.Order}
+	 * value defined on it. This essentially allows for the following construct:
+	 */
+	private class FactoryAwareOrderSourceProvider implements OrderComparator.OrderSourceProvider {
+
+		private final Map&lt;Object, String&gt; instancesToBeanNames;
+
+<span class="fc" id="L1983">		public FactoryAwareOrderSourceProvider(Map&lt;Object, String&gt; instancesToBeanNames) {</span>
+<span class="fc" id="L1984">			this.instancesToBeanNames = instancesToBeanNames;</span>
+<span class="fc" id="L1985">		}</span>
+
+		@Override
+		@Nullable
+		public Object getOrderSource(Object obj) {
+<span class="fc" id="L1990">			RootBeanDefinition beanDefinition = getRootBeanDefinition(this.instancesToBeanNames.get(obj));</span>
+<span class="fc bfc" id="L1991" title="All 2 branches covered.">			if (beanDefinition == null) {</span>
+<span class="fc" id="L1992">				return null;</span>
+			}
+<span class="fc" id="L1994">			List&lt;Object&gt; sources = new ArrayList&lt;&gt;(2);</span>
+<span class="fc" id="L1995">			Method factoryMethod = beanDefinition.getResolvedFactoryMethod();</span>
+<span class="fc bfc" id="L1996" title="All 2 branches covered.">			if (factoryMethod != null) {</span>
+<span class="fc" id="L1997">				sources.add(factoryMethod);</span>
+			}
+<span class="fc" id="L1999">			Class&lt;?&gt; targetType = beanDefinition.getTargetType();</span>
+<span class="pc bpc" id="L2000" title="2 of 4 branches missed.">			if (targetType != null &amp;&amp; targetType != obj.getClass()) {</span>
+<span class="nc" id="L2001">				sources.add(targetType);</span>
+			}
+<span class="fc" id="L2003">			return sources.toArray();</span>
+		}
+
+		@Nullable
+		private RootBeanDefinition getRootBeanDefinition(@Nullable String beanName) {
+<span class="pc bpc" id="L2008" title="1 of 4 branches missed.">			if (beanName != null &amp;&amp; containsBeanDefinition(beanName)) {</span>
+<span class="fc" id="L2009">				BeanDefinition bd = getMergedBeanDefinition(beanName);</span>
+<span class="pc bpc" id="L2010" title="1 of 2 branches missed.">				if (bd instanceof RootBeanDefinition) {</span>
+<span class="fc" id="L2011">					return (RootBeanDefinition) bd;</span>
+				}
+			}
+<span class="fc" id="L2014">			return null;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

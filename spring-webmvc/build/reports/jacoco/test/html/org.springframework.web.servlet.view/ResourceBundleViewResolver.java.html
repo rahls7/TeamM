@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceBundleViewResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.view</a> &gt; <span class="el_source">ResourceBundleViewResolver.java</span></div><h1>ResourceBundleViewResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.view;
+
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.MissingResourceException;
+import java.util.ResourceBundle;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.support.PropertiesBeanDefinitionReader;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.lang.Nullable;
+import org.springframework.web.context.support.GenericWebApplicationContext;
+import org.springframework.web.servlet.View;
+
+/**
+ * A {@link org.springframework.web.servlet.ViewResolver} implementation that uses
+ * bean definitions in a {@link ResourceBundle}, specified by the bundle basename.
+ *
+ * &lt;p&gt;The bundle is typically defined in a properties file, located in the classpath.
+ * The default bundle basename is &quot;views&quot;.
+ *
+ * &lt;p&gt;This {@code ViewResolver} supports localized view definitions, using the
+ * default support of {@link java.util.PropertyResourceBundle}. For example, the
+ * basename &quot;views&quot; will be resolved as class path resources &quot;views_de_AT.properties&quot;,
+ * &quot;views_de.properties&quot;, &quot;views.properties&quot; - for a given Locale &quot;de_AT&quot;.
+ *
+ * &lt;p&gt;Note: This {@code ViewResolver} implements the {@link Ordered} interface
+ * in order to allow for flexible participation in {@code ViewResolver} chaining.
+ * For example, some special views could be defined via this {@code ViewResolver}
+ * (giving it 0 as &quot;order&quot; value), while all remaining views could be resolved by
+ * a {@link UrlBasedViewResolver}.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @see java.util.ResourceBundle#getBundle
+ * @see java.util.PropertyResourceBundle
+ * @see UrlBasedViewResolver
+ */
+<span class="fc" id="L63">public class ResourceBundleViewResolver extends AbstractCachingViewResolver</span>
+		implements Ordered, InitializingBean, DisposableBean {
+
+	/** The default basename if no other basename is supplied. */
+	public static final String DEFAULT_BASENAME = &quot;views&quot;;
+
+
+<span class="fc" id="L70">	private String[] basenames = new String[] {DEFAULT_BASENAME};</span>
+
+<span class="fc" id="L72">	private ClassLoader bundleClassLoader = Thread.currentThread().getContextClassLoader();</span>
+
+	@Nullable
+	private String defaultParentView;
+
+	@Nullable
+	private Locale[] localesToInitialize;
+
+<span class="fc" id="L80">	private int order = Ordered.LOWEST_PRECEDENCE;  // default: same as non-Ordered</span>
+
+	/* Locale -&gt; BeanFactory */
+<span class="fc" id="L83">	private final Map&lt;Locale, BeanFactory&gt; localeCache = new HashMap&lt;&gt;();</span>
+
+	/* List of ResourceBundle -&gt; BeanFactory */
+<span class="fc" id="L86">	private final Map&lt;List&lt;ResourceBundle&gt;, ConfigurableApplicationContext&gt; bundleCache = new HashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Set a single basename, following {@link java.util.ResourceBundle} conventions.
+	 * The default is &quot;views&quot;.
+	 * &lt;p&gt;{@code ResourceBundle} supports different locale suffixes. For example,
+	 * a base name of &quot;views&quot; might map to {@code ResourceBundle} files
+	 * &quot;views&quot;, &quot;views_en_au&quot; and &quot;views_de&quot;.
+	 * &lt;p&gt;Note that ResourceBundle names are effectively classpath locations: As a
+	 * consequence, the JDK's standard ResourceBundle treats dots as package separators.
+	 * This means that &quot;test.theme&quot; is effectively equivalent to &quot;test/theme&quot;,
+	 * just like it is for programmatic {@code java.util.ResourceBundle} usage.
+	 * @see #setBasenames
+	 * @see ResourceBundle#getBundle(String)
+	 * @see ResourceBundle#getBundle(String, Locale)
+	 */
+	public void setBasename(String basename) {
+<span class="fc" id="L104">		setBasenames(basename);</span>
+<span class="fc" id="L105">	}</span>
+
+	/**
+	 * Set an array of basenames, each following {@link java.util.ResourceBundle}
+	 * conventions. The default is a single basename &quot;views&quot;.
+	 * &lt;p&gt;{@code ResourceBundle} supports different locale suffixes. For example,
+	 * a base name of &quot;views&quot; might map to {@code ResourceBundle} files
+	 * &quot;views&quot;, &quot;views_en_au&quot; and &quot;views_de&quot;.
+	 * &lt;p&gt;The associated resource bundles will be checked sequentially when resolving
+	 * a message code. Note that message definitions in a &lt;i&gt;previous&lt;/i&gt; resource
+	 * bundle will override ones in a later bundle, due to the sequential lookup.
+	 * &lt;p&gt;Note that ResourceBundle names are effectively classpath locations: As a
+	 * consequence, the JDK's standard ResourceBundle treats dots as package separators.
+	 * This means that &quot;test.theme&quot; is effectively equivalent to &quot;test/theme&quot;,
+	 * just like it is for programmatic {@code java.util.ResourceBundle} usage.
+	 * @see #setBasename
+	 * @see ResourceBundle#getBundle(String)
+	 * @see ResourceBundle#getBundle(String, Locale)
+	 */
+	public void setBasenames(String... basenames) {
+<span class="fc" id="L125">		this.basenames = basenames;</span>
+<span class="fc" id="L126">	}</span>
+
+	/**
+	 * Set the {@link ClassLoader} to load resource bundles with.
+	 * Default is the thread context {@code ClassLoader}.
+	 */
+	public void setBundleClassLoader(ClassLoader classLoader) {
+<span class="nc" id="L133">		this.bundleClassLoader = classLoader;</span>
+<span class="nc" id="L134">	}</span>
+
+	/**
+	 * Return the {@link ClassLoader} to load resource bundles with.
+	 * &lt;p&gt;Default is the specified bundle {@code ClassLoader},
+	 * usually the thread context {@code ClassLoader}.
+	 */
+	protected ClassLoader getBundleClassLoader() {
+<span class="fc" id="L142">		return this.bundleClassLoader;</span>
+	}
+
+	/**
+	 * Set the default parent for views defined in the {@code ResourceBundle}.
+	 * &lt;p&gt;This avoids repeated &quot;yyy1.(parent)=xxx&quot;, &quot;yyy2.(parent)=xxx&quot; definitions
+	 * in the bundle, especially if all defined views share the same parent.
+	 * &lt;p&gt;The parent will typically define the view class and common attributes.
+	 * Concrete views might simply consist of an URL definition then:
+	 * a la &quot;yyy1.url=/my.jsp&quot;, &quot;yyy2.url=/your.jsp&quot;.
+	 * &lt;p&gt;View definitions that define their own parent or carry their own
+	 * class can still override this. Strictly speaking, the rule that a
+	 * default parent setting does not apply to a bean definition that
+	 * carries a class is there for backwards compatibility reasons.
+	 * It still matches the typical use case.
+	 */
+	public void setDefaultParentView(String defaultParentView) {
+<span class="fc" id="L159">		this.defaultParentView = defaultParentView;</span>
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Specify Locales to initialize eagerly, rather than lazily when actually accessed.
+	 * &lt;p&gt;Allows for pre-initialization of common Locales, eagerly checking
+	 * the view configuration for those Locales.
+	 */
+	public void setLocalesToInitialize(Locale... localesToInitialize) {
+<span class="fc" id="L168">		this.localesToInitialize = localesToInitialize;</span>
+<span class="fc" id="L169">	}</span>
+
+	/**
+	 * Specify the order value for this ViewResolver bean.
+	 * &lt;p&gt;The default value is {@code Ordered.LOWEST_PRECEDENCE}, meaning non-ordered.
+	 * @see org.springframework.core.Ordered#getOrder()
+	 */
+	public void setOrder(int order) {
+<span class="fc" id="L177">		this.order = order;</span>
+<span class="fc" id="L178">	}</span>
+
+	@Override
+	public int getOrder() {
+<span class="fc" id="L182">		return this.order;</span>
+	}
+
+	/**
+	 * Eagerly initialize Locales if necessary.
+	 * @see #setLocalesToInitialize
+	 */
+	@Override
+	public void afterPropertiesSet() throws BeansException {
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">		if (this.localesToInitialize != null) {</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">			for (Locale locale : this.localesToInitialize) {</span>
+<span class="nc" id="L193">				initFactory(locale);</span>
+			}
+		}
+<span class="fc" id="L196">	}</span>
+
+
+	@Override
+	protected View loadView(String viewName, Locale locale) throws Exception {
+<span class="fc" id="L201">		BeanFactory factory = initFactory(locale);</span>
+		try {
+<span class="fc" id="L203">			return factory.getBean(viewName, View.class);</span>
+		}
+<span class="fc" id="L205">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// Allow for ViewResolver chaining...
+<span class="fc" id="L207">			return null;</span>
+		}
+	}
+
+	/**
+	 * Initialize the View {@link BeanFactory} from the {@code ResourceBundle},
+	 * for the given {@link Locale locale}.
+	 * &lt;p&gt;Synchronized because of access by parallel threads.
+	 * @param locale the target {@code Locale}
+	 * @return the View factory for the given Locale
+	 * @throws BeansException in case of initialization errors
+	 */
+	protected synchronized BeanFactory initFactory(Locale locale) throws BeansException {
+		// Try to find cached factory for Locale:
+		// Have we already encountered that Locale before?
+<span class="fc bfc" id="L222" title="All 2 branches covered.">		if (isCache()) {</span>
+<span class="fc" id="L223">			BeanFactory cachedFactory = this.localeCache.get(locale);</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">			if (cachedFactory != null) {</span>
+<span class="fc" id="L225">				return cachedFactory;</span>
+			}
+		}
+
+		// Build list of ResourceBundle references for Locale.
+<span class="fc" id="L230">		List&lt;ResourceBundle&gt; bundles = new LinkedList&lt;&gt;();</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">		for (String basename : this.basenames) {</span>
+<span class="fc" id="L232">			ResourceBundle bundle = getBundle(basename, locale);</span>
+<span class="fc" id="L233">			bundles.add(bundle);</span>
+		}
+
+		// Try to find cached factory for ResourceBundle list:
+		// even if Locale was different, same bundles might have been found.
+<span class="fc bfc" id="L238" title="All 2 branches covered.">		if (isCache()) {</span>
+<span class="fc" id="L239">			BeanFactory cachedFactory = this.bundleCache.get(bundles);</span>
+<span class="fc bfc" id="L240" title="All 2 branches covered.">			if (cachedFactory != null) {</span>
+<span class="fc" id="L241">				this.localeCache.put(locale, cachedFactory);</span>
+<span class="fc" id="L242">				return cachedFactory;</span>
+			}
+		}
+
+		// Create child ApplicationContext for views.
+<span class="fc" id="L247">		GenericWebApplicationContext factory = new GenericWebApplicationContext();</span>
+<span class="fc" id="L248">		factory.setParent(getApplicationContext());</span>
+<span class="fc" id="L249">		factory.setServletContext(getServletContext());</span>
+
+		// Load bean definitions from resource bundle.
+<span class="fc" id="L252">		PropertiesBeanDefinitionReader reader = new PropertiesBeanDefinitionReader(factory);</span>
+<span class="fc" id="L253">		reader.setDefaultParentBean(this.defaultParentView);</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		for (ResourceBundle bundle : bundles) {</span>
+<span class="fc" id="L255">			reader.registerBeanDefinitions(bundle);</span>
+<span class="fc" id="L256">		}</span>
+
+<span class="fc" id="L258">		factory.refresh();</span>
+
+		// Cache factory for both Locale and ResourceBundle list.
+<span class="fc bfc" id="L261" title="All 2 branches covered.">		if (isCache()) {</span>
+<span class="fc" id="L262">			this.localeCache.put(locale, factory);</span>
+<span class="fc" id="L263">			this.bundleCache.put(bundles, factory);</span>
+		}
+
+<span class="fc" id="L266">		return factory;</span>
+	}
+
+	/**
+	 * Obtain the resource bundle for the given basename and {@link Locale}.
+	 * @param basename the basename to look for
+	 * @param locale the {@code Locale} to look for
+	 * @return the corresponding {@code ResourceBundle}
+	 * @throws MissingResourceException if no matching bundle could be found
+	 * @see ResourceBundle#getBundle(String, Locale, ClassLoader)
+	 */
+	protected ResourceBundle getBundle(String basename, Locale locale) throws MissingResourceException {
+<span class="fc" id="L278">		return ResourceBundle.getBundle(basename, locale, getBundleClassLoader());</span>
+	}
+
+
+	/**
+	 * Close the bundle View factories on context shutdown.
+	 */
+	@Override
+	public void destroy() throws BeansException {
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">		for (ConfigurableApplicationContext factory : this.bundleCache.values()) {</span>
+<span class="nc" id="L288">			factory.close();</span>
+<span class="nc" id="L289">		}</span>
+<span class="fc" id="L290">		this.localeCache.clear();</span>
+<span class="fc" id="L291">		this.bundleCache.clear();</span>
+<span class="fc" id="L292">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

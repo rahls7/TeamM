@@ -1,0 +1,372 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JmsListenerAnnotationBeanPostProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.annotation</a> &gt; <span class="el_source">JmsListenerAnnotationBeanPostProcessor.java</span></div><h1>JmsListenerAnnotationBeanPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.annotation;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aop.framework.AopInfrastructureBean;
+import org.springframework.aop.framework.AopProxyUtils;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanInitializationException;
+import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.EmbeddedValueResolver;
+import org.springframework.beans.factory.support.MergedBeanDefinitionPostProcessor;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.jms.config.JmsListenerConfigUtils;
+import org.springframework.jms.config.JmsListenerContainerFactory;
+import org.springframework.jms.config.JmsListenerEndpointRegistrar;
+import org.springframework.jms.config.JmsListenerEndpointRegistry;
+import org.springframework.jms.config.MethodJmsListenerEndpoint;
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.handler.annotation.support.DefaultMessageHandlerMethodFactory;
+import org.springframework.messaging.handler.annotation.support.MessageHandlerMethodFactory;
+import org.springframework.messaging.handler.invocation.InvocableHandlerMethod;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+
+/**
+ * Bean post-processor that registers methods annotated with {@link JmsListener}
+ * to be invoked by a JMS message listener container created under the cover
+ * by a {@link org.springframework.jms.config.JmsListenerContainerFactory}
+ * according to the attributes of the annotation.
+ *
+ * &lt;p&gt;Annotated methods can use flexible arguments as defined by {@link JmsListener}.
+ *
+ * &lt;p&gt;This post-processor is automatically registered by Spring's
+ * {@code &lt;jms:annotation-driven&gt;} XML element, and also by the {@link EnableJms}
+ * annotation.
+ *
+ * &lt;p&gt;Autodetects any {@link JmsListenerConfigurer} instances in the container,
+ * allowing for customization of the registry to be used, the default container
+ * factory or for fine-grained control over endpoints registration. See the
+ * {@link EnableJms} javadocs for complete usage details.
+ *
+ * @author Stephane Nicoll
+ * @author Juergen Hoeller
+ * @since 4.1
+ * @see JmsListener
+ * @see EnableJms
+ * @see JmsListenerConfigurer
+ * @see JmsListenerEndpointRegistrar
+ * @see JmsListenerEndpointRegistry
+ * @see org.springframework.jms.config.JmsListenerEndpoint
+ * @see MethodJmsListenerEndpoint
+ */
+<span class="fc" id="L91">public class JmsListenerAnnotationBeanPostProcessor</span>
+		implements MergedBeanDefinitionPostProcessor, Ordered, BeanFactoryAware, SmartInitializingSingleton {
+
+	/**
+	 * The bean name of the default {@link JmsListenerContainerFactory}.
+	 */
+	static final String DEFAULT_JMS_LISTENER_CONTAINER_FACTORY_BEAN_NAME = &quot;jmsListenerContainerFactory&quot;;
+
+
+<span class="fc" id="L100">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L102">	@Nullable</span>
+	private String containerFactoryBeanName = DEFAULT_JMS_LISTENER_CONTAINER_FACTORY_BEAN_NAME;
+
+	@Nullable
+	private JmsListenerEndpointRegistry endpointRegistry;
+
+<span class="fc" id="L108">	private final MessageHandlerMethodFactoryAdapter messageHandlerMethodFactory =</span>
+			new MessageHandlerMethodFactoryAdapter();
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+	@Nullable
+	private StringValueResolver embeddedValueResolver;
+
+<span class="fc" id="L117">	private final JmsListenerEndpointRegistrar registrar = new JmsListenerEndpointRegistrar();</span>
+
+<span class="fc" id="L119">	private final AtomicInteger counter = new AtomicInteger();</span>
+
+<span class="fc" id="L121">	private final Set&lt;Class&lt;?&gt;&gt; nonAnnotatedClasses = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(64));</span>
+
+
+	@Override
+	public int getOrder() {
+<span class="fc" id="L126">		return LOWEST_PRECEDENCE;</span>
+	}
+
+	/**
+	 * Set the name of the {@link JmsListenerContainerFactory} to use by default.
+	 * &lt;p&gt;If none is specified, &quot;jmsListenerContainerFactory&quot; is assumed to be defined.
+	 */
+	public void setContainerFactoryBeanName(String containerFactoryBeanName) {
+<span class="fc" id="L134">		this.containerFactoryBeanName = containerFactoryBeanName;</span>
+<span class="fc" id="L135">	}</span>
+
+	/**
+	 * Set the {@link JmsListenerEndpointRegistry} that will hold the created
+	 * endpoint and manage the lifecycle of the related listener container.
+	 */
+	public void setEndpointRegistry(JmsListenerEndpointRegistry endpointRegistry) {
+<span class="fc" id="L142">		this.endpointRegistry = endpointRegistry;</span>
+<span class="fc" id="L143">	}</span>
+
+	/**
+	 * Set the {@link MessageHandlerMethodFactory} to use to configure the message
+	 * listener responsible to serve an endpoint detected by this processor.
+	 * &lt;p&gt;By default, {@link DefaultMessageHandlerMethodFactory} is used and it
+	 * can be configured further to support additional method arguments
+	 * or to customize conversion and validation support. See
+	 * {@link DefaultMessageHandlerMethodFactory} Javadoc for more details.
+	 */
+	public void setMessageHandlerMethodFactory(MessageHandlerMethodFactory messageHandlerMethodFactory) {
+<span class="fc" id="L154">		this.messageHandlerMethodFactory.setMessageHandlerMethodFactory(messageHandlerMethodFactory);</span>
+<span class="fc" id="L155">	}</span>
+
+	/**
+	 * Making a {@link BeanFactory} available is optional; if not set,
+	 * {@link JmsListenerConfigurer} beans won't get autodetected and an
+	 * {@link #setEndpointRegistry endpoint registry} has to be explicitly configured.
+	 */
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="fc" id="L164">		this.beanFactory = beanFactory;</span>
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">		if (beanFactory instanceof ConfigurableBeanFactory) {</span>
+<span class="fc" id="L166">			this.embeddedValueResolver = new EmbeddedValueResolver((ConfigurableBeanFactory) beanFactory);</span>
+		}
+<span class="fc" id="L168">		this.registrar.setBeanFactory(beanFactory);</span>
+<span class="fc" id="L169">	}</span>
+
+
+	@Override
+	public void afterSingletonsInstantiated() {
+		// Remove resolved singleton classes from cache
+<span class="fc" id="L175">		this.nonAnnotatedClasses.clear();</span>
+
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">		if (this.beanFactory instanceof ListableBeanFactory) {</span>
+			// Apply JmsListenerConfigurer beans from the BeanFactory, if any
+<span class="fc" id="L179">			Map&lt;String, JmsListenerConfigurer&gt; beans =</span>
+<span class="fc" id="L180">					((ListableBeanFactory) this.beanFactory).getBeansOfType(JmsListenerConfigurer.class);</span>
+<span class="fc" id="L181">			List&lt;JmsListenerConfigurer&gt; configurers = new ArrayList&lt;&gt;(beans.values());</span>
+<span class="fc" id="L182">			AnnotationAwareOrderComparator.sort(configurers);</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">			for (JmsListenerConfigurer configurer : configurers) {</span>
+<span class="fc" id="L184">				configurer.configureJmsListeners(this.registrar);</span>
+<span class="fc" id="L185">			}</span>
+		}
+
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">		if (this.containerFactoryBeanName != null) {</span>
+<span class="fc" id="L189">			this.registrar.setContainerFactoryBeanName(this.containerFactoryBeanName);</span>
+		}
+
+<span class="fc bfc" id="L192" title="All 2 branches covered.">		if (this.registrar.getEndpointRegistry() == null) {</span>
+			// Determine JmsListenerEndpointRegistry bean from the BeanFactory
+<span class="fc bfc" id="L194" title="All 2 branches covered.">			if (this.endpointRegistry == null) {</span>
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">				Assert.state(this.beanFactory != null, &quot;BeanFactory must be set to find endpoint registry by bean name&quot;);</span>
+<span class="fc" id="L196">				this.endpointRegistry = this.beanFactory.getBean(</span>
+						JmsListenerConfigUtils.JMS_LISTENER_ENDPOINT_REGISTRY_BEAN_NAME, JmsListenerEndpointRegistry.class);
+			}
+<span class="fc" id="L199">			this.registrar.setEndpointRegistry(this.endpointRegistry);</span>
+		}
+
+
+		// Set the custom handler method factory once resolved by the configurer
+<span class="fc" id="L204">		MessageHandlerMethodFactory handlerMethodFactory = this.registrar.getMessageHandlerMethodFactory();</span>
+<span class="fc bfc" id="L205" title="All 2 branches covered.">		if (handlerMethodFactory != null) {</span>
+<span class="fc" id="L206">			this.messageHandlerMethodFactory.setMessageHandlerMethodFactory(handlerMethodFactory);</span>
+		}
+
+		// Actually register all listeners
+<span class="fc" id="L210">		this.registrar.afterPropertiesSet();</span>
+<span class="fc" id="L211">	}</span>
+
+
+	@Override
+	public void postProcessMergedBeanDefinition(RootBeanDefinition beanDefinition, Class&lt;?&gt; beanType, String beanName) {
+<span class="fc" id="L216">	}</span>
+
+	@Override
+	public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+<span class="fc" id="L220">		return bean;</span>
+	}
+
+	@Override
+	public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+<span class="pc bpc" id="L225" title="1 of 6 branches missed.">		if (bean instanceof AopInfrastructureBean || bean instanceof JmsListenerContainerFactory ||</span>
+				bean instanceof JmsListenerEndpointRegistry) {
+			// Ignore AOP infrastructure such as scoped proxies.
+<span class="fc" id="L228">			return bean;</span>
+		}
+
+<span class="fc" id="L231">		Class&lt;?&gt; targetClass = AopProxyUtils.ultimateTargetClass(bean);</span>
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">		if (!this.nonAnnotatedClasses.contains(targetClass) &amp;&amp;</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">				AnnotationUtils.isCandidateClass(targetClass, JmsListener.class)) {</span>
+<span class="fc" id="L234">			Map&lt;Method, Set&lt;JmsListener&gt;&gt; annotatedMethods = MethodIntrospector.selectMethods(targetClass,</span>
+					(MethodIntrospector.MetadataLookup&lt;Set&lt;JmsListener&gt;&gt;) method -&gt; {
+<span class="fc" id="L236">						Set&lt;JmsListener&gt; listenerMethods = AnnotatedElementUtils.getMergedRepeatableAnnotations(</span>
+								method, JmsListener.class, JmsListeners.class);
+<span class="fc bfc" id="L238" title="All 2 branches covered.">						return (!listenerMethods.isEmpty() ? listenerMethods : null);</span>
+					});
+<span class="fc bfc" id="L240" title="All 2 branches covered.">			if (annotatedMethods.isEmpty()) {</span>
+<span class="fc" id="L241">				this.nonAnnotatedClasses.add(targetClass);</span>
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L243">					logger.trace(&quot;No @JmsListener annotations found on bean type: &quot; + targetClass);</span>
+				}
+			}
+			else {
+				// Non-empty set of methods
+<span class="fc" id="L248">				annotatedMethods.forEach((method, listeners) -&gt;</span>
+<span class="fc" id="L249">						listeners.forEach(listener -&gt; processJmsListener(listener, method, bean)));</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L251">					logger.debug(annotatedMethods.size() + &quot; @JmsListener methods processed on bean '&quot; + beanName +</span>
+							&quot;': &quot; + annotatedMethods);
+				}
+			}
+		}
+<span class="fc" id="L256">		return bean;</span>
+	}
+
+	/**
+	 * Process the given {@link JmsListener} annotation on the given method,
+	 * registering a corresponding endpoint for the given bean instance.
+	 * @param jmsListener the annotation to process
+	 * @param mostSpecificMethod the annotated method
+	 * @param bean the instance to invoke the method on
+	 * @see #createMethodJmsListenerEndpoint()
+	 * @see JmsListenerEndpointRegistrar#registerEndpoint
+	 */
+	protected void processJmsListener(JmsListener jmsListener, Method mostSpecificMethod, Object bean) {
+<span class="fc" id="L269">		Method invocableMethod = AopUtils.selectInvocableMethod(mostSpecificMethod, bean.getClass());</span>
+
+<span class="fc" id="L271">		MethodJmsListenerEndpoint endpoint = createMethodJmsListenerEndpoint();</span>
+<span class="fc" id="L272">		endpoint.setBean(bean);</span>
+<span class="fc" id="L273">		endpoint.setMethod(invocableMethod);</span>
+<span class="fc" id="L274">		endpoint.setMostSpecificMethod(mostSpecificMethod);</span>
+<span class="fc" id="L275">		endpoint.setMessageHandlerMethodFactory(this.messageHandlerMethodFactory);</span>
+<span class="fc" id="L276">		endpoint.setEmbeddedValueResolver(this.embeddedValueResolver);</span>
+<span class="fc" id="L277">		endpoint.setBeanFactory(this.beanFactory);</span>
+<span class="fc" id="L278">		endpoint.setId(getEndpointId(jmsListener));</span>
+<span class="fc" id="L279">		endpoint.setDestination(resolve(jmsListener.destination()));</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">		if (StringUtils.hasText(jmsListener.selector())) {</span>
+<span class="fc" id="L281">			endpoint.setSelector(resolve(jmsListener.selector()));</span>
+		}
+<span class="fc bfc" id="L283" title="All 2 branches covered.">		if (StringUtils.hasText(jmsListener.subscription())) {</span>
+<span class="fc" id="L284">			endpoint.setSubscription(resolve(jmsListener.subscription()));</span>
+		}
+<span class="fc bfc" id="L286" title="All 2 branches covered.">		if (StringUtils.hasText(jmsListener.concurrency())) {</span>
+<span class="fc" id="L287">			endpoint.setConcurrency(resolve(jmsListener.concurrency()));</span>
+		}
+
+<span class="fc" id="L290">		JmsListenerContainerFactory&lt;?&gt; factory = null;</span>
+<span class="fc" id="L291">		String containerFactoryBeanName = resolve(jmsListener.containerFactory());</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">		if (StringUtils.hasText(containerFactoryBeanName)) {</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">			Assert.state(this.beanFactory != null, &quot;BeanFactory must be set to obtain container factory by bean name&quot;);</span>
+			try {
+<span class="fc" id="L295">				factory = this.beanFactory.getBean(containerFactoryBeanName, JmsListenerContainerFactory.class);</span>
+			}
+<span class="fc" id="L297">			catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="fc" id="L298">				throw new BeanInitializationException(&quot;Could not register JMS listener endpoint on [&quot; +</span>
+<span class="fc" id="L299">						mostSpecificMethod + &quot;], no &quot; + JmsListenerContainerFactory.class.getSimpleName() +</span>
+						&quot; with id '&quot; + containerFactoryBeanName + &quot;' was found in the application context&quot;, ex);
+<span class="fc" id="L301">			}</span>
+		}
+
+<span class="fc" id="L304">		this.registrar.registerEndpoint(endpoint, factory);</span>
+<span class="fc" id="L305">	}</span>
+
+	/**
+	 * Instantiate an empty {@link MethodJmsListenerEndpoint} for further
+	 * configuration with provided parameters in {@link #processJmsListener}.
+	 * @return a new {@code MethodJmsListenerEndpoint} or subclass thereof
+	 * @since 4.1.9
+	 * @see MethodJmsListenerEndpoint#createMessageListenerInstance()
+	 */
+	protected MethodJmsListenerEndpoint createMethodJmsListenerEndpoint() {
+<span class="fc" id="L315">		return new MethodJmsListenerEndpoint();</span>
+	}
+
+	private String getEndpointId(JmsListener jmsListener) {
+<span class="fc bfc" id="L319" title="All 2 branches covered.">		if (StringUtils.hasText(jmsListener.id())) {</span>
+<span class="fc" id="L320">			String id = resolve(jmsListener.id());</span>
+<span class="pc bpc" id="L321" title="1 of 2 branches missed.">			return (id != null ? id : &quot;&quot;);</span>
+		}
+		else {
+<span class="fc" id="L324">			return &quot;org.springframework.jms.JmsListenerEndpointContainer#&quot; + this.counter.getAndIncrement();</span>
+		}
+	}
+
+	@Nullable
+	private String resolve(String value) {
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">		return (this.embeddedValueResolver != null ? this.embeddedValueResolver.resolveStringValue(value) : value);</span>
+	}
+
+
+	/**
+	 * A {@link MessageHandlerMethodFactory} adapter that offers a configurable underlying
+	 * instance to use. Useful if the factory to use is determined once the endpoints
+	 * have been registered but not created yet.
+	 * @see JmsListenerEndpointRegistrar#setMessageHandlerMethodFactory
+	 */
+<span class="fc" id="L340">	private class MessageHandlerMethodFactoryAdapter implements MessageHandlerMethodFactory {</span>
+
+		@Nullable
+		private MessageHandlerMethodFactory messageHandlerMethodFactory;
+
+		public void setMessageHandlerMethodFactory(MessageHandlerMethodFactory messageHandlerMethodFactory) {
+<span class="fc" id="L346">			this.messageHandlerMethodFactory = messageHandlerMethodFactory;</span>
+<span class="fc" id="L347">		}</span>
+
+		@Override
+		public InvocableHandlerMethod createInvocableHandlerMethod(Object bean, Method method) {
+<span class="fc" id="L351">			return getMessageHandlerMethodFactory().createInvocableHandlerMethod(bean, method);</span>
+		}
+
+		private MessageHandlerMethodFactory getMessageHandlerMethodFactory() {
+<span class="fc bfc" id="L355" title="All 2 branches covered.">			if (this.messageHandlerMethodFactory == null) {</span>
+<span class="fc" id="L356">				this.messageHandlerMethodFactory = createDefaultJmsHandlerMethodFactory();</span>
+			}
+<span class="fc" id="L358">			return this.messageHandlerMethodFactory;</span>
+		}
+
+		private MessageHandlerMethodFactory createDefaultJmsHandlerMethodFactory() {
+<span class="fc" id="L362">			DefaultMessageHandlerMethodFactory defaultFactory = new DefaultMessageHandlerMethodFactory();</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">			if (beanFactory != null) {</span>
+<span class="fc" id="L364">				defaultFactory.setBeanFactory(beanFactory);</span>
+			}
+<span class="fc" id="L366">			defaultFactory.afterPropertiesSet();</span>
+<span class="fc" id="L367">			return defaultFactory;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

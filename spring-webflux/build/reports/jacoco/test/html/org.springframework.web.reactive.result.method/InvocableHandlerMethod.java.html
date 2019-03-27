@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InvocableHandlerMethod.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method</a> &gt; <span class="el_source">InvocableHandlerMethod.java</span></div><h1>InvocableHandlerMethod.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Stream;
+
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.CoroutinesUtils;
+import org.springframework.core.DefaultParameterNameDiscoverer;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.reactive.BindingContext;
+import org.springframework.web.reactive.HandlerResult;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * Extension of {@link HandlerMethod} that invokes the underlying method with
+ * argument values resolved from the current HTTP request through a list of
+ * {@link HandlerMethodArgumentResolver}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @author Sebastien Deleuze
+ * @since 5.0
+ */
+public class InvocableHandlerMethod extends HandlerMethod {
+
+<span class="fc" id="L58">	private static final Mono&lt;Object[]&gt; EMPTY_ARGS = Mono.just(new Object[0]);</span>
+
+<span class="fc" id="L60">	private static final Object NO_ARG_VALUE = new Object();</span>
+
+
+<span class="fc" id="L63">	private HandlerMethodArgumentResolverComposite resolvers = new HandlerMethodArgumentResolverComposite();</span>
+
+<span class="fc" id="L65">	private ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();</span>
+
+<span class="fc" id="L67">	private ReactiveAdapterRegistry reactiveAdapterRegistry = ReactiveAdapterRegistry.getSharedInstance();</span>
+
+	/**
+	 * Create an instance from a {@code HandlerMethod}.
+	 */
+	public InvocableHandlerMethod(HandlerMethod handlerMethod) {
+<span class="fc" id="L73">		super(handlerMethod);</span>
+<span class="fc" id="L74">	}</span>
+
+	/**
+	 * Create an instance from a bean instance and a method.
+	 */
+	public InvocableHandlerMethod(Object bean, Method method) {
+<span class="fc" id="L80">		super(bean, method);</span>
+<span class="fc" id="L81">	}</span>
+
+
+	/**
+	 * Configure the argument resolvers to use to use for resolving method
+	 * argument values against a {@code ServerWebExchange}.
+	 */
+	public void setArgumentResolvers(List&lt;HandlerMethodArgumentResolver&gt; resolvers) {
+<span class="fc" id="L89">		this.resolvers.addResolvers(resolvers);</span>
+<span class="fc" id="L90">	}</span>
+
+	/**
+	 * Return the configured argument resolvers.
+	 */
+	public List&lt;HandlerMethodArgumentResolver&gt; getResolvers() {
+<span class="fc" id="L96">		return this.resolvers.getResolvers();</span>
+	}
+
+	/**
+	 * Set the ParameterNameDiscoverer for resolving parameter names when needed
+	 * (e.g. default request attribute name).
+	 * &lt;p&gt;Default is a {@link DefaultParameterNameDiscoverer}.
+	 */
+	public void setParameterNameDiscoverer(ParameterNameDiscoverer nameDiscoverer) {
+<span class="fc" id="L105">		this.parameterNameDiscoverer = nameDiscoverer;</span>
+<span class="fc" id="L106">	}</span>
+
+	/**
+	 * Return the configured parameter name discoverer.
+	 */
+	public ParameterNameDiscoverer getParameterNameDiscoverer() {
+<span class="nc" id="L112">		return this.parameterNameDiscoverer;</span>
+	}
+
+	/**
+	 * Configure a reactive registry. This is needed for cases where the response
+	 * is fully handled within the controller in combination with an async void
+	 * return value.
+	 * &lt;p&gt;By default this is an instance of {@link ReactiveAdapterRegistry} with
+	 * default settings.
+	 * @param registry the registry to use
+	 */
+	public void setReactiveAdapterRegistry(ReactiveAdapterRegistry registry) {
+<span class="fc" id="L124">		this.reactiveAdapterRegistry = registry;</span>
+<span class="fc" id="L125">	}</span>
+
+
+	/**
+	 * Invoke the method for the given exchange.
+	 * @param exchange the current exchange
+	 * @param bindingContext the binding context to use
+	 * @param providedArgs optional list of argument values to match by type
+	 * @return a Mono with a {@link HandlerResult}.
+	 */
+	@SuppressWarnings(&quot;KotlinInternalInJava&quot;)
+	public Mono&lt;HandlerResult&gt; invoke(
+			ServerWebExchange exchange, BindingContext bindingContext, Object... providedArgs) {
+
+<span class="fc" id="L139">		return getMethodArgumentValues(exchange, bindingContext, providedArgs).flatMap(args -&gt; {</span>
+			Object value;
+			try {
+<span class="fc" id="L142">				ReflectionUtils.makeAccessible(getBridgedMethod());</span>
+<span class="fc" id="L143">				Method method = getBridgedMethod();</span>
+<span class="pc bpc" id="L144" title="1 of 4 branches missed.">				if (KotlinDetector.isKotlinReflectPresent() &amp;&amp; KotlinDetector.isKotlinType(method.getDeclaringClass())) {</span>
+<span class="fc" id="L145">					value = CoroutinesUtils.invokeHandlerMethod(method, getBean(), args);</span>
+				}
+				else {
+<span class="fc" id="L148">					value = method.invoke(getBean(), args);</span>
+				}
+			}
+<span class="fc" id="L151">			catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L152">				assertTargetBean(getBridgedMethod(), getBean(), args);</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">				String text = (ex.getMessage() != null ? ex.getMessage() : &quot;Illegal argument&quot;);</span>
+<span class="fc" id="L154">				return Mono.error(new IllegalStateException(formatInvokeError(text, args), ex));</span>
+			}
+<span class="fc" id="L156">			catch (InvocationTargetException ex) {</span>
+<span class="fc" id="L157">				return Mono.error(ex.getTargetException());</span>
+			}
+<span class="nc" id="L159">			catch (Throwable ex) {</span>
+				// Unlikely to ever get here, but it must be handled...
+<span class="nc" id="L161">				return Mono.error(new IllegalStateException(formatInvokeError(&quot;Invocation failure&quot;, args), ex));</span>
+<span class="fc" id="L162">			}</span>
+
+<span class="fc" id="L164">			HttpStatus status = getResponseStatus();</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">			if (status != null) {</span>
+<span class="fc" id="L166">				exchange.getResponse().setStatusCode(status);</span>
+			}
+
+<span class="fc" id="L169">			MethodParameter returnType = getReturnType();</span>
+<span class="fc" id="L170">			ReactiveAdapter adapter = this.reactiveAdapterRegistry.getAdapter(returnType.getParameterType());</span>
+<span class="fc" id="L171">			boolean asyncVoid = isAsyncVoidReturnType(returnType, adapter);</span>
+<span class="fc bfc" id="L172" title="All 6 branches covered.">			if ((value == null || asyncVoid) &amp;&amp; isResponseHandled(args, exchange)) {</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">				return (asyncVoid ? Mono.from(adapter.toPublisher(value)) : Mono.empty());</span>
+			}
+
+<span class="fc" id="L176">			HandlerResult result = new HandlerResult(this, value, returnType, bindingContext);</span>
+<span class="fc" id="L177">			return Mono.just(result);</span>
+		});
+	}
+
+	private Mono&lt;Object[]&gt; getMethodArgumentValues(
+			ServerWebExchange exchange, BindingContext bindingContext, Object... providedArgs) {
+
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		if (ObjectUtils.isEmpty(getMethodParameters())) {</span>
+<span class="fc" id="L185">			return EMPTY_ARGS;</span>
+		}
+<span class="fc" id="L187">		MethodParameter[] parameters = getMethodParameters();</span>
+<span class="fc" id="L188">		List&lt;Mono&lt;Object&gt;&gt; argMonos = new ArrayList&lt;&gt;(parameters.length);</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">		for (MethodParameter parameter : parameters) {</span>
+<span class="fc" id="L190">			parameter.initParameterNameDiscovery(this.parameterNameDiscoverer);</span>
+<span class="fc" id="L191">			Object providedArg = findProvidedArgument(parameter, providedArgs);</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">			if (providedArg != null) {</span>
+<span class="fc" id="L193">				argMonos.add(Mono.just(providedArg));</span>
+<span class="fc" id="L194">				continue;</span>
+			}
+<span class="fc bfc" id="L196" title="All 2 branches covered.">			if (!this.resolvers.supportsParameter(parameter)) {</span>
+<span class="fc" id="L197">				return Mono.error(new IllegalStateException(</span>
+<span class="fc" id="L198">						formatArgumentError(parameter, &quot;No suitable resolver&quot;)));</span>
+			}
+			try {
+<span class="fc" id="L201">				argMonos.add(this.resolvers.resolveArgument(parameter, bindingContext, exchange)</span>
+<span class="fc" id="L202">						.defaultIfEmpty(NO_ARG_VALUE)</span>
+<span class="fc" id="L203">						.doOnError(cause -&gt; logArgumentErrorIfNecessary(exchange, parameter, cause)));</span>
+			}
+<span class="nc" id="L205">			catch (Exception ex) {</span>
+<span class="nc" id="L206">				logArgumentErrorIfNecessary(exchange, parameter, ex);</span>
+<span class="nc" id="L207">				argMonos.add(Mono.error(ex));</span>
+<span class="fc" id="L208">			}</span>
+		}
+<span class="fc" id="L210">		return Mono.zip(argMonos, values -&gt;</span>
+<span class="fc bfc" id="L211" title="All 2 branches covered.">				Stream.of(values).map(o -&gt; o != NO_ARG_VALUE ? o : null).toArray());</span>
+	}
+
+	private void logArgumentErrorIfNecessary(
+			ServerWebExchange exchange, MethodParameter parameter, Throwable cause) {
+
+		// Leave stack trace for later, if error is not handled..
+<span class="fc" id="L218">		String message = cause.getMessage();</span>
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">		if (!message.contains(parameter.getExecutable().toGenericString())) {</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L221">				logger.debug(exchange.getLogPrefix() + formatArgumentError(parameter, message));</span>
+			}
+		}
+<span class="fc" id="L224">	}</span>
+
+	private static boolean isAsyncVoidReturnType(MethodParameter returnType, @Nullable ReactiveAdapter adapter) {
+<span class="fc bfc" id="L227" title="All 4 branches covered.">		if (adapter != null &amp;&amp; adapter.supportsEmpty()) {</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">			if (adapter.isNoValue()) {</span>
+<span class="fc" id="L229">				return true;</span>
+			}
+<span class="fc" id="L231">			Type parameterType = returnType.getGenericParameterType();</span>
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">			if (parameterType instanceof ParameterizedType) {</span>
+<span class="fc" id="L233">				ParameterizedType type = (ParameterizedType) parameterType;</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">				if (type.getActualTypeArguments().length == 1) {</span>
+<span class="fc" id="L235">					return Void.class.equals(type.getActualTypeArguments()[0]);</span>
+				}
+			}
+		}
+<span class="fc" id="L239">		return false;</span>
+	}
+
+	private boolean isResponseHandled(Object[] args, ServerWebExchange exchange) {
+<span class="pc bpc" id="L243" title="1 of 4 branches missed.">		if (getResponseStatus() != null || exchange.isNotModified()) {</span>
+<span class="fc" id="L244">			return true;</span>
+		}
+<span class="fc bfc" id="L246" title="All 2 branches covered.">		for (Object arg : args) {</span>
+<span class="fc bfc" id="L247" title="All 4 branches covered.">			if (arg instanceof ServerHttpResponse || arg instanceof ServerWebExchange) {</span>
+<span class="fc" id="L248">				return true;</span>
+			}
+		}
+<span class="fc" id="L251">		return false;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

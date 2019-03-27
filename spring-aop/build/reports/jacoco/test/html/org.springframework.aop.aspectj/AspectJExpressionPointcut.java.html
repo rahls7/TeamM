@@ -1,0 +1,722 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AspectJExpressionPointcut.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.aspectj</a> &gt; <span class="el_source">AspectJExpressionPointcut.java</span></div><h1>AspectJExpressionPointcut.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.aspectj;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.aopalliance.intercept.MethodInvocation;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.aspectj.weaver.patterns.NamePattern;
+import org.aspectj.weaver.reflect.ReflectionWorld.ReflectionWorldException;
+import org.aspectj.weaver.reflect.ShadowMatchImpl;
+import org.aspectj.weaver.tools.ContextBasedMatcher;
+import org.aspectj.weaver.tools.FuzzyBoolean;
+import org.aspectj.weaver.tools.JoinPointMatch;
+import org.aspectj.weaver.tools.MatchingContext;
+import org.aspectj.weaver.tools.PointcutDesignatorHandler;
+import org.aspectj.weaver.tools.PointcutExpression;
+import org.aspectj.weaver.tools.PointcutParameter;
+import org.aspectj.weaver.tools.PointcutParser;
+import org.aspectj.weaver.tools.PointcutPrimitive;
+import org.aspectj.weaver.tools.ShadowMatch;
+
+import org.springframework.aop.ClassFilter;
+import org.springframework.aop.IntroductionAwareMethodMatcher;
+import org.springframework.aop.MethodMatcher;
+import org.springframework.aop.ProxyMethodInvocation;
+import org.springframework.aop.framework.autoproxy.ProxyCreationContext;
+import org.springframework.aop.interceptor.ExposeInvocationInterceptor;
+import org.springframework.aop.support.AbstractExpressionPointcut;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.annotation.BeanFactoryAnnotationUtils;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Spring {@link org.springframework.aop.Pointcut} implementation
+ * that uses the AspectJ weaver to evaluate a pointcut expression.
+ *
+ * &lt;p&gt;The pointcut expression value is an AspectJ expression. This can
+ * reference other pointcuts and use composition and other operations.
+ *
+ * &lt;p&gt;Naturally, as this is to be processed by Spring AOP's proxy-based model,
+ * only method execution pointcuts are supported.
+ *
+ * @author Rob Harrop
+ * @author Adrian Colyer
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Ramnivas Laddad
+ * @author Dave Syer
+ * @since 2.0
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class AspectJExpressionPointcut extends AbstractExpressionPointcut
+		implements ClassFilter, IntroductionAwareMethodMatcher, BeanFactoryAware {
+
+<span class="fc" id="L88">	private static final Set&lt;PointcutPrimitive&gt; SUPPORTED_PRIMITIVES = new HashSet&lt;&gt;();</span>
+
+	static {
+<span class="fc" id="L91">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.EXECUTION);</span>
+<span class="fc" id="L92">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.ARGS);</span>
+<span class="fc" id="L93">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.REFERENCE);</span>
+<span class="fc" id="L94">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.THIS);</span>
+<span class="fc" id="L95">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.TARGET);</span>
+<span class="fc" id="L96">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.WITHIN);</span>
+<span class="fc" id="L97">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.AT_ANNOTATION);</span>
+<span class="fc" id="L98">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.AT_WITHIN);</span>
+<span class="fc" id="L99">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.AT_ARGS);</span>
+<span class="fc" id="L100">		SUPPORTED_PRIMITIVES.add(PointcutPrimitive.AT_TARGET);</span>
+	}
+
+
+<span class="fc" id="L104">	private static final Log logger = LogFactory.getLog(AspectJExpressionPointcut.class);</span>
+
+	@Nullable
+	private Class&lt;?&gt; pointcutDeclarationScope;
+
+<span class="fc" id="L109">	private String[] pointcutParameterNames = new String[0];</span>
+
+<span class="fc" id="L111">	private Class&lt;?&gt;[] pointcutParameterTypes = new Class&lt;?&gt;[0];</span>
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+	@Nullable
+	private transient ClassLoader pointcutClassLoader;
+
+	@Nullable
+	private transient PointcutExpression pointcutExpression;
+
+<span class="fc" id="L122">	private transient Map&lt;Method, ShadowMatch&gt; shadowMatchCache = new ConcurrentHashMap&lt;&gt;(32);</span>
+
+
+	/**
+	 * Create a new default AspectJExpressionPointcut.
+	 */
+<span class="fc" id="L128">	public AspectJExpressionPointcut() {</span>
+<span class="fc" id="L129">	}</span>
+
+	/**
+	 * Create a new AspectJExpressionPointcut with the given settings.
+	 * @param declarationScope the declaration scope for the pointcut
+	 * @param paramNames the parameter names for the pointcut
+	 * @param paramTypes the parameter types for the pointcut
+	 */
+<span class="fc" id="L137">	public AspectJExpressionPointcut(Class&lt;?&gt; declarationScope, String[] paramNames, Class&lt;?&gt;[] paramTypes) {</span>
+<span class="fc" id="L138">		this.pointcutDeclarationScope = declarationScope;</span>
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">		if (paramNames.length != paramTypes.length) {</span>
+<span class="nc" id="L140">			throw new IllegalStateException(</span>
+					&quot;Number of pointcut parameter names must match number of pointcut parameter types&quot;);
+		}
+<span class="fc" id="L143">		this.pointcutParameterNames = paramNames;</span>
+<span class="fc" id="L144">		this.pointcutParameterTypes = paramTypes;</span>
+<span class="fc" id="L145">	}</span>
+
+
+	/**
+	 * Set the declaration scope for the pointcut.
+	 */
+	public void setPointcutDeclarationScope(Class&lt;?&gt; pointcutDeclarationScope) {
+<span class="fc" id="L152">		this.pointcutDeclarationScope = pointcutDeclarationScope;</span>
+<span class="fc" id="L153">	}</span>
+
+	/**
+	 * Set the parameter names for the pointcut.
+	 */
+	public void setParameterNames(String... names) {
+<span class="fc" id="L159">		this.pointcutParameterNames = names;</span>
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Set the parameter types for the pointcut.
+	 */
+	public void setParameterTypes(Class&lt;?&gt;... types) {
+<span class="fc" id="L166">		this.pointcutParameterTypes = types;</span>
+<span class="fc" id="L167">	}</span>
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="nc" id="L171">		this.beanFactory = beanFactory;</span>
+<span class="nc" id="L172">	}</span>
+
+
+	@Override
+	public ClassFilter getClassFilter() {
+<span class="fc" id="L177">		obtainPointcutExpression();</span>
+<span class="fc" id="L178">		return this;</span>
+	}
+
+	@Override
+	public MethodMatcher getMethodMatcher() {
+<span class="fc" id="L183">		obtainPointcutExpression();</span>
+<span class="fc" id="L184">		return this;</span>
+	}
+
+
+	/**
+	 * Check whether this pointcut is ready to match,
+	 * lazily building the underlying AspectJ pointcut expression.
+	 */
+	private PointcutExpression obtainPointcutExpression() {
+<span class="fc bfc" id="L193" title="All 2 branches covered.">		if (getExpression() == null) {</span>
+<span class="fc" id="L194">			throw new IllegalStateException(&quot;Must set property 'expression' before attempting to match&quot;);</span>
+		}
+<span class="fc bfc" id="L196" title="All 2 branches covered.">		if (this.pointcutExpression == null) {</span>
+<span class="fc" id="L197">			this.pointcutClassLoader = determinePointcutClassLoader();</span>
+<span class="fc" id="L198">			this.pointcutExpression = buildPointcutExpression(this.pointcutClassLoader);</span>
+		}
+<span class="fc" id="L200">		return this.pointcutExpression;</span>
+	}
+
+	/**
+	 * Determine the ClassLoader to use for pointcut evaluation.
+	 */
+	@Nullable
+	private ClassLoader determinePointcutClassLoader() {
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">		if (this.beanFactory instanceof ConfigurableBeanFactory) {</span>
+<span class="nc" id="L209">			return ((ConfigurableBeanFactory) this.beanFactory).getBeanClassLoader();</span>
+		}
+<span class="fc bfc" id="L211" title="All 2 branches covered.">		if (this.pointcutDeclarationScope != null) {</span>
+<span class="fc" id="L212">			return this.pointcutDeclarationScope.getClassLoader();</span>
+		}
+<span class="fc" id="L214">		return ClassUtils.getDefaultClassLoader();</span>
+	}
+
+	/**
+	 * Build the underlying AspectJ pointcut expression.
+	 */
+	private PointcutExpression buildPointcutExpression(@Nullable ClassLoader classLoader) {
+<span class="fc" id="L221">		PointcutParser parser = initializePointcutParser(classLoader);</span>
+<span class="fc" id="L222">		PointcutParameter[] pointcutParameters = new PointcutParameter[this.pointcutParameterNames.length];</span>
+<span class="fc bfc" id="L223" title="All 2 branches covered.">		for (int i = 0; i &lt; pointcutParameters.length; i++) {</span>
+<span class="fc" id="L224">			pointcutParameters[i] = parser.createPointcutParameter(</span>
+					this.pointcutParameterNames[i], this.pointcutParameterTypes[i]);
+		}
+<span class="fc" id="L227">		return parser.parsePointcutExpression(replaceBooleanOperators(resolveExpression()),</span>
+				this.pointcutDeclarationScope, pointcutParameters);
+	}
+
+	private String resolveExpression() {
+<span class="fc" id="L232">		String expression = getExpression();</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">		Assert.state(expression != null, &quot;No expression set&quot;);</span>
+<span class="fc" id="L234">		return expression;</span>
+	}
+
+	/**
+	 * Initialize the underlying AspectJ pointcut parser.
+	 */
+	private PointcutParser initializePointcutParser(@Nullable ClassLoader classLoader) {
+<span class="fc" id="L241">		PointcutParser parser = PointcutParser</span>
+<span class="fc" id="L242">				.getPointcutParserSupportingSpecifiedPrimitivesAndUsingSpecifiedClassLoaderForResolution(</span>
+						SUPPORTED_PRIMITIVES, classLoader);
+<span class="fc" id="L244">		parser.registerPointcutDesignatorHandler(new BeanPointcutDesignatorHandler());</span>
+<span class="fc" id="L245">		return parser;</span>
+	}
+
+
+	/**
+	 * If a pointcut expression has been specified in XML, the user cannot
+	 * write {@code and} as &quot;&amp;&amp;&quot; (though &amp;amp;&amp;amp; will work).
+	 * We also allow {@code and} between two pointcut sub-expressions.
+	 * &lt;p&gt;This method converts back to {@code &amp;&amp;} for the AspectJ pointcut parser.
+	 */
+	private String replaceBooleanOperators(String pcExpr) {
+<span class="fc" id="L256">		String result = StringUtils.replace(pcExpr, &quot; and &quot;, &quot; &amp;&amp; &quot;);</span>
+<span class="fc" id="L257">		result = StringUtils.replace(result, &quot; or &quot;, &quot; || &quot;);</span>
+<span class="fc" id="L258">		result = StringUtils.replace(result, &quot; not &quot;, &quot; ! &quot;);</span>
+<span class="fc" id="L259">		return result;</span>
+	}
+
+
+	/**
+	 * Return the underlying AspectJ pointcut expression.
+	 */
+	public PointcutExpression getPointcutExpression() {
+<span class="fc" id="L267">		return obtainPointcutExpression();</span>
+	}
+
+	@Override
+	public boolean matches(Class&lt;?&gt; targetClass) {
+<span class="fc" id="L272">		PointcutExpression pointcutExpression = obtainPointcutExpression();</span>
+		try {
+			try {
+<span class="fc" id="L275">				return pointcutExpression.couldMatchJoinPointsInType(targetClass);</span>
+			}
+<span class="nc" id="L277">			catch (ReflectionWorldException ex) {</span>
+<span class="nc" id="L278">				logger.debug(&quot;PointcutExpression matching rejected target class - trying fallback expression&quot;, ex);</span>
+				// Actually this is still a &quot;maybe&quot; - treat the pointcut as dynamic if we don't know enough yet
+<span class="nc" id="L280">				PointcutExpression fallbackExpression = getFallbackPointcutExpression(targetClass);</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">				if (fallbackExpression != null) {</span>
+<span class="nc" id="L282">					return fallbackExpression.couldMatchJoinPointsInType(targetClass);</span>
+				}
+			}
+		}
+<span class="nc" id="L286">		catch (Throwable ex) {</span>
+<span class="nc" id="L287">			logger.debug(&quot;PointcutExpression matching rejected target class&quot;, ex);</span>
+<span class="nc" id="L288">		}</span>
+<span class="nc" id="L289">		return false;</span>
+	}
+
+	@Override
+	public boolean matches(Method method, Class&lt;?&gt; targetClass, boolean hasIntroductions) {
+<span class="fc" id="L294">		obtainPointcutExpression();</span>
+<span class="fc" id="L295">		ShadowMatch shadowMatch = getTargetShadowMatch(method, targetClass);</span>
+
+		// Special handling for this, target, @this, @target, @annotation
+		// in Spring - we can optimize since we know we have exactly this class,
+		// and there will never be matching subclass at runtime.
+<span class="fc bfc" id="L300" title="All 2 branches covered.">		if (shadowMatch.alwaysMatches()) {</span>
+<span class="fc" id="L301">			return true;</span>
+		}
+<span class="fc bfc" id="L303" title="All 2 branches covered.">		else if (shadowMatch.neverMatches()) {</span>
+<span class="fc" id="L304">			return false;</span>
+		}
+		else {
+			// the maybe case
+<span class="fc bfc" id="L308" title="All 2 branches covered.">			if (hasIntroductions) {</span>
+<span class="fc" id="L309">				return true;</span>
+			}
+			// A match test returned maybe - if there are any subtype sensitive variables
+			// involved in the test (this, target, at_this, at_target, at_annotation) then
+			// we say this is not a match as in Spring there will never be a different
+			// runtime subtype.
+<span class="fc" id="L315">			RuntimeTestWalker walker = getRuntimeTestWalker(shadowMatch);</span>
+<span class="pc bpc" id="L316" title="3 of 4 branches missed.">			return (!walker.testsSubtypeSensitiveVars() || walker.testTargetInstanceOfResidue(targetClass));</span>
+		}
+	}
+
+	@Override
+	public boolean matches(Method method, Class&lt;?&gt; targetClass) {
+<span class="fc" id="L322">		return matches(method, targetClass, false);</span>
+	}
+
+	@Override
+	public boolean isRuntime() {
+<span class="fc" id="L327">		return obtainPointcutExpression().mayNeedDynamicTest();</span>
+	}
+
+	@Override
+	public boolean matches(Method method, Class&lt;?&gt; targetClass, Object... args) {
+<span class="fc" id="L332">		obtainPointcutExpression();</span>
+<span class="fc" id="L333">		ShadowMatch shadowMatch = getTargetShadowMatch(method, targetClass);</span>
+
+		// Bind Spring AOP proxy to AspectJ &quot;this&quot; and Spring AOP target to AspectJ target,
+		// consistent with return of MethodInvocationProceedingJoinPoint
+<span class="fc" id="L337">		ProxyMethodInvocation pmi = null;</span>
+<span class="fc" id="L338">		Object targetObject = null;</span>
+<span class="fc" id="L339">		Object thisObject = null;</span>
+		try {
+<span class="fc" id="L341">			MethodInvocation mi = ExposeInvocationInterceptor.currentInvocation();</span>
+<span class="fc" id="L342">			targetObject = mi.getThis();</span>
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">			if (!(mi instanceof ProxyMethodInvocation)) {</span>
+<span class="nc" id="L344">				throw new IllegalStateException(&quot;MethodInvocation is not a Spring ProxyMethodInvocation: &quot; + mi);</span>
+			}
+<span class="fc" id="L346">			pmi = (ProxyMethodInvocation) mi;</span>
+<span class="fc" id="L347">			thisObject = pmi.getProxy();</span>
+		}
+<span class="fc" id="L349">		catch (IllegalStateException ex) {</span>
+			// No current invocation...
+<span class="pc bpc" id="L351" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L352">				logger.debug(&quot;Could not access current invocation - matching with limited context: &quot; + ex);</span>
+			}
+<span class="fc" id="L354">		}</span>
+
+		try {
+<span class="fc" id="L357">			JoinPointMatch joinPointMatch = shadowMatch.matchesJoinPoint(thisObject, targetObject, args);</span>
+
+			/*
+			 * Do a final check to see if any this(TYPE) kind of residue match. For
+			 * this purpose, we use the original method's (proxy method's) shadow to
+			 * ensure that 'this' is correctly checked against. Without this check,
+			 * we get incorrect match on this(TYPE) where TYPE matches the target
+			 * type but not 'this' (as would be the case of JDK dynamic proxies).
+			 * &lt;p&gt;See SPR-2979 for the original bug.
+			 */
+<span class="pc bpc" id="L367" title="1 of 4 branches missed.">			if (pmi != null &amp;&amp; thisObject != null) {  // there is a current invocation</span>
+<span class="fc" id="L368">				RuntimeTestWalker originalMethodResidueTest = getRuntimeTestWalker(getShadowMatch(method, method));</span>
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">				if (!originalMethodResidueTest.testThisInstanceOfResidue(thisObject.getClass())) {</span>
+<span class="nc" id="L370">					return false;</span>
+				}
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">				if (joinPointMatch.matches()) {</span>
+<span class="fc" id="L373">					bindParameters(pmi, joinPointMatch);</span>
+				}
+			}
+
+<span class="fc" id="L377">			return joinPointMatch.matches();</span>
+		}
+<span class="nc" id="L379">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L381">				logger.debug(&quot;Failed to evaluate join point for arguments &quot; + Arrays.asList(args) +</span>
+						&quot; - falling back to non-match&quot;, ex);
+			}
+<span class="nc" id="L384">			return false;</span>
+		}
+	}
+
+	@Nullable
+	protected String getCurrentProxiedBeanName() {
+<span class="nc" id="L390">		return ProxyCreationContext.getCurrentProxiedBeanName();</span>
+	}
+
+
+	/**
+	 * Get a new pointcut expression based on a target class's loader rather than the default.
+	 */
+	@Nullable
+	private PointcutExpression getFallbackPointcutExpression(Class&lt;?&gt; targetClass) {
+		try {
+<span class="nc" id="L400">			ClassLoader classLoader = targetClass.getClassLoader();</span>
+<span class="nc bnc" id="L401" title="All 4 branches missed.">			if (classLoader != null &amp;&amp; classLoader != this.pointcutClassLoader) {</span>
+<span class="nc" id="L402">				return buildPointcutExpression(classLoader);</span>
+			}
+		}
+<span class="nc" id="L405">		catch (Throwable ex) {</span>
+<span class="nc" id="L406">			logger.debug(&quot;Failed to create fallback PointcutExpression&quot;, ex);</span>
+<span class="nc" id="L407">		}</span>
+<span class="nc" id="L408">		return null;</span>
+	}
+
+	private RuntimeTestWalker getRuntimeTestWalker(ShadowMatch shadowMatch) {
+<span class="pc bpc" id="L412" title="1 of 2 branches missed.">		if (shadowMatch instanceof DefensiveShadowMatch) {</span>
+<span class="nc" id="L413">			return new RuntimeTestWalker(((DefensiveShadowMatch) shadowMatch).primary);</span>
+		}
+<span class="fc" id="L415">		return new RuntimeTestWalker(shadowMatch);</span>
+	}
+
+	private void bindParameters(ProxyMethodInvocation invocation, JoinPointMatch jpm) {
+		// Note: Can't use JoinPointMatch.getClass().getName() as the key, since
+		// Spring AOP does all the matching at a join point, and then all the invocations
+		// under this scenario, if we just use JoinPointMatch as the key, then
+		// 'last man wins' which is not what we want at all.
+		// Using the expression is guaranteed to be safe, since 2 identical expressions
+		// are guaranteed to bind in exactly the same way.
+<span class="fc" id="L425">		invocation.setUserAttribute(resolveExpression(), jpm);</span>
+<span class="fc" id="L426">	}</span>
+
+	private ShadowMatch getTargetShadowMatch(Method method, Class&lt;?&gt; targetClass) {
+<span class="fc" id="L429">		Method targetMethod = AopUtils.getMostSpecificMethod(method, targetClass);</span>
+<span class="fc bfc" id="L430" title="All 2 branches covered.">		if (targetMethod.getDeclaringClass().isInterface()) {</span>
+			// Try to build the most specific interface possible for inherited methods to be
+			// considered for sub-interface matches as well, in particular for proxy classes.
+			// Note: AspectJ is only going to take Method.getDeclaringClass() into account.
+<span class="fc" id="L434">			Set&lt;Class&lt;?&gt;&gt; ifcs = ClassUtils.getAllInterfacesForClassAsSet(targetClass);</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">			if (ifcs.size() &gt; 1) {</span>
+				try {
+<span class="fc" id="L437">					Class&lt;?&gt; compositeInterface = ClassUtils.createCompositeInterface(</span>
+<span class="fc" id="L438">							ClassUtils.toClassArray(ifcs), targetClass.getClassLoader());</span>
+<span class="fc" id="L439">					targetMethod = ClassUtils.getMostSpecificMethod(targetMethod, compositeInterface);</span>
+				}
+<span class="nc" id="L441">				catch (IllegalArgumentException ex) {</span>
+					// Implemented interfaces probably expose conflicting method signatures...
+					// Proceed with original target method.
+<span class="fc" id="L444">				}</span>
+			}
+		}
+<span class="fc" id="L447">		return getShadowMatch(targetMethod, method);</span>
+	}
+
+	private ShadowMatch getShadowMatch(Method targetMethod, Method originalMethod) {
+		// Avoid lock contention for known Methods through concurrent access...
+<span class="fc" id="L452">		ShadowMatch shadowMatch = this.shadowMatchCache.get(targetMethod);</span>
+<span class="fc bfc" id="L453" title="All 2 branches covered.">		if (shadowMatch == null) {</span>
+<span class="fc" id="L454">			synchronized (this.shadowMatchCache) {</span>
+				// Not found - now check again with full lock...
+<span class="fc" id="L456">				PointcutExpression fallbackExpression = null;</span>
+<span class="fc" id="L457">				shadowMatch = this.shadowMatchCache.get(targetMethod);</span>
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">				if (shadowMatch == null) {</span>
+<span class="fc" id="L459">					Method methodToMatch = targetMethod;</span>
+					try {
+						try {
+<span class="fc" id="L462">							shadowMatch = obtainPointcutExpression().matchesMethodExecution(methodToMatch);</span>
+						}
+<span class="nc" id="L464">						catch (ReflectionWorldException ex) {</span>
+							// Failed to introspect target method, probably because it has been loaded
+							// in a special ClassLoader. Let's try the declaring ClassLoader instead...
+							try {
+<span class="nc" id="L468">								fallbackExpression = getFallbackPointcutExpression(methodToMatch.getDeclaringClass());</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">								if (fallbackExpression != null) {</span>
+<span class="nc" id="L470">									shadowMatch = fallbackExpression.matchesMethodExecution(methodToMatch);</span>
+								}
+							}
+<span class="nc" id="L473">							catch (ReflectionWorldException ex2) {</span>
+<span class="nc" id="L474">								fallbackExpression = null;</span>
+<span class="nc" id="L475">							}</span>
+<span class="fc" id="L476">						}</span>
+<span class="pc bpc" id="L477" title="1 of 4 branches missed.">						if (targetMethod != originalMethod &amp;&amp; (shadowMatch == null ||</span>
+<span class="fc bfc" id="L478" title="All 4 branches covered.">								(shadowMatch.neverMatches() &amp;&amp; Proxy.isProxyClass(targetMethod.getDeclaringClass())))) {</span>
+							// Fall back to the plain original method in case of no resolvable match or a
+							// negative match on a proxy class (which doesn't carry any annotations on its
+							// redeclared methods).
+<span class="fc" id="L482">							methodToMatch = originalMethod;</span>
+							try {
+<span class="fc" id="L484">								shadowMatch = obtainPointcutExpression().matchesMethodExecution(methodToMatch);</span>
+							}
+<span class="nc" id="L486">							catch (ReflectionWorldException ex) {</span>
+								// Could neither introspect the target class nor the proxy class -&gt;
+								// let's try the original method's declaring class before we give up...
+								try {
+<span class="nc" id="L490">									fallbackExpression = getFallbackPointcutExpression(methodToMatch.getDeclaringClass());</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">									if (fallbackExpression != null) {</span>
+<span class="nc" id="L492">										shadowMatch = fallbackExpression.matchesMethodExecution(methodToMatch);</span>
+									}
+								}
+<span class="nc" id="L495">								catch (ReflectionWorldException ex2) {</span>
+<span class="nc" id="L496">									fallbackExpression = null;</span>
+<span class="nc" id="L497">								}</span>
+<span class="fc" id="L498">							}</span>
+						}
+					}
+<span class="nc" id="L501">					catch (Throwable ex) {</span>
+						// Possibly AspectJ 1.8.10 encountering an invalid signature
+<span class="nc" id="L503">						logger.debug(&quot;PointcutExpression matching rejected target method&quot;, ex);</span>
+<span class="nc" id="L504">						fallbackExpression = null;</span>
+<span class="fc" id="L505">					}</span>
+<span class="pc bpc" id="L506" title="1 of 2 branches missed.">					if (shadowMatch == null) {</span>
+<span class="nc" id="L507">						shadowMatch = new ShadowMatchImpl(org.aspectj.util.FuzzyBoolean.NO, null, null, null);</span>
+					}
+<span class="pc bpc" id="L509" title="1 of 4 branches missed.">					else if (shadowMatch.maybeMatches() &amp;&amp; fallbackExpression != null) {</span>
+<span class="nc" id="L510">						shadowMatch = new DefensiveShadowMatch(shadowMatch,</span>
+<span class="nc" id="L511">								fallbackExpression.matchesMethodExecution(methodToMatch));</span>
+					}
+<span class="fc" id="L513">					this.shadowMatchCache.put(targetMethod, shadowMatch);</span>
+				}
+<span class="fc" id="L515">			}</span>
+		}
+<span class="fc" id="L517">		return shadowMatch;</span>
+	}
+
+
+	@Override
+	public boolean equals(Object other) {
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">		if (this == other) {</span>
+<span class="nc" id="L524">			return true;</span>
+		}
+<span class="fc bfc" id="L526" title="All 2 branches covered.">		if (!(other instanceof AspectJExpressionPointcut)) {</span>
+<span class="fc" id="L527">			return false;</span>
+		}
+<span class="fc" id="L529">		AspectJExpressionPointcut otherPc = (AspectJExpressionPointcut) other;</span>
+<span class="fc bfc" id="L530" title="All 2 branches covered.">		return ObjectUtils.nullSafeEquals(this.getExpression(), otherPc.getExpression()) &amp;&amp;</span>
+<span class="fc bfc" id="L531" title="All 2 branches covered.">				ObjectUtils.nullSafeEquals(this.pointcutDeclarationScope, otherPc.pointcutDeclarationScope) &amp;&amp;</span>
+<span class="pc bpc" id="L532" title="1 of 2 branches missed.">				ObjectUtils.nullSafeEquals(this.pointcutParameterNames, otherPc.pointcutParameterNames) &amp;&amp;</span>
+<span class="pc bpc" id="L533" title="1 of 2 branches missed.">				ObjectUtils.nullSafeEquals(this.pointcutParameterTypes, otherPc.pointcutParameterTypes);</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="nc" id="L538">		int hashCode = ObjectUtils.nullSafeHashCode(this.getExpression());</span>
+<span class="nc" id="L539">		hashCode = 31 * hashCode + ObjectUtils.nullSafeHashCode(this.pointcutDeclarationScope);</span>
+<span class="nc" id="L540">		hashCode = 31 * hashCode + ObjectUtils.nullSafeHashCode(this.pointcutParameterNames);</span>
+<span class="nc" id="L541">		hashCode = 31 * hashCode + ObjectUtils.nullSafeHashCode(this.pointcutParameterTypes);</span>
+<span class="nc" id="L542">		return hashCode;</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="nc" id="L547">		StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L548">		sb.append(&quot;AspectJExpressionPointcut: &quot;);</span>
+<span class="nc" id="L549">		sb.append(&quot;(&quot;);</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">		for (int i = 0; i &lt; this.pointcutParameterTypes.length; i++) {</span>
+<span class="nc" id="L551">			sb.append(this.pointcutParameterTypes[i].getName());</span>
+<span class="nc" id="L552">			sb.append(&quot; &quot;);</span>
+<span class="nc" id="L553">			sb.append(this.pointcutParameterNames[i]);</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">			if ((i+1) &lt; this.pointcutParameterTypes.length) {</span>
+<span class="nc" id="L555">				sb.append(&quot;, &quot;);</span>
+			}
+		}
+<span class="nc" id="L558">		sb.append(&quot;)&quot;);</span>
+<span class="nc" id="L559">		sb.append(&quot; &quot;);</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">		if (getExpression() != null) {</span>
+<span class="nc" id="L561">			sb.append(getExpression());</span>
+		}
+		else {
+<span class="nc" id="L564">			sb.append(&quot;&lt;pointcut expression not set&gt;&quot;);</span>
+		}
+<span class="nc" id="L566">		return sb.toString();</span>
+	}
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+		// Rely on default serialization, just initialize state after deserialization.
+<span class="fc" id="L575">		ois.defaultReadObject();</span>
+
+		// Initialize transient fields.
+		// pointcutExpression will be initialized lazily by checkReadyToMatch()
+<span class="fc" id="L579">		this.shadowMatchCache = new ConcurrentHashMap&lt;&gt;(32);</span>
+<span class="fc" id="L580">	}</span>
+
+
+	/**
+	 * Handler for the Spring-specific {@code bean()} pointcut designator
+	 * extension to AspectJ.
+	 * &lt;p&gt;This handler must be added to each pointcut object that needs to
+	 * handle the {@code bean()} PCD. Matching context is obtained
+	 * automatically by examining a thread local variable and therefore a matching
+	 * context need not be set on the pointcut.
+	 */
+<span class="fc" id="L591">	private class BeanPointcutDesignatorHandler implements PointcutDesignatorHandler {</span>
+
+		private static final String BEAN_DESIGNATOR_NAME = &quot;bean&quot;;
+
+		@Override
+		public String getDesignatorName() {
+<span class="fc" id="L597">			return BEAN_DESIGNATOR_NAME;</span>
+		}
+
+		@Override
+		public ContextBasedMatcher parse(String expression) {
+<span class="fc" id="L602">			return new BeanContextMatcher(expression);</span>
+		}
+	}
+
+
+	/**
+	 * Matcher class for the BeanNamePointcutDesignatorHandler.
+	 * &lt;p&gt;Dynamic match tests for this matcher always return true,
+	 * since the matching decision is made at the proxy creation time.
+	 * For static match tests, this matcher abstains to allow the overall
+	 * pointcut to match even when negation is used with the bean() pointcut.
+	 */
+	private class BeanContextMatcher implements ContextBasedMatcher {
+
+		private final NamePattern expressionPattern;
+
+<span class="fc" id="L618">		public BeanContextMatcher(String expression) {</span>
+<span class="fc" id="L619">			this.expressionPattern = new NamePattern(expression);</span>
+<span class="fc" id="L620">		}</span>
+
+		@Override
+		@SuppressWarnings(&quot;rawtypes&quot;)
+		@Deprecated
+		public boolean couldMatchJoinPointsInType(Class someClass) {
+<span class="nc bnc" id="L626" title="All 2 branches missed.">			return (contextMatch(someClass) == FuzzyBoolean.YES);</span>
+		}
+
+		@Override
+		@SuppressWarnings(&quot;rawtypes&quot;)
+		@Deprecated
+		public boolean couldMatchJoinPointsInType(Class someClass, MatchingContext context) {
+<span class="fc bfc" id="L633" title="All 2 branches covered.">			return (contextMatch(someClass) == FuzzyBoolean.YES);</span>
+		}
+
+		@Override
+		public boolean matchesDynamically(MatchingContext context) {
+<span class="nc" id="L638">			return true;</span>
+		}
+
+		@Override
+		public FuzzyBoolean matchesStatically(MatchingContext context) {
+<span class="nc" id="L643">			return contextMatch(null);</span>
+		}
+
+		@Override
+		public boolean mayNeedDynamicTest() {
+<span class="nc" id="L648">			return false;</span>
+		}
+
+		private FuzzyBoolean contextMatch(@Nullable Class&lt;?&gt; targetType) {
+<span class="fc" id="L652">			String advisedBeanName = getCurrentProxiedBeanName();</span>
+<span class="pc bpc" id="L653" title="1 of 2 branches missed.">			if (advisedBeanName == null) {  // no proxy creation in progress</span>
+				// abstain; can't return YES, since that will make pointcut with negation fail
+<span class="nc" id="L655">				return FuzzyBoolean.MAYBE;</span>
+			}
+<span class="pc bpc" id="L657" title="1 of 2 branches missed.">			if (BeanFactoryUtils.isGeneratedBeanName(advisedBeanName)) {</span>
+<span class="nc" id="L658">				return FuzzyBoolean.NO;</span>
+			}
+<span class="pc bpc" id="L660" title="1 of 2 branches missed.">			if (targetType != null) {</span>
+<span class="fc" id="L661">				boolean isFactory = FactoryBean.class.isAssignableFrom(targetType);</span>
+<span class="pc bpc" id="L662" title="1 of 2 branches missed.">				return FuzzyBoolean.fromBoolean(</span>
+<span class="fc" id="L663">						matchesBean(isFactory ? BeanFactory.FACTORY_BEAN_PREFIX + advisedBeanName : advisedBeanName));</span>
+			}
+			else {
+<span class="nc bnc" id="L666" title="All 2 branches missed.">				return FuzzyBoolean.fromBoolean(matchesBean(advisedBeanName) ||</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">						matchesBean(BeanFactory.FACTORY_BEAN_PREFIX + advisedBeanName));</span>
+			}
+		}
+
+		private boolean matchesBean(String advisedBeanName) {
+<span class="fc" id="L672">			return BeanFactoryAnnotationUtils.isQualifierMatch(</span>
+<span class="fc" id="L673">					this.expressionPattern::matches, advisedBeanName, beanFactory);</span>
+		}
+	}
+
+
+	private static class DefensiveShadowMatch implements ShadowMatch {
+
+		private final ShadowMatch primary;
+
+		private final ShadowMatch other;
+
+<span class="nc" id="L684">		public DefensiveShadowMatch(ShadowMatch primary, ShadowMatch other) {</span>
+<span class="nc" id="L685">			this.primary = primary;</span>
+<span class="nc" id="L686">			this.other = other;</span>
+<span class="nc" id="L687">		}</span>
+
+		@Override
+		public boolean alwaysMatches() {
+<span class="nc" id="L691">			return this.primary.alwaysMatches();</span>
+		}
+
+		@Override
+		public boolean maybeMatches() {
+<span class="nc" id="L696">			return this.primary.maybeMatches();</span>
+		}
+
+		@Override
+		public boolean neverMatches() {
+<span class="nc" id="L701">			return this.primary.neverMatches();</span>
+		}
+
+		@Override
+		public JoinPointMatch matchesJoinPoint(Object thisObject, Object targetObject, Object[] args) {
+			try {
+<span class="nc" id="L707">				return this.primary.matchesJoinPoint(thisObject, targetObject, args);</span>
+			}
+<span class="nc" id="L709">			catch (ReflectionWorldException ex) {</span>
+<span class="nc" id="L710">				return this.other.matchesJoinPoint(thisObject, targetObject, args);</span>
+			}
+		}
+
+		@Override
+		public void setMatchingContext(MatchingContext aMatchContext) {
+<span class="nc" id="L716">			this.primary.setMatchingContext(aMatchContext);</span>
+<span class="nc" id="L717">			this.other.setMatchingContext(aMatchContext);</span>
+<span class="nc" id="L718">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

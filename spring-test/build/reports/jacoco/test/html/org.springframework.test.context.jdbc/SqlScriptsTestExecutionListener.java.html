@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SqlScriptsTestExecutionListener.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.jdbc</a> &gt; <span class="el_source">SqlScriptsTestExecutionListener.java</span></div><h1>SqlScriptsTestExecutionListener.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.jdbc;
+
+import java.lang.reflect.Method;
+import java.util.List;
+import java.util.Set;
+import javax.sql.DataSource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.lang.Nullable;
+import org.springframework.test.context.TestContext;
+import org.springframework.test.context.jdbc.Sql.ExecutionPhase;
+import org.springframework.test.context.jdbc.SqlConfig.ErrorMode;
+import org.springframework.test.context.jdbc.SqlConfig.TransactionMode;
+import org.springframework.test.context.support.AbstractTestExecutionListener;
+import org.springframework.test.context.transaction.TestContextTransactionUtils;
+import org.springframework.test.context.util.TestContextResourceUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.interceptor.DefaultTransactionAttribute;
+import org.springframework.transaction.interceptor.TransactionAttribute;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.ResourceUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@code TestExecutionListener} that provides support for executing SQL
+ * {@link Sql#scripts scripts} and inlined {@link Sql#statements statements}
+ * configured via the {@link Sql @Sql} annotation.
+ *
+ * &lt;p&gt;Scripts and inlined statements will be executed {@linkplain #beforeTestMethod(TestContext) before}
+ * or {@linkplain #afterTestMethod(TestContext) after} execution of the corresponding
+ * {@linkplain java.lang.reflect.Method test method}, depending on the configured
+ * value of the {@link Sql#executionPhase executionPhase} flag.
+ *
+ * &lt;p&gt;Scripts and inlined statements will be executed without a transaction,
+ * within an existing Spring-managed transaction, or within an isolated transaction,
+ * depending on the configured value of {@link SqlConfig#transactionMode} and the
+ * presence of a transaction manager.
+ *
+ * &lt;h3&gt;Script Resources&lt;/h3&gt;
+ * &lt;p&gt;For details on default script detection and how script resource locations
+ * are interpreted, see {@link Sql#scripts}.
+ *
+ * &lt;h3&gt;Required Spring Beans&lt;/h3&gt;
+ * &lt;p&gt;A {@link PlatformTransactionManager} &lt;em&gt;and&lt;/em&gt; a {@link DataSource},
+ * just a {@link PlatformTransactionManager}, or just a {@link DataSource}
+ * must be defined as beans in the Spring {@link ApplicationContext} for the
+ * corresponding test. Consult the javadocs for {@link SqlConfig#transactionMode},
+ * {@link SqlConfig#transactionManager}, {@link SqlConfig#dataSource},
+ * {@link TestContextTransactionUtils#retrieveDataSource}, and
+ * {@link TestContextTransactionUtils#retrieveTransactionManager} for details
+ * on permissible configuration constellations and on the algorithms used to
+ * locate these beans.
+ *
+ * @author Sam Brannen
+ * @since 4.1
+ * @see Sql
+ * @see SqlConfig
+ * @see SqlGroup
+ * @see org.springframework.test.context.transaction.TestContextTransactionUtils
+ * @see org.springframework.test.context.transaction.TransactionalTestExecutionListener
+ * @see org.springframework.jdbc.datasource.init.ResourceDatabasePopulator
+ * @see org.springframework.jdbc.datasource.init.ScriptUtils
+ */
+<span class="fc" id="L93">public class SqlScriptsTestExecutionListener extends AbstractTestExecutionListener {</span>
+
+<span class="fc" id="L95">	private static final Log logger = LogFactory.getLog(SqlScriptsTestExecutionListener.class);</span>
+
+
+	/**
+	 * Returns {@code 5000}.
+	 */
+	@Override
+	public final int getOrder() {
+<span class="fc" id="L103">		return 5000;</span>
+	}
+
+	/**
+	 * Execute SQL scripts configured via {@link Sql @Sql} for the supplied
+	 * {@link TestContext} &lt;em&gt;before&lt;/em&gt; the current test method.
+	 */
+	@Override
+	public void beforeTestMethod(TestContext testContext) throws Exception {
+<span class="fc" id="L112">		executeSqlScripts(testContext, ExecutionPhase.BEFORE_TEST_METHOD);</span>
+<span class="fc" id="L113">	}</span>
+
+	/**
+	 * Execute SQL scripts configured via {@link Sql @Sql} for the supplied
+	 * {@link TestContext} &lt;em&gt;after&lt;/em&gt; the current test method.
+	 */
+	@Override
+	public void afterTestMethod(TestContext testContext) throws Exception {
+<span class="fc" id="L121">		executeSqlScripts(testContext, ExecutionPhase.AFTER_TEST_METHOD);</span>
+<span class="fc" id="L122">	}</span>
+
+	/**
+	 * Execute SQL scripts configured via {@link Sql @Sql} for the supplied
+	 * {@link TestContext} and {@link ExecutionPhase}.
+	 */
+	private void executeSqlScripts(TestContext testContext, ExecutionPhase executionPhase) throws Exception {
+<span class="fc" id="L129">		boolean classLevel = false;</span>
+
+<span class="fc" id="L131">		Set&lt;Sql&gt; sqlAnnotations = AnnotatedElementUtils.getMergedRepeatableAnnotations(</span>
+<span class="fc" id="L132">				testContext.getTestMethod(), Sql.class, SqlGroup.class);</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">		if (sqlAnnotations.isEmpty()) {</span>
+<span class="fc" id="L134">			sqlAnnotations = AnnotatedElementUtils.getMergedRepeatableAnnotations(</span>
+<span class="fc" id="L135">					testContext.getTestClass(), Sql.class, SqlGroup.class);</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">			if (!sqlAnnotations.isEmpty()) {</span>
+<span class="fc" id="L137">				classLevel = true;</span>
+			}
+		}
+
+<span class="fc bfc" id="L141" title="All 2 branches covered.">		for (Sql sql : sqlAnnotations) {</span>
+<span class="fc" id="L142">			executeSqlScripts(sql, executionPhase, testContext, classLevel);</span>
+<span class="fc" id="L143">		}</span>
+<span class="fc" id="L144">	}</span>
+
+	/**
+	 * Execute the SQL scripts configured via the supplied {@link Sql @Sql}
+	 * annotation for the given {@link ExecutionPhase} and {@link TestContext}.
+	 * &lt;p&gt;Special care must be taken in order to properly support the configured
+	 * {@link SqlConfig#transactionMode}.
+	 * @param sql the {@code @Sql} annotation to parse
+	 * @param executionPhase the current execution phase
+	 * @param testContext the current {@code TestContext}
+	 * @param classLevel {@code true} if {@link Sql @Sql} was declared at the class level
+	 */
+	private void executeSqlScripts(Sql sql, ExecutionPhase executionPhase, TestContext testContext, boolean classLevel)
+			throws Exception {
+
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		if (executionPhase != sql.executionPhase()) {</span>
+<span class="fc" id="L160">			return;</span>
+		}
+
+<span class="fc" id="L163">		MergedSqlConfig mergedSqlConfig = new MergedSqlConfig(sql.config(), testContext.getTestClass());</span>
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L165">			logger.debug(String.format(&quot;Processing %s for execution phase [%s] and test context %s.&quot;,</span>
+					mergedSqlConfig, executionPhase, testContext));
+		}
+
+<span class="fc" id="L169">		final ResourceDatabasePopulator populator = new ResourceDatabasePopulator();</span>
+<span class="fc" id="L170">		populator.setSqlScriptEncoding(mergedSqlConfig.getEncoding());</span>
+<span class="fc" id="L171">		populator.setSeparator(mergedSqlConfig.getSeparator());</span>
+<span class="fc" id="L172">		populator.setCommentPrefix(mergedSqlConfig.getCommentPrefix());</span>
+<span class="fc" id="L173">		populator.setBlockCommentStartDelimiter(mergedSqlConfig.getBlockCommentStartDelimiter());</span>
+<span class="fc" id="L174">		populator.setBlockCommentEndDelimiter(mergedSqlConfig.getBlockCommentEndDelimiter());</span>
+<span class="pc bpc" id="L175" title="1 of 2 branches missed.">		populator.setContinueOnError(mergedSqlConfig.getErrorMode() == ErrorMode.CONTINUE_ON_ERROR);</span>
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">		populator.setIgnoreFailedDrops(mergedSqlConfig.getErrorMode() == ErrorMode.IGNORE_FAILED_DROPS);</span>
+
+<span class="fc" id="L178">		String[] scripts = getScripts(sql, testContext, classLevel);</span>
+<span class="fc" id="L179">		scripts = TestContextResourceUtils.convertToClasspathResourcePaths(testContext.getTestClass(), scripts);</span>
+<span class="fc" id="L180">		List&lt;Resource&gt; scriptResources = TestContextResourceUtils.convertToResourceList(</span>
+<span class="fc" id="L181">				testContext.getApplicationContext(), scripts);</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">		for (String stmt : sql.statements()) {</span>
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">			if (StringUtils.hasText(stmt)) {</span>
+<span class="fc" id="L184">				stmt = stmt.trim();</span>
+<span class="fc" id="L185">				scriptResources.add(new ByteArrayResource(stmt.getBytes(), &quot;from inlined SQL statement: &quot; + stmt));</span>
+			}
+		}
+<span class="fc" id="L188">		populator.setScripts(scriptResources.toArray(new Resource[0]));</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L190">			logger.debug(&quot;Executing SQL scripts: &quot; + ObjectUtils.nullSafeToString(scriptResources));</span>
+		}
+
+<span class="fc" id="L193">		String dsName = mergedSqlConfig.getDataSource();</span>
+<span class="fc" id="L194">		String tmName = mergedSqlConfig.getTransactionManager();</span>
+<span class="fc" id="L195">		DataSource dataSource = TestContextTransactionUtils.retrieveDataSource(testContext, dsName);</span>
+<span class="fc" id="L196">		PlatformTransactionManager txMgr = TestContextTransactionUtils.retrieveTransactionManager(testContext, tmName);</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">		boolean newTxRequired = (mergedSqlConfig.getTransactionMode() == TransactionMode.ISOLATED);</span>
+
+<span class="fc bfc" id="L199" title="All 2 branches covered.">		if (txMgr == null) {</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">			Assert.state(!newTxRequired, () -&gt; String.format(&quot;Failed to execute SQL scripts for test context %s: &quot; +</span>
+					&quot;cannot execute SQL scripts using Transaction Mode &quot; +
+					&quot;[%s] without a PlatformTransactionManager.&quot;, testContext, TransactionMode.ISOLATED));
+<span class="fc bfc" id="L203" title="All 2 branches covered.">			Assert.state(dataSource != null, () -&gt; String.format(&quot;Failed to execute SQL scripts for test context %s: &quot; +</span>
+					&quot;supply at least a DataSource or PlatformTransactionManager.&quot;, testContext));
+			// Execute scripts directly against the DataSource
+<span class="fc" id="L206">			populator.execute(dataSource);</span>
+		}
+		else {
+<span class="fc" id="L209">			DataSource dataSourceFromTxMgr = getDataSourceFromTransactionManager(txMgr);</span>
+			// Ensure user configured an appropriate DataSource/TransactionManager pair.
+<span class="pc bpc" id="L211" title="2 of 6 branches missed.">			if (dataSource != null &amp;&amp; dataSourceFromTxMgr != null &amp;&amp; !dataSource.equals(dataSourceFromTxMgr)) {</span>
+<span class="nc" id="L212">				throw new IllegalStateException(String.format(&quot;Failed to execute SQL scripts for test context %s: &quot; +</span>
+						&quot;the configured DataSource [%s] (named '%s') is not the one associated with &quot; +
+<span class="nc" id="L214">						&quot;transaction manager [%s] (named '%s').&quot;, testContext, dataSource.getClass().getName(),</span>
+<span class="nc" id="L215">						dsName, txMgr.getClass().getName(), tmName));</span>
+			}
+<span class="fc bfc" id="L217" title="All 2 branches covered.">			if (dataSource == null) {</span>
+<span class="fc" id="L218">				dataSource = dataSourceFromTxMgr;</span>
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">				Assert.state(dataSource != null, () -&gt; String.format(&quot;Failed to execute SQL scripts for &quot; +</span>
+						&quot;test context %s: could not obtain DataSource from transaction manager [%s] (named '%s').&quot;,
+<span class="nc" id="L221">						testContext, txMgr.getClass().getName(), tmName));</span>
+			}
+<span class="fc" id="L223">			final DataSource finalDataSource = dataSource;</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">			int propagation = (newTxRequired ? TransactionDefinition.PROPAGATION_REQUIRES_NEW :</span>
+					TransactionDefinition.PROPAGATION_REQUIRED);
+<span class="fc" id="L226">			TransactionAttribute txAttr = TestContextTransactionUtils.createDelegatingTransactionAttribute(</span>
+					testContext, new DefaultTransactionAttribute(propagation));
+<span class="fc" id="L228">			new TransactionTemplate(txMgr, txAttr).execute(status -&gt; {</span>
+<span class="fc" id="L229">				populator.execute(finalDataSource);</span>
+<span class="fc" id="L230">				return null;</span>
+			});
+		}
+<span class="fc" id="L233">	}</span>
+
+	@Nullable
+	private DataSource getDataSourceFromTransactionManager(PlatformTransactionManager transactionManager) {
+		try {
+<span class="fc" id="L238">			Method getDataSourceMethod = transactionManager.getClass().getMethod(&quot;getDataSource&quot;);</span>
+<span class="fc" id="L239">			Object obj = ReflectionUtils.invokeMethod(getDataSourceMethod, transactionManager);</span>
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">			if (obj instanceof DataSource) {</span>
+<span class="fc" id="L241">				return (DataSource) obj;</span>
+			}
+		}
+<span class="nc" id="L244">		catch (Exception ex) {</span>
+			// ignore
+<span class="nc" id="L246">		}</span>
+<span class="nc" id="L247">		return null;</span>
+	}
+
+	private String[] getScripts(Sql sql, TestContext testContext, boolean classLevel) {
+<span class="fc" id="L251">		String[] scripts = sql.scripts();</span>
+<span class="fc bfc" id="L252" title="All 4 branches covered.">		if (ObjectUtils.isEmpty(scripts) &amp;&amp; ObjectUtils.isEmpty(sql.statements())) {</span>
+<span class="fc" id="L253">			scripts = new String[] {detectDefaultScript(testContext, classLevel)};</span>
+		}
+<span class="fc" id="L255">		return scripts;</span>
+	}
+
+	/**
+	 * Detect a default SQL script by implementing the algorithm defined in
+	 * {@link Sql#scripts}.
+	 */
+	private String detectDefaultScript(TestContext testContext, boolean classLevel) {
+<span class="fc" id="L263">		Class&lt;?&gt; clazz = testContext.getTestClass();</span>
+<span class="fc" id="L264">		Method method = testContext.getTestMethod();</span>
+<span class="fc bfc" id="L265" title="All 2 branches covered.">		String elementType = (classLevel ? &quot;class&quot; : &quot;method&quot;);</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">		String elementName = (classLevel ? clazz.getName() : method.toString());</span>
+
+<span class="fc" id="L268">		String resourcePath = ClassUtils.convertClassNameToResourcePath(clazz.getName());</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">		if (!classLevel) {</span>
+<span class="fc" id="L270">			resourcePath += &quot;.&quot; + method.getName();</span>
+		}
+<span class="fc" id="L272">		resourcePath += &quot;.sql&quot;;</span>
+
+<span class="fc" id="L274">		String prefixedResourcePath = ResourceUtils.CLASSPATH_URL_PREFIX + resourcePath;</span>
+<span class="fc" id="L275">		ClassPathResource classPathResource = new ClassPathResource(resourcePath);</span>
+
+<span class="fc bfc" id="L277" title="All 2 branches covered.">		if (classPathResource.exists()) {</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L279">				logger.info(String.format(&quot;Detected default SQL script \&quot;%s\&quot; for test %s [%s]&quot;,</span>
+						prefixedResourcePath, elementType, elementName));
+			}
+<span class="fc" id="L282">			return prefixedResourcePath;</span>
+		}
+		else {
+<span class="fc" id="L285">			String msg = String.format(&quot;Could not detect default SQL script for test %s [%s]: &quot; +</span>
+					&quot;%s does not exist. Either declare statements or scripts via @Sql or make the &quot; +
+					&quot;default SQL script available.&quot;, elementType, elementName, classPathResource);
+<span class="fc" id="L288">			logger.error(msg);</span>
+<span class="fc" id="L289">			throw new IllegalStateException(msg);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

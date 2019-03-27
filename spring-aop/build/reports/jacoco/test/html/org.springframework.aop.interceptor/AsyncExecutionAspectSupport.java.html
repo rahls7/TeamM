@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AsyncExecutionAspectSupport.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.interceptor</a> &gt; <span class="el_source">AsyncExecutionAspectSupport.java</span></div><h1>AsyncExecutionAspectSupport.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.interceptor;
+
+import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Future;
+import java.util.function.Supplier;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
+import org.springframework.beans.factory.annotation.BeanFactoryAnnotationUtils;
+import org.springframework.core.task.AsyncListenableTaskExecutor;
+import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.core.task.support.TaskExecutorAdapter;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.util.concurrent.ListenableFuture;
+import org.springframework.util.function.SingletonSupplier;
+
+/**
+ * Base class for asynchronous method execution aspects, such as
+ * {@code org.springframework.scheduling.annotation.AnnotationAsyncExecutionInterceptor}
+ * or {@code org.springframework.scheduling.aspectj.AnnotationAsyncExecutionAspect}.
+ *
+ * &lt;p&gt;Provides support for &lt;i&gt;executor qualification&lt;/i&gt; on a method-by-method basis.
+ * {@code AsyncExecutionAspectSupport} objects must be constructed with a default {@code
+ * Executor}, but each individual method may further qualify a specific {@code Executor}
+ * bean to be used when executing it, e.g. through an annotation attribute.
+ *
+ * @author Chris Beams
+ * @author Juergen Hoeller
+ * @author Stephane Nicoll
+ * @since 3.1.2
+ */
+public abstract class AsyncExecutionAspectSupport implements BeanFactoryAware {
+
+	/**
+	 * The default name of the {@link TaskExecutor} bean to pick up: &quot;taskExecutor&quot;.
+	 * &lt;p&gt;Note that the initial lookup happens by type; this is just the fallback
+	 * in case of multiple executor beans found in the context.
+	 * @since 4.2.6
+	 */
+	public static final String DEFAULT_TASK_EXECUTOR_BEAN_NAME = &quot;taskExecutor&quot;;
+
+
+<span class="nc" id="L73">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="nc" id="L75">	private final Map&lt;Method, AsyncTaskExecutor&gt; executors = new ConcurrentHashMap&lt;&gt;(16);</span>
+
+	private SingletonSupplier&lt;Executor&gt; defaultExecutor;
+
+	private SingletonSupplier&lt;AsyncUncaughtExceptionHandler&gt; exceptionHandler;
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+
+	/**
+	 * Create a new instance with a default {@link AsyncUncaughtExceptionHandler}.
+	 * @param defaultExecutor the {@code Executor} (typically a Spring {@code AsyncTaskExecutor}
+	 * or {@link java.util.concurrent.ExecutorService}) to delegate to, unless a more specific
+	 * executor has been requested via a qualifier on the async method, in which case the
+	 * executor will be looked up at invocation time against the enclosing bean factory
+	 */
+<span class="nc" id="L92">	public AsyncExecutionAspectSupport(@Nullable Executor defaultExecutor) {</span>
+<span class="nc" id="L93">		this.defaultExecutor = new SingletonSupplier&lt;&gt;(defaultExecutor, () -&gt; getDefaultExecutor(this.beanFactory));</span>
+<span class="nc" id="L94">		this.exceptionHandler = SingletonSupplier.of(SimpleAsyncUncaughtExceptionHandler::new);</span>
+<span class="nc" id="L95">	}</span>
+
+	/**
+	 * Create a new {@link AsyncExecutionAspectSupport} with the given exception handler.
+	 * @param defaultExecutor the {@code Executor} (typically a Spring {@code AsyncTaskExecutor}
+	 * or {@link java.util.concurrent.ExecutorService}) to delegate to, unless a more specific
+	 * executor has been requested via a qualifier on the async method, in which case the
+	 * executor will be looked up at invocation time against the enclosing bean factory
+	 * @param exceptionHandler the {@link AsyncUncaughtExceptionHandler} to use
+	 */
+<span class="nc" id="L105">	public AsyncExecutionAspectSupport(@Nullable Executor defaultExecutor, AsyncUncaughtExceptionHandler exceptionHandler) {</span>
+<span class="nc" id="L106">		this.defaultExecutor = new SingletonSupplier&lt;&gt;(defaultExecutor, () -&gt; getDefaultExecutor(this.beanFactory));</span>
+<span class="nc" id="L107">		this.exceptionHandler = SingletonSupplier.of(exceptionHandler);</span>
+<span class="nc" id="L108">	}</span>
+
+
+	/**
+	 * Configure this aspect with the given executor and exception handler suppliers,
+	 * applying the corresponding default if a supplier is not resolvable.
+	 * @since 5.1
+	 */
+	public void configure(@Nullable Supplier&lt;Executor&gt; defaultExecutor,
+			@Nullable Supplier&lt;AsyncUncaughtExceptionHandler&gt; exceptionHandler) {
+
+<span class="nc" id="L119">		this.defaultExecutor = new SingletonSupplier&lt;&gt;(defaultExecutor, () -&gt; getDefaultExecutor(this.beanFactory));</span>
+<span class="nc" id="L120">		this.exceptionHandler = new SingletonSupplier&lt;&gt;(exceptionHandler, SimpleAsyncUncaughtExceptionHandler::new);</span>
+<span class="nc" id="L121">	}</span>
+
+	/**
+	 * Supply the executor to be used when executing async methods.
+	 * @param defaultExecutor the {@code Executor} (typically a Spring {@code AsyncTaskExecutor}
+	 * or {@link java.util.concurrent.ExecutorService}) to delegate to, unless a more specific
+	 * executor has been requested via a qualifier on the async method, in which case the
+	 * executor will be looked up at invocation time against the enclosing bean factory
+	 * @see #getExecutorQualifier(Method)
+	 * @see #setBeanFactory(BeanFactory)
+	 * @see #getDefaultExecutor(BeanFactory)
+	 */
+	public void setExecutor(Executor defaultExecutor) {
+<span class="nc" id="L134">		this.defaultExecutor = SingletonSupplier.of(defaultExecutor);</span>
+<span class="nc" id="L135">	}</span>
+
+	/**
+	 * Supply the {@link AsyncUncaughtExceptionHandler} to use to handle exceptions
+	 * thrown by invoking asynchronous methods with a {@code void} return type.
+	 */
+	public void setExceptionHandler(AsyncUncaughtExceptionHandler exceptionHandler) {
+<span class="nc" id="L142">		this.exceptionHandler = SingletonSupplier.of(exceptionHandler);</span>
+<span class="nc" id="L143">	}</span>
+
+	/**
+	 * Set the {@link BeanFactory} to be used when looking up executors by qualifier
+	 * or when relying on the default executor lookup algorithm.
+	 * @see #findQualifiedExecutor(BeanFactory, String)
+	 * @see #getDefaultExecutor(BeanFactory)
+	 */
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="nc" id="L153">		this.beanFactory = beanFactory;</span>
+<span class="nc" id="L154">	}</span>
+
+
+	/**
+	 * Determine the specific executor to use when executing the given method.
+	 * Should preferably return an {@link AsyncListenableTaskExecutor} implementation.
+	 * @return the executor to use (or {@code null}, but just if no default executor is available)
+	 */
+	@Nullable
+	protected AsyncTaskExecutor determineAsyncExecutor(Method method) {
+<span class="nc" id="L164">		AsyncTaskExecutor executor = this.executors.get(method);</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">		if (executor == null) {</span>
+			Executor targetExecutor;
+<span class="nc" id="L167">			String qualifier = getExecutorQualifier(method);</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">			if (StringUtils.hasLength(qualifier)) {</span>
+<span class="nc" id="L169">				targetExecutor = findQualifiedExecutor(this.beanFactory, qualifier);</span>
+			}
+			else {
+<span class="nc" id="L172">				targetExecutor = this.defaultExecutor.get();</span>
+			}
+<span class="nc bnc" id="L174" title="All 2 branches missed.">			if (targetExecutor == null) {</span>
+<span class="nc" id="L175">				return null;</span>
+			}
+<span class="nc bnc" id="L177" title="All 2 branches missed.">			executor = (targetExecutor instanceof AsyncListenableTaskExecutor ?</span>
+					(AsyncListenableTaskExecutor) targetExecutor : new TaskExecutorAdapter(targetExecutor));
+<span class="nc" id="L179">			this.executors.put(method, executor);</span>
+		}
+<span class="nc" id="L181">		return executor;</span>
+	}
+
+	/**
+	 * Return the qualifier or bean name of the executor to be used when executing the
+	 * given async method, typically specified in the form of an annotation attribute.
+	 * Returning an empty string or {@code null} indicates that no specific executor has
+	 * been specified and that the {@linkplain #setExecutor(Executor) default executor}
+	 * should be used.
+	 * @param method the method to inspect for executor qualifier metadata
+	 * @return the qualifier if specified, otherwise empty String or {@code null}
+	 * @see #determineAsyncExecutor(Method)
+	 * @see #findQualifiedExecutor(BeanFactory, String)
+	 */
+	@Nullable
+	protected abstract String getExecutorQualifier(Method method);
+
+	/**
+	 * Retrieve a target executor for the given qualifier.
+	 * @param qualifier the qualifier to resolve
+	 * @return the target executor, or {@code null} if none available
+	 * @since 4.2.6
+	 * @see #getExecutorQualifier(Method)
+	 */
+	@Nullable
+	protected Executor findQualifiedExecutor(@Nullable BeanFactory beanFactory, String qualifier) {
+<span class="nc bnc" id="L207" title="All 2 branches missed.">		if (beanFactory == null) {</span>
+<span class="nc" id="L208">			throw new IllegalStateException(&quot;BeanFactory must be set on &quot; + getClass().getSimpleName() +</span>
+					&quot; to access qualified executor '&quot; + qualifier + &quot;'&quot;);
+		}
+<span class="nc" id="L211">		return BeanFactoryAnnotationUtils.qualifiedBeanOfType(beanFactory, Executor.class, qualifier);</span>
+	}
+
+	/**
+	 * Retrieve or build a default executor for this advice instance.
+	 * An executor returned from here will be cached for further use.
+	 * &lt;p&gt;The default implementation searches for a unique {@link TaskExecutor} bean
+	 * in the context, or for an {@link Executor} bean named &quot;taskExecutor&quot; otherwise.
+	 * If neither of the two is resolvable, this implementation will return {@code null}.
+	 * @param beanFactory the BeanFactory to use for a default executor lookup
+	 * @return the default executor, or {@code null} if none available
+	 * @since 4.2.6
+	 * @see #findQualifiedExecutor(BeanFactory, String)
+	 * @see #DEFAULT_TASK_EXECUTOR_BEAN_NAME
+	 */
+	@Nullable
+	protected Executor getDefaultExecutor(@Nullable BeanFactory beanFactory) {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">		if (beanFactory != null) {</span>
+			try {
+				// Search for TaskExecutor bean... not plain Executor since that would
+				// match with ScheduledExecutorService as well, which is unusable for
+				// our purposes here. TaskExecutor is more clearly designed for it.
+<span class="nc" id="L233">				return beanFactory.getBean(TaskExecutor.class);</span>
+			}
+<span class="nc" id="L235">			catch (NoUniqueBeanDefinitionException ex) {</span>
+<span class="nc" id="L236">				logger.debug(&quot;Could not find unique TaskExecutor bean&quot;, ex);</span>
+				try {
+<span class="nc" id="L238">					return beanFactory.getBean(DEFAULT_TASK_EXECUTOR_BEAN_NAME, Executor.class);</span>
+				}
+<span class="nc" id="L240">				catch (NoSuchBeanDefinitionException ex2) {</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">					if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L242">						logger.info(&quot;More than one TaskExecutor bean found within the context, and none is named &quot; +</span>
+								&quot;'taskExecutor'. Mark one of them as primary or name it 'taskExecutor' (possibly &quot; +
+<span class="nc" id="L244">								&quot;as an alias) in order to use it for async processing: &quot; + ex.getBeanNamesFound());</span>
+					}
+				}
+			}
+<span class="nc" id="L248">			catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="nc" id="L249">				logger.debug(&quot;Could not find default TaskExecutor bean&quot;, ex);</span>
+				try {
+<span class="nc" id="L251">					return beanFactory.getBean(DEFAULT_TASK_EXECUTOR_BEAN_NAME, Executor.class);</span>
+				}
+<span class="nc" id="L253">				catch (NoSuchBeanDefinitionException ex2) {</span>
+<span class="nc" id="L254">					logger.info(&quot;No task executor bean found for async processing: &quot; +</span>
+							&quot;no bean of type TaskExecutor and no bean named 'taskExecutor' either&quot;);
+				}
+				// Giving up -&gt; either using local default executor or none at all...
+<span class="nc" id="L258">			}</span>
+		}
+<span class="nc" id="L260">		return null;</span>
+	}
+
+
+	/**
+	 * Delegate for actually executing the given task with the chosen executor.
+	 * @param task the task to execute
+	 * @param executor the chosen executor
+	 * @param returnType the declared return type (potentially a {@link Future} variant)
+	 * @return the execution result (potentially a corresponding {@link Future} handle)
+	 */
+	@Nullable
+	protected Object doSubmit(Callable&lt;Object&gt; task, AsyncTaskExecutor executor, Class&lt;?&gt; returnType) {
+<span class="nc bnc" id="L273" title="All 2 branches missed.">		if (CompletableFuture.class.isAssignableFrom(returnType)) {</span>
+<span class="nc" id="L274">			return CompletableFuture.supplyAsync(() -&gt; {</span>
+				try {
+<span class="nc" id="L276">					return task.call();</span>
+				}
+<span class="nc" id="L278">				catch (Throwable ex) {</span>
+<span class="nc" id="L279">					throw new CompletionException(ex);</span>
+				}
+			}, executor);
+		}
+<span class="nc bnc" id="L283" title="All 2 branches missed.">		else if (ListenableFuture.class.isAssignableFrom(returnType)) {</span>
+<span class="nc" id="L284">			return ((AsyncListenableTaskExecutor) executor).submitListenable(task);</span>
+		}
+<span class="nc bnc" id="L286" title="All 2 branches missed.">		else if (Future.class.isAssignableFrom(returnType)) {</span>
+<span class="nc" id="L287">			return executor.submit(task);</span>
+		}
+		else {
+<span class="nc" id="L290">			executor.submit(task);</span>
+<span class="nc" id="L291">			return null;</span>
+		}
+	}
+
+	/**
+	 * Handles a fatal error thrown while asynchronously invoking the specified
+	 * {@link Method}.
+	 * &lt;p&gt;If the return type of the method is a {@link Future} object, the original
+	 * exception can be propagated by just throwing it at the higher level. However,
+	 * for all other cases, the exception will not be transmitted back to the client.
+	 * In that later case, the current {@link AsyncUncaughtExceptionHandler} will be
+	 * used to manage such exception.
+	 * @param ex the exception to handle
+	 * @param method the method that was invoked
+	 * @param params the parameters used to invoke the method
+	 */
+	protected void handleError(Throwable ex, Method method, Object... params) throws Exception {
+<span class="nc bnc" id="L308" title="All 2 branches missed.">		if (Future.class.isAssignableFrom(method.getReturnType())) {</span>
+<span class="nc" id="L309">			ReflectionUtils.rethrowException(ex);</span>
+		}
+		else {
+			// Could not transmit the exception to the caller with default executor
+			try {
+<span class="nc" id="L314">				this.exceptionHandler.obtain().handleUncaughtException(ex, method, params);</span>
+			}
+<span class="nc" id="L316">			catch (Throwable ex2) {</span>
+<span class="nc" id="L317">				logger.warn(&quot;Exception handler for async method '&quot; + method.toGenericString() +</span>
+						&quot;' threw unexpected exception itself&quot;, ex2);
+<span class="nc" id="L319">			}</span>
+		}
+<span class="nc" id="L321">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

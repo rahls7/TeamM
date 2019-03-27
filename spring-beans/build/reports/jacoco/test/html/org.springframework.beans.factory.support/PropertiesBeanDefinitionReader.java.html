@@ -1,0 +1,534 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PropertiesBeanDefinitionReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">PropertiesBeanDefinitionReader.java</span></div><h1>PropertiesBeanDefinitionReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
+import java.util.ResourceBundle;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.MutablePropertyValues;
+import org.springframework.beans.PropertyAccessor;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.CannotLoadBeanClassException;
+import org.springframework.beans.factory.config.ConstructorArgumentValues;
+import org.springframework.beans.factory.config.RuntimeBeanReference;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.EncodedResource;
+import org.springframework.lang.Nullable;
+import org.springframework.util.DefaultPropertiesPersister;
+import org.springframework.util.PropertiesPersister;
+import org.springframework.util.StringUtils;
+
+/**
+ * Bean definition reader for a simple properties format.
+ *
+ * &lt;p&gt;Provides bean definition registration methods for Map/Properties and
+ * ResourceBundle. Typically applied to a DefaultListableBeanFactory.
+ *
+ * &lt;p&gt;&lt;b&gt;Example:&lt;/b&gt;
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * employee.(class)=MyClass       // bean is of class MyClass
+ * employee.(abstract)=true       // this bean can't be instantiated directly
+ * employee.group=Insurance       // real property
+ * employee.usesDialUp=false      // real property (potentially overridden)
+ *
+ * salesrep.(parent)=employee     // derives from &quot;employee&quot; bean definition
+ * salesrep.(lazy-init)=true      // lazily initialize this singleton bean
+ * salesrep.manager(ref)=tony     // reference to another bean
+ * salesrep.department=Sales      // real property
+ *
+ * techie.(parent)=employee       // derives from &quot;employee&quot; bean definition
+ * techie.(scope)=prototype       // bean is a prototype (not a shared instance)
+ * techie.manager(ref)=jeff       // reference to another bean
+ * techie.department=Engineering  // real property
+ * techie.usesDialUp=true         // real property (overriding parent value)
+ *
+ * ceo.$0(ref)=secretary          // inject 'secretary' bean as 0th constructor arg
+ * ceo.$1=1000000                 // inject value '1000000' at 1st constructor arg
+ * &lt;/pre&gt;
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @since 26.11.2003
+ * @see DefaultListableBeanFactory
+ */
+public class PropertiesBeanDefinitionReader extends AbstractBeanDefinitionReader {
+
+	/**
+	 * Value of a T/F attribute that represents true.
+	 * Anything else represents false. Case seNsItive.
+	 */
+	public static final String TRUE_VALUE = &quot;true&quot;;
+
+	/**
+	 * Separator between bean name and property name.
+	 * We follow normal Java conventions.
+	 */
+	public static final String SEPARATOR = &quot;.&quot;;
+
+	/**
+	 * Special key to distinguish {@code owner.(class)=com.myapp.MyClass}.
+	 */
+	public static final String CLASS_KEY = &quot;(class)&quot;;
+
+	/**
+	 * Special key to distinguish {@code owner.(parent)=parentBeanName}.
+	 */
+	public static final String PARENT_KEY = &quot;(parent)&quot;;
+
+	/**
+	 * Special key to distinguish {@code owner.(scope)=prototype}.
+	 * Default is &quot;true&quot;.
+	 */
+	public static final String SCOPE_KEY = &quot;(scope)&quot;;
+
+	/**
+	 * Special key to distinguish {@code owner.(singleton)=false}.
+	 * Default is &quot;true&quot;.
+	 */
+	public static final String SINGLETON_KEY = &quot;(singleton)&quot;;
+
+	/**
+	 * Special key to distinguish {@code owner.(abstract)=true}
+	 * Default is &quot;false&quot;.
+	 */
+	public static final String ABSTRACT_KEY = &quot;(abstract)&quot;;
+
+	/**
+	 * Special key to distinguish {@code owner.(lazy-init)=true}
+	 * Default is &quot;false&quot;.
+	 */
+	public static final String LAZY_INIT_KEY = &quot;(lazy-init)&quot;;
+
+	/**
+	 * Property suffix for references to other beans in the current
+	 * BeanFactory: e.g. {@code owner.dog(ref)=fido}.
+	 * Whether this is a reference to a singleton or a prototype
+	 * will depend on the definition of the target bean.
+	 */
+	public static final String REF_SUFFIX = &quot;(ref)&quot;;
+
+	/**
+	 * Prefix before values referencing other beans.
+	 */
+	public static final String REF_PREFIX = &quot;*&quot;;
+
+	/**
+	 * Prefix used to denote a constructor argument definition.
+	 */
+	public static final String CONSTRUCTOR_ARG_PREFIX = &quot;$&quot;;
+
+
+	@Nullable
+	private String defaultParentBean;
+
+<span class="fc" id="L147">	private PropertiesPersister propertiesPersister = new DefaultPropertiesPersister();</span>
+
+
+	/**
+	 * Create new PropertiesBeanDefinitionReader for the given bean factory.
+	 * @param registry the BeanFactory to load bean definitions into,
+	 * in the form of a BeanDefinitionRegistry
+	 */
+	public PropertiesBeanDefinitionReader(BeanDefinitionRegistry registry) {
+<span class="fc" id="L156">		super(registry);</span>
+<span class="fc" id="L157">	}</span>
+
+
+	/**
+	 * Set the default parent bean for this bean factory.
+	 * If a child bean definition handled by this factory provides neither
+	 * a parent nor a class attribute, this default value gets used.
+	 * &lt;p&gt;Can be used e.g. for view definition files, to define a parent
+	 * with a default view class and common attributes for all views.
+	 * View definitions that define their own parent or carry their own
+	 * class can still override this.
+	 * &lt;p&gt;Strictly speaking, the rule that a default parent setting does
+	 * not apply to a bean definition that carries a class is there for
+	 * backwards compatibility reasons. It still matches the typical use case.
+	 */
+	public void setDefaultParentBean(@Nullable String defaultParentBean) {
+<span class="nc" id="L173">		this.defaultParentBean = defaultParentBean;</span>
+<span class="nc" id="L174">	}</span>
+
+	/**
+	 * Return the default parent bean for this bean factory.
+	 */
+	@Nullable
+	public String getDefaultParentBean() {
+<span class="nc" id="L181">		return this.defaultParentBean;</span>
+	}
+
+	/**
+	 * Set the PropertiesPersister to use for parsing properties files.
+	 * The default is DefaultPropertiesPersister.
+	 * @see org.springframework.util.DefaultPropertiesPersister
+	 */
+	public void setPropertiesPersister(@Nullable PropertiesPersister propertiesPersister) {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">		this.propertiesPersister =</span>
+				(propertiesPersister != null ? propertiesPersister : new DefaultPropertiesPersister());
+<span class="nc" id="L192">	}</span>
+
+	/**
+	 * Return the PropertiesPersister to use for parsing properties files.
+	 */
+	public PropertiesPersister getPropertiesPersister() {
+<span class="fc" id="L198">		return this.propertiesPersister;</span>
+	}
+
+
+	/**
+	 * Load bean definitions from the specified properties file,
+	 * using all property keys (i.e. not filtering by prefix).
+	 * @param resource the resource descriptor for the properties file
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 * @see #loadBeanDefinitions(org.springframework.core.io.Resource, String)
+	 */
+	@Override
+	public int loadBeanDefinitions(Resource resource) throws BeanDefinitionStoreException {
+<span class="fc" id="L212">		return loadBeanDefinitions(new EncodedResource(resource), null);</span>
+	}
+
+	/**
+	 * Load bean definitions from the specified properties file.
+	 * @param resource the resource descriptor for the properties file
+	 * @param prefix a filter within the keys in the map: e.g. 'beans.'
+	 * (can be empty or {@code null})
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 */
+	public int loadBeanDefinitions(Resource resource, @Nullable String prefix) throws BeanDefinitionStoreException {
+<span class="nc" id="L224">		return loadBeanDefinitions(new EncodedResource(resource), prefix);</span>
+	}
+
+	/**
+	 * Load bean definitions from the specified properties file.
+	 * @param encodedResource the resource descriptor for the properties file,
+	 * allowing to specify an encoding to use for parsing the file
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 */
+	public int loadBeanDefinitions(EncodedResource encodedResource) throws BeanDefinitionStoreException {
+<span class="nc" id="L235">		return loadBeanDefinitions(encodedResource, null);</span>
+	}
+
+	/**
+	 * Load bean definitions from the specified properties file.
+	 * @param encodedResource the resource descriptor for the properties file,
+	 * allowing to specify an encoding to use for parsing the file
+	 * @param prefix a filter within the keys in the map: e.g. 'beans.'
+	 * (can be empty or {@code null})
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 */
+	public int loadBeanDefinitions(EncodedResource encodedResource, @Nullable String prefix)
+			throws BeanDefinitionStoreException {
+
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L251">			logger.trace(&quot;Loading properties bean definitions from &quot; + encodedResource);</span>
+		}
+
+<span class="fc" id="L254">		Properties props = new Properties();</span>
+		try {
+<span class="fc" id="L256">			try (InputStream is = encodedResource.getResource().getInputStream()) {</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">				if (encodedResource.getEncoding() != null) {</span>
+<span class="nc" id="L258">					getPropertiesPersister().load(props, new InputStreamReader(is, encodedResource.getEncoding()));</span>
+				}
+				else {
+<span class="fc" id="L261">					getPropertiesPersister().load(props, is);</span>
+				}
+			}
+
+<span class="fc" id="L265">			int count = registerBeanDefinitions(props, prefix, encodedResource.getResource().getDescription());</span>
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L267">				logger.debug(&quot;Loaded &quot; + count + &quot; bean definitions from &quot; + encodedResource);</span>
+			}
+<span class="fc" id="L269">			return count;</span>
+		}
+<span class="nc" id="L271">		catch (IOException ex) {</span>
+<span class="nc" id="L272">			throw new BeanDefinitionStoreException(&quot;Could not parse properties from &quot; + encodedResource.getResource(), ex);</span>
+		}
+	}
+
+	/**
+	 * Register bean definitions contained in a resource bundle,
+	 * using all property keys (i.e. not filtering by prefix).
+	 * @param rb the ResourceBundle to load from
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 * @see #registerBeanDefinitions(java.util.ResourceBundle, String)
+	 */
+	public int registerBeanDefinitions(ResourceBundle rb) throws BeanDefinitionStoreException {
+<span class="nc" id="L285">		return registerBeanDefinitions(rb, null);</span>
+	}
+
+	/**
+	 * Register bean definitions contained in a ResourceBundle.
+	 * &lt;p&gt;Similar syntax as for a Map. This method is useful to enable
+	 * standard Java internationalization support.
+	 * @param rb the ResourceBundle to load from
+	 * @param prefix a filter within the keys in the map: e.g. 'beans.'
+	 * (can be empty or {@code null})
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 */
+	public int registerBeanDefinitions(ResourceBundle rb, @Nullable String prefix) throws BeanDefinitionStoreException {
+		// Simply create a map and call overloaded method.
+<span class="nc" id="L300">		Map&lt;String, Object&gt; map = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L301">		Enumeration&lt;String&gt; keys = rb.getKeys();</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">		while (keys.hasMoreElements()) {</span>
+<span class="nc" id="L303">			String key = keys.nextElement();</span>
+<span class="nc" id="L304">			map.put(key, rb.getObject(key));</span>
+<span class="nc" id="L305">		}</span>
+<span class="nc" id="L306">		return registerBeanDefinitions(map, prefix);</span>
+	}
+
+
+	/**
+	 * Register bean definitions contained in a Map, using all property keys (i.e. not
+	 * filtering by prefix).
+	 * @param map a map of {@code name} to {@code property} (String or Object). Property
+	 * values will be strings if coming from a Properties file etc. Property names
+	 * (keys) &lt;b&gt;must&lt;/b&gt; be Strings. Class keys must be Strings.
+	 * @return the number of bean definitions found
+	 * @throws BeansException in case of loading or parsing errors
+	 * @see #registerBeanDefinitions(java.util.Map, String, String)
+	 */
+	public int registerBeanDefinitions(Map&lt;?, ?&gt; map) throws BeansException {
+<span class="fc" id="L321">		return registerBeanDefinitions(map, null);</span>
+	}
+
+	/**
+	 * Register bean definitions contained in a Map.
+	 * Ignore ineligible properties.
+	 * @param map a map of {@code name} to {@code property} (String or Object). Property
+	 * values will be strings if coming from a Properties file etc. Property names
+	 * (keys) &lt;b&gt;must&lt;/b&gt; be Strings. Class keys must be Strings.
+	 * @param prefix a filter within the keys in the map: e.g. 'beans.'
+	 * (can be empty or {@code null})
+	 * @return the number of bean definitions found
+	 * @throws BeansException in case of loading or parsing errors
+	 */
+	public int registerBeanDefinitions(Map&lt;?, ?&gt; map, @Nullable String prefix) throws BeansException {
+<span class="fc" id="L336">		return registerBeanDefinitions(map, prefix, &quot;Map &quot; + map);</span>
+	}
+
+	/**
+	 * Register bean definitions contained in a Map.
+	 * Ignore ineligible properties.
+	 * @param map a map of {@code name} to {@code property} (String or Object). Property
+	 * values will be strings if coming from a Properties file etc. Property names
+	 * (keys) &lt;b&gt;must&lt;/b&gt; be Strings. Class keys must be Strings.
+	 * @param prefix a filter within the keys in the map: e.g. 'beans.'
+	 * (can be empty or {@code null})
+	 * @param resourceDescription description of the resource that the
+	 * Map came from (for logging purposes)
+	 * @return the number of bean definitions found
+	 * @throws BeansException in case of loading or parsing errors
+	 * @see #registerBeanDefinitions(Map, String)
+	 */
+	public int registerBeanDefinitions(Map&lt;?, ?&gt; map, @Nullable String prefix, String resourceDescription)
+			throws BeansException {
+
+<span class="fc bfc" id="L356" title="All 2 branches covered.">		if (prefix == null) {</span>
+<span class="fc" id="L357">			prefix = &quot;&quot;;</span>
+		}
+<span class="fc" id="L359">		int beanCount = 0;</span>
+
+<span class="fc bfc" id="L361" title="All 2 branches covered.">		for (Object key : map.keySet()) {</span>
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">			if (!(key instanceof String)) {</span>
+<span class="nc" id="L363">				throw new IllegalArgumentException(&quot;Illegal key [&quot; + key + &quot;]: only Strings allowed&quot;);</span>
+			}
+<span class="fc" id="L365">			String keyString = (String) key;</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">			if (keyString.startsWith(prefix)) {</span>
+				// Key is of form: prefix&lt;name&gt;.property
+<span class="fc" id="L368">				String nameAndProperty = keyString.substring(prefix.length());</span>
+				// Find dot before property name, ignoring dots in property keys.
+<span class="fc" id="L370">				int sepIdx = -1;</span>
+<span class="fc" id="L371">				int propKeyIdx = nameAndProperty.indexOf(PropertyAccessor.PROPERTY_KEY_PREFIX);</span>
+<span class="fc bfc" id="L372" title="All 2 branches covered.">				if (propKeyIdx != -1) {</span>
+<span class="fc" id="L373">					sepIdx = nameAndProperty.lastIndexOf(SEPARATOR, propKeyIdx);</span>
+				}
+				else {
+<span class="fc" id="L376">					sepIdx = nameAndProperty.lastIndexOf(SEPARATOR);</span>
+				}
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">				if (sepIdx != -1) {</span>
+<span class="fc" id="L379">					String beanName = nameAndProperty.substring(0, sepIdx);</span>
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L381">						logger.trace(&quot;Found bean name '&quot; + beanName + &quot;'&quot;);</span>
+					}
+<span class="fc bfc" id="L383" title="All 2 branches covered.">					if (!getRegistry().containsBeanDefinition(beanName)) {</span>
+						// If we haven't already registered it...
+<span class="fc" id="L385">						registerBeanDefinition(beanName, map, prefix + beanName, resourceDescription);</span>
+<span class="fc" id="L386">						++beanCount;</span>
+					}
+<span class="fc" id="L388">				}</span>
+				else {
+					// Ignore it: It wasn't a valid bean name and property,
+					// although it did start with the required prefix.
+<span class="nc bnc" id="L392" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L393">						logger.debug(&quot;Invalid bean name and property [&quot; + nameAndProperty + &quot;]&quot;);</span>
+					}
+				}
+			}
+<span class="fc" id="L397">		}</span>
+
+<span class="fc" id="L399">		return beanCount;</span>
+	}
+
+	/**
+	 * Get all property values, given a prefix (which will be stripped)
+	 * and add the bean they define to the factory with the given name.
+	 * @param beanName name of the bean to define
+	 * @param map a Map containing string pairs
+	 * @param prefix prefix of each entry, which will be stripped
+	 * @param resourceDescription description of the resource that the
+	 * Map came from (for logging purposes)
+	 * @throws BeansException if the bean definition could not be parsed or registered
+	 */
+	protected void registerBeanDefinition(String beanName, Map&lt;?, ?&gt; map, String prefix, String resourceDescription)
+			throws BeansException {
+
+<span class="fc" id="L415">		String className = null;</span>
+<span class="fc" id="L416">		String parent = null;</span>
+<span class="fc" id="L417">		String scope = GenericBeanDefinition.SCOPE_SINGLETON;</span>
+<span class="fc" id="L418">		boolean isAbstract = false;</span>
+<span class="fc" id="L419">		boolean lazyInit = false;</span>
+
+<span class="fc" id="L421">		ConstructorArgumentValues cas = new ConstructorArgumentValues();</span>
+<span class="fc" id="L422">		MutablePropertyValues pvs = new MutablePropertyValues();</span>
+
+<span class="fc bfc" id="L424" title="All 2 branches covered.">		for (Map.Entry&lt;?, ?&gt; entry : map.entrySet()) {</span>
+<span class="fc" id="L425">			String key = StringUtils.trimWhitespace((String) entry.getKey());</span>
+<span class="fc bfc" id="L426" title="All 2 branches covered.">			if (key.startsWith(prefix + SEPARATOR)) {</span>
+<span class="fc" id="L427">				String property = key.substring(prefix.length() + SEPARATOR.length());</span>
+<span class="fc bfc" id="L428" title="All 2 branches covered.">				if (CLASS_KEY.equals(property)) {</span>
+<span class="fc" id="L429">					className = StringUtils.trimWhitespace((String) entry.getValue());</span>
+				}
+<span class="fc bfc" id="L431" title="All 2 branches covered.">				else if (PARENT_KEY.equals(property)) {</span>
+<span class="fc" id="L432">					parent = StringUtils.trimWhitespace((String) entry.getValue());</span>
+				}
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">				else if (ABSTRACT_KEY.equals(property)) {</span>
+<span class="nc" id="L435">					String val = StringUtils.trimWhitespace((String) entry.getValue());</span>
+<span class="nc" id="L436">					isAbstract = TRUE_VALUE.equals(val);</span>
+<span class="nc" id="L437">				}</span>
+<span class="fc bfc" id="L438" title="All 2 branches covered.">				else if (SCOPE_KEY.equals(property)) {</span>
+					// Spring 2.0 style
+<span class="fc" id="L440">					scope = StringUtils.trimWhitespace((String) entry.getValue());</span>
+				}
+<span class="fc bfc" id="L442" title="All 2 branches covered.">				else if (SINGLETON_KEY.equals(property)) {</span>
+					// Spring 1.2 style
+<span class="fc" id="L444">					String val = StringUtils.trimWhitespace((String) entry.getValue());</span>
+<span class="pc bpc" id="L445" title="1 of 4 branches missed.">					scope = (&quot;&quot;.equals(val) || TRUE_VALUE.equals(val) ? GenericBeanDefinition.SCOPE_SINGLETON :</span>
+							GenericBeanDefinition.SCOPE_PROTOTYPE);
+<span class="fc" id="L447">				}</span>
+<span class="fc bfc" id="L448" title="All 2 branches covered.">				else if (LAZY_INIT_KEY.equals(property)) {</span>
+<span class="fc" id="L449">					String val = StringUtils.trimWhitespace((String) entry.getValue());</span>
+<span class="fc" id="L450">					lazyInit = TRUE_VALUE.equals(val);</span>
+<span class="fc" id="L451">				}</span>
+<span class="fc bfc" id="L452" title="All 2 branches covered.">				else if (property.startsWith(CONSTRUCTOR_ARG_PREFIX)) {</span>
+<span class="fc bfc" id="L453" title="All 2 branches covered.">					if (property.endsWith(REF_SUFFIX)) {</span>
+<span class="fc" id="L454">						int index = Integer.parseInt(property.substring(1, property.length() - REF_SUFFIX.length()));</span>
+<span class="fc" id="L455">						cas.addIndexedArgumentValue(index, new RuntimeBeanReference(entry.getValue().toString()));</span>
+<span class="fc" id="L456">					}</span>
+					else {
+<span class="fc" id="L458">						int index = Integer.parseInt(property.substring(1));</span>
+<span class="fc" id="L459">						cas.addIndexedArgumentValue(index, readValue(entry));</span>
+<span class="fc" id="L460">					}</span>
+				}
+<span class="fc bfc" id="L462" title="All 2 branches covered.">				else if (property.endsWith(REF_SUFFIX)) {</span>
+					// This isn't a real property, but a reference to another prototype
+					// Extract property name: property is of form dog(ref)
+<span class="fc" id="L465">					property = property.substring(0, property.length() - REF_SUFFIX.length());</span>
+<span class="fc" id="L466">					String ref = StringUtils.trimWhitespace((String) entry.getValue());</span>
+
+					// It doesn't matter if the referenced bean hasn't yet been registered:
+					// this will ensure that the reference is resolved at runtime.
+<span class="fc" id="L470">					Object val = new RuntimeBeanReference(ref);</span>
+<span class="fc" id="L471">					pvs.add(property, val);</span>
+<span class="fc" id="L472">				}</span>
+				else {
+					// It's a normal bean property.
+<span class="fc" id="L475">					pvs.add(property, readValue(entry));</span>
+				}
+			}
+<span class="fc" id="L478">		}</span>
+
+<span class="pc bpc" id="L480" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L481">			logger.trace(&quot;Registering bean definition for bean name '&quot; + beanName + &quot;' with &quot; + pvs);</span>
+		}
+
+		// Just use default parent if we're not dealing with the parent itself,
+		// and if there's no class name specified. The latter has to happen for
+		// backwards compatibility reasons.
+<span class="pc bpc" id="L487" title="3 of 6 branches missed.">		if (parent == null &amp;&amp; className == null &amp;&amp; !beanName.equals(this.defaultParentBean)) {</span>
+<span class="nc" id="L488">			parent = this.defaultParentBean;</span>
+		}
+
+		try {
+<span class="fc" id="L492">			AbstractBeanDefinition bd = BeanDefinitionReaderUtils.createBeanDefinition(</span>
+<span class="fc" id="L493">					parent, className, getBeanClassLoader());</span>
+<span class="fc" id="L494">			bd.setScope(scope);</span>
+<span class="fc" id="L495">			bd.setAbstract(isAbstract);</span>
+<span class="fc" id="L496">			bd.setLazyInit(lazyInit);</span>
+<span class="fc" id="L497">			bd.setConstructorArgumentValues(cas);</span>
+<span class="fc" id="L498">			bd.setPropertyValues(pvs);</span>
+<span class="fc" id="L499">			getRegistry().registerBeanDefinition(beanName, bd);</span>
+		}
+<span class="nc" id="L501">		catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L502">			throw new CannotLoadBeanClassException(resourceDescription, beanName, className, ex);</span>
+		}
+<span class="nc" id="L504">		catch (LinkageError err) {</span>
+<span class="nc" id="L505">			throw new CannotLoadBeanClassException(resourceDescription, beanName, className, err);</span>
+<span class="fc" id="L506">		}</span>
+<span class="fc" id="L507">	}</span>
+
+	/**
+	 * Reads the value of the entry. Correctly interprets bean references for
+	 * values that are prefixed with an asterisk.
+	 */
+	private Object readValue(Map.Entry&lt;?, ?&gt; entry) {
+<span class="fc" id="L514">		Object val = entry.getValue();</span>
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">		if (val instanceof String) {</span>
+<span class="fc" id="L516">			String strVal = (String) val;</span>
+			// If it starts with a reference prefix...
+<span class="fc bfc" id="L518" title="All 2 branches covered.">			if (strVal.startsWith(REF_PREFIX)) {</span>
+				// Expand the reference.
+<span class="fc" id="L520">				String targetName = strVal.substring(1);</span>
+<span class="fc bfc" id="L521" title="All 2 branches covered.">				if (targetName.startsWith(REF_PREFIX)) {</span>
+					// Escaped prefix -&gt; use plain value.
+<span class="fc" id="L523">					val = targetName;</span>
+				}
+				else {
+<span class="fc" id="L526">					val = new RuntimeBeanReference(targetName);</span>
+				}
+			}
+		}
+<span class="fc" id="L530">		return val;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

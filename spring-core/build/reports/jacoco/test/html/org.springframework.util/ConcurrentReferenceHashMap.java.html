@@ -1,0 +1,1093 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConcurrentReferenceHashMap.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.util</a> &gt; <span class="el_source">ConcurrentReferenceHashMap.java</span></div><h1>ConcurrentReferenceHashMap.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.util;
+
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Array;
+import java.util.AbstractMap;
+import java.util.AbstractSet;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.springframework.lang.Nullable;
+
+/**
+ * A {@link ConcurrentHashMap} that uses {@link ReferenceType#SOFT soft} or
+ * {@linkplain ReferenceType#WEAK weak} references for both {@code keys} and {@code values}.
+ *
+ * &lt;p&gt;This class can be used as an alternative to
+ * {@code Collections.synchronizedMap(new WeakHashMap&lt;K, Reference&lt;V&gt;&gt;())} in order to
+ * support better performance when accessed concurrently. This implementation follows the
+ * same design constraints as {@link ConcurrentHashMap} with the exception that
+ * {@code null} values and {@code null} keys are supported.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; The use of references means that there is no guarantee that items
+ * placed into the map will be subsequently available. The garbage collector may discard
+ * references at any time, so it may appear that an unknown thread is silently removing
+ * entries.
+ *
+ * &lt;p&gt;If not explicitly specified, this implementation will use
+ * {@linkplain SoftReference soft entry references}.
+ *
+ * @author Phillip Webb
+ * @author Juergen Hoeller
+ * @since 3.2
+ * @param &lt;K&gt; the key type
+ * @param &lt;V&gt; the value type
+ */
+public class ConcurrentReferenceHashMap&lt;K, V&gt; extends AbstractMap&lt;K, V&gt; implements ConcurrentMap&lt;K, V&gt; {
+
+	private static final int DEFAULT_INITIAL_CAPACITY = 16;
+
+	private static final float DEFAULT_LOAD_FACTOR = 0.75f;
+
+	private static final int DEFAULT_CONCURRENCY_LEVEL = 16;
+
+<span class="fc" id="L71">	private static final ReferenceType DEFAULT_REFERENCE_TYPE = ReferenceType.SOFT;</span>
+
+	private static final int MAXIMUM_CONCURRENCY_LEVEL = 1 &lt;&lt; 16;
+
+	private static final int MAXIMUM_SEGMENT_SIZE = 1 &lt;&lt; 30;
+
+
+	/**
+	 * Array of segments indexed using the high order bits from the hash.
+	 */
+	private final Segment[] segments;
+
+	/**
+	 * When the average number of references per table exceeds this value resize will be attempted.
+	 */
+	private final float loadFactor;
+
+	/**
+	 * The reference type: SOFT or WEAK.
+	 */
+	private final ReferenceType referenceType;
+
+	/**
+	 * The shift value used to calculate the size of the segments array and an index from the hash.
+	 */
+	private final int shift;
+
+	/**
+	 * Late binding entry set.
+	 */
+	@Nullable
+	private volatile Set&lt;Map.Entry&lt;K, V&gt;&gt; entrySet;
+
+
+	/**
+	 * Create a new {@code ConcurrentReferenceHashMap} instance.
+	 */
+	public ConcurrentReferenceHashMap() {
+<span class="fc" id="L109">		this(DEFAULT_INITIAL_CAPACITY, DEFAULT_LOAD_FACTOR, DEFAULT_CONCURRENCY_LEVEL, DEFAULT_REFERENCE_TYPE);</span>
+<span class="fc" id="L110">	}</span>
+
+	/**
+	 * Create a new {@code ConcurrentReferenceHashMap} instance.
+	 * @param initialCapacity the initial capacity of the map
+	 */
+	public ConcurrentReferenceHashMap(int initialCapacity) {
+<span class="fc" id="L117">		this(initialCapacity, DEFAULT_LOAD_FACTOR, DEFAULT_CONCURRENCY_LEVEL, DEFAULT_REFERENCE_TYPE);</span>
+<span class="fc" id="L118">	}</span>
+
+	/**
+	 * Create a new {@code ConcurrentReferenceHashMap} instance.
+	 * @param initialCapacity the initial capacity of the map
+	 * @param loadFactor the load factor. When the average number of references per table
+	 * exceeds this value resize will be attempted
+	 */
+	public ConcurrentReferenceHashMap(int initialCapacity, float loadFactor) {
+<span class="fc" id="L127">		this(initialCapacity, loadFactor, DEFAULT_CONCURRENCY_LEVEL, DEFAULT_REFERENCE_TYPE);</span>
+<span class="fc" id="L128">	}</span>
+
+	/**
+	 * Create a new {@code ConcurrentReferenceHashMap} instance.
+	 * @param initialCapacity the initial capacity of the map
+	 * @param concurrencyLevel the expected number of threads that will concurrently
+	 * write to the map
+	 */
+	public ConcurrentReferenceHashMap(int initialCapacity, int concurrencyLevel) {
+<span class="fc" id="L137">		this(initialCapacity, DEFAULT_LOAD_FACTOR, concurrencyLevel, DEFAULT_REFERENCE_TYPE);</span>
+<span class="fc" id="L138">	}</span>
+
+	/**
+	 * Create a new {@code ConcurrentReferenceHashMap} instance.
+	 * @param initialCapacity the initial capacity of the map
+	 * @param referenceType the reference type used for entries (soft or weak)
+	 */
+	public ConcurrentReferenceHashMap(int initialCapacity, ReferenceType referenceType) {
+<span class="nc" id="L146">		this(initialCapacity, DEFAULT_LOAD_FACTOR, DEFAULT_CONCURRENCY_LEVEL, referenceType);</span>
+<span class="nc" id="L147">	}</span>
+
+	/**
+	 * Create a new {@code ConcurrentReferenceHashMap} instance.
+	 * @param initialCapacity the initial capacity of the map
+	 * @param loadFactor the load factor. When the average number of references per
+	 * table exceeds this value, resize will be attempted.
+	 * @param concurrencyLevel the expected number of threads that will concurrently
+	 * write to the map
+	 */
+	public ConcurrentReferenceHashMap(int initialCapacity, float loadFactor, int concurrencyLevel) {
+<span class="fc" id="L158">		this(initialCapacity, loadFactor, concurrencyLevel, DEFAULT_REFERENCE_TYPE);</span>
+<span class="fc" id="L159">	}</span>
+
+	/**
+	 * Create a new {@code ConcurrentReferenceHashMap} instance.
+	 * @param initialCapacity the initial capacity of the map
+	 * @param loadFactor the load factor. When the average number of references per
+	 * table exceeds this value, resize will be attempted.
+	 * @param concurrencyLevel the expected number of threads that will concurrently
+	 * write to the map
+	 * @param referenceType the reference type used for entries (soft or weak)
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public ConcurrentReferenceHashMap(
+<span class="fc" id="L172">			int initialCapacity, float loadFactor, int concurrencyLevel, ReferenceType referenceType) {</span>
+
+<span class="fc bfc" id="L174" title="All 2 branches covered.">		Assert.isTrue(initialCapacity &gt;= 0, &quot;Initial capacity must not be negative&quot;);</span>
+<span class="fc bfc" id="L175" title="All 2 branches covered.">		Assert.isTrue(loadFactor &gt; 0f, &quot;Load factor must be positive&quot;);</span>
+<span class="fc bfc" id="L176" title="All 2 branches covered.">		Assert.isTrue(concurrencyLevel &gt; 0, &quot;Concurrency level must be positive&quot;);</span>
+<span class="fc" id="L177">		Assert.notNull(referenceType, &quot;Reference type must not be null&quot;);</span>
+<span class="fc" id="L178">		this.loadFactor = loadFactor;</span>
+<span class="fc" id="L179">		this.shift = calculateShift(concurrencyLevel, MAXIMUM_CONCURRENCY_LEVEL);</span>
+<span class="fc" id="L180">		int size = 1 &lt;&lt; this.shift;</span>
+<span class="fc" id="L181">		this.referenceType = referenceType;</span>
+<span class="fc" id="L182">		int roundedUpSegmentCapacity = (int) ((initialCapacity + size - 1L) / size);</span>
+<span class="fc" id="L183">		int initialSize = 1 &lt;&lt; calculateShift(roundedUpSegmentCapacity, MAXIMUM_SEGMENT_SIZE);</span>
+<span class="fc" id="L184">		Segment[] segments = (Segment[]) Array.newInstance(Segment.class, size);</span>
+<span class="fc" id="L185">		int resizeThreshold = (int) (initialSize * getLoadFactor());</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">		for (int i = 0; i &lt; segments.length; i++) {</span>
+<span class="fc" id="L187">			segments[i] = new Segment(initialSize, resizeThreshold);</span>
+		}
+<span class="fc" id="L189">		this.segments = segments;</span>
+<span class="fc" id="L190">	}</span>
+
+
+	protected final float getLoadFactor() {
+<span class="fc" id="L194">		return this.loadFactor;</span>
+	}
+
+	protected final int getSegmentsSize() {
+<span class="fc" id="L198">		return this.segments.length;</span>
+	}
+
+	protected final Segment getSegment(int index) {
+<span class="fc" id="L202">		return this.segments[index];</span>
+	}
+
+	/**
+	 * Factory method that returns the {@link ReferenceManager}.
+	 * This method will be called once for each {@link Segment}.
+	 * @return a new reference manager
+	 */
+	protected ReferenceManager createReferenceManager() {
+<span class="fc" id="L211">		return new ReferenceManager();</span>
+	}
+
+	/**
+	 * Get the hash for a given object, apply an additional hash function to reduce
+	 * collisions. This implementation uses the same Wang/Jenkins algorithm as
+	 * {@link ConcurrentHashMap}. Subclasses can override to provide alternative hashing.
+	 * @param o the object to hash (may be null)
+	 * @return the resulting hash code
+	 */
+	protected int getHash(@Nullable Object o) {
+<span class="fc bfc" id="L222" title="All 2 branches covered.">		int hash = (o != null ? o.hashCode() : 0);</span>
+<span class="fc" id="L223">		hash += (hash &lt;&lt; 15) ^ 0xffffcd7d;</span>
+<span class="fc" id="L224">		hash ^= (hash &gt;&gt;&gt; 10);</span>
+<span class="fc" id="L225">		hash += (hash &lt;&lt; 3);</span>
+<span class="fc" id="L226">		hash ^= (hash &gt;&gt;&gt; 6);</span>
+<span class="fc" id="L227">		hash += (hash &lt;&lt; 2) + (hash &lt;&lt; 14);</span>
+<span class="fc" id="L228">		hash ^= (hash &gt;&gt;&gt; 16);</span>
+<span class="fc" id="L229">		return hash;</span>
+	}
+
+	@Override
+	@Nullable
+	public V get(@Nullable Object key) {
+<span class="fc" id="L235">		Reference&lt;K, V&gt; ref = getReference(key, Restructure.WHEN_NECESSARY);</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">		Entry&lt;K, V&gt; entry = (ref != null ? ref.get() : null);</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">		return (entry != null ? entry.getValue() : null);</span>
+	}
+
+	@Override
+	@Nullable
+	public V getOrDefault(@Nullable Object key, @Nullable V defaultValue) {
+<span class="fc" id="L243">		Reference&lt;K, V&gt; ref = getReference(key, Restructure.WHEN_NECESSARY);</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">		Entry&lt;K, V&gt; entry = (ref != null ? ref.get() : null);</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">		return (entry != null ? entry.getValue() : defaultValue);</span>
+	}
+
+	@Override
+	public boolean containsKey(@Nullable Object key) {
+<span class="fc" id="L250">		Reference&lt;K, V&gt; ref = getReference(key, Restructure.WHEN_NECESSARY);</span>
+<span class="fc bfc" id="L251" title="All 2 branches covered.">		Entry&lt;K, V&gt; entry = (ref != null ? ref.get() : null);</span>
+<span class="pc bpc" id="L252" title="1 of 4 branches missed.">		return (entry != null &amp;&amp; ObjectUtils.nullSafeEquals(entry.getKey(), key));</span>
+	}
+
+	/**
+	 * Return a {@link Reference} to the {@link Entry} for the specified {@code key},
+	 * or {@code null} if not found.
+	 * @param key the key (can be {@code null})
+	 * @param restructure types of restructure allowed during this call
+	 * @return the reference, or {@code null} if not found
+	 */
+	@Nullable
+	protected final Reference&lt;K, V&gt; getReference(@Nullable Object key, Restructure restructure) {
+<span class="fc" id="L264">		int hash = getHash(key);</span>
+<span class="fc" id="L265">		return getSegmentForHash(hash).getReference(key, hash, restructure);</span>
+	}
+
+	@Override
+	@Nullable
+	public V put(@Nullable K key, @Nullable V value) {
+<span class="fc" id="L271">		return put(key, value, true);</span>
+	}
+
+	@Override
+	@Nullable
+	public V putIfAbsent(@Nullable K key, @Nullable V value) {
+<span class="fc" id="L277">		return put(key, value, false);</span>
+	}
+
+	@Nullable
+	private V put(@Nullable final K key, @Nullable final V value, final boolean overwriteExisting) {
+<span class="fc" id="L282">		return doTask(key, new Task&lt;V&gt;(TaskOption.RESTRUCTURE_BEFORE, TaskOption.RESIZE) {</span>
+			@Override
+			@Nullable
+			protected V execute(@Nullable Reference&lt;K, V&gt; ref, @Nullable Entry&lt;K, V&gt; entry, @Nullable Entries&lt;V&gt; entries) {
+<span class="fc bfc" id="L286" title="All 2 branches covered.">				if (entry != null) {</span>
+<span class="fc" id="L287">					V oldValue = entry.getValue();</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">					if (overwriteExisting) {</span>
+<span class="fc" id="L289">						entry.setValue(value);</span>
+					}
+<span class="fc" id="L291">					return oldValue;</span>
+				}
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">				Assert.state(entries != null, &quot;No entries segment&quot;);</span>
+<span class="fc" id="L294">				entries.add(value);</span>
+<span class="fc" id="L295">				return null;</span>
+			}
+		});
+	}
+
+	@Override
+	@Nullable
+	public V remove(Object key) {
+<span class="fc" id="L303">		return doTask(key, new Task&lt;V&gt;(TaskOption.RESTRUCTURE_AFTER, TaskOption.SKIP_IF_EMPTY) {</span>
+			@Override
+			@Nullable
+			protected V execute(@Nullable Reference&lt;K, V&gt; ref, @Nullable Entry&lt;K, V&gt; entry) {
+<span class="fc bfc" id="L307" title="All 2 branches covered.">				if (entry != null) {</span>
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">					if (ref != null) {</span>
+<span class="fc" id="L309">						ref.release();</span>
+					}
+<span class="fc" id="L311">					return entry.value;</span>
+				}
+<span class="fc" id="L313">				return null;</span>
+			}
+		});
+	}
+
+	@Override
+	public boolean remove(Object key, final Object value) {
+<span class="fc" id="L320">		Boolean result = doTask(key, new Task&lt;Boolean&gt;(TaskOption.RESTRUCTURE_AFTER, TaskOption.SKIP_IF_EMPTY) {</span>
+			@Override
+			protected Boolean execute(@Nullable Reference&lt;K, V&gt; ref, @Nullable Entry&lt;K, V&gt; entry) {
+<span class="pc bpc" id="L323" title="1 of 4 branches missed.">				if (entry != null &amp;&amp; ObjectUtils.nullSafeEquals(entry.getValue(), value)) {</span>
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">					if (ref != null) {</span>
+<span class="fc" id="L325">						ref.release();</span>
+					}
+<span class="fc" id="L327">					return true;</span>
+				}
+<span class="fc" id="L329">				return false;</span>
+			}
+		});
+<span class="fc bfc" id="L332" title="All 2 branches covered.">		return (result == Boolean.TRUE);</span>
+	}
+
+	@Override
+	public boolean replace(K key, final V oldValue, final V newValue) {
+<span class="fc" id="L337">		Boolean result = doTask(key, new Task&lt;Boolean&gt;(TaskOption.RESTRUCTURE_BEFORE, TaskOption.SKIP_IF_EMPTY) {</span>
+			@Override
+			protected Boolean execute(@Nullable Reference&lt;K, V&gt; ref, @Nullable Entry&lt;K, V&gt; entry) {
+<span class="pc bpc" id="L340" title="1 of 4 branches missed.">				if (entry != null &amp;&amp; ObjectUtils.nullSafeEquals(entry.getValue(), oldValue)) {</span>
+<span class="fc" id="L341">					entry.setValue(newValue);</span>
+<span class="fc" id="L342">					return true;</span>
+				}
+<span class="fc" id="L344">				return false;</span>
+			}
+		});
+<span class="fc bfc" id="L347" title="All 2 branches covered.">		return (result == Boolean.TRUE);</span>
+	}
+
+	@Override
+	@Nullable
+	public V replace(K key, final V value) {
+<span class="fc" id="L353">		return doTask(key, new Task&lt;V&gt;(TaskOption.RESTRUCTURE_BEFORE, TaskOption.SKIP_IF_EMPTY) {</span>
+			@Override
+			@Nullable
+			protected V execute(@Nullable Reference&lt;K, V&gt; ref, @Nullable Entry&lt;K, V&gt; entry) {
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">				if (entry != null) {</span>
+<span class="fc" id="L358">					V oldValue = entry.getValue();</span>
+<span class="fc" id="L359">					entry.setValue(value);</span>
+<span class="fc" id="L360">					return oldValue;</span>
+				}
+<span class="nc" id="L362">				return null;</span>
+			}
+		});
+	}
+
+	@Override
+	public void clear() {
+<span class="fc bfc" id="L369" title="All 2 branches covered.">		for (Segment segment : this.segments) {</span>
+<span class="fc" id="L370">			segment.clear();</span>
+		}
+<span class="fc" id="L372">	}</span>
+
+	/**
+	 * Remove any entries that have been garbage collected and are no longer referenced.
+	 * Under normal circumstances garbage collected entries are automatically purged as
+	 * items are added or removed from the Map. This method can be used to force a purge,
+	 * and is useful when the Map is read frequently but updated less often.
+	 */
+	public void purgeUnreferencedEntries() {
+<span class="fc bfc" id="L381" title="All 2 branches covered.">		for (Segment segment : this.segments) {</span>
+<span class="fc" id="L382">			segment.restructureIfNecessary(false);</span>
+		}
+<span class="fc" id="L384">	}</span>
+
+
+	@Override
+	public int size() {
+<span class="fc" id="L389">		int size = 0;</span>
+<span class="fc bfc" id="L390" title="All 2 branches covered.">		for (Segment segment : this.segments) {</span>
+<span class="fc" id="L391">			size += segment.getCount();</span>
+		}
+<span class="fc" id="L393">		return size;</span>
+	}
+
+	@Override
+	public boolean isEmpty() {
+<span class="fc bfc" id="L398" title="All 2 branches covered.">		for (Segment segment : this.segments) {</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">			if (segment.getCount() &gt; 0) {</span>
+<span class="fc" id="L400">				return false;</span>
+			}
+		}
+<span class="fc" id="L403">		return true;</span>
+	}
+
+	@Override
+	public Set&lt;Map.Entry&lt;K, V&gt;&gt; entrySet() {
+<span class="fc" id="L408">		Set&lt;Map.Entry&lt;K, V&gt;&gt; entrySet = this.entrySet;</span>
+<span class="fc bfc" id="L409" title="All 2 branches covered.">		if (entrySet == null) {</span>
+<span class="fc" id="L410">			entrySet = new EntrySet();</span>
+<span class="fc" id="L411">			this.entrySet = entrySet;</span>
+		}
+<span class="fc" id="L413">		return entrySet;</span>
+	}
+
+	@Nullable
+	private &lt;T&gt; T doTask(@Nullable Object key, Task&lt;T&gt; task) {
+<span class="fc" id="L418">		int hash = getHash(key);</span>
+<span class="fc" id="L419">		return getSegmentForHash(hash).doTask(hash, key, task);</span>
+	}
+
+	private Segment getSegmentForHash(int hash) {
+<span class="fc" id="L423">		return this.segments[(hash &gt;&gt;&gt; (32 - this.shift)) &amp; (this.segments.length - 1)];</span>
+	}
+
+	/**
+	 * Calculate a shift value that can be used to create a power-of-two value between
+	 * the specified maximum and minimum values.
+	 * @param minimumValue the minimum value
+	 * @param maximumValue the maximum value
+	 * @return the calculated shift (use {@code 1 &lt;&lt; shift} to obtain a value)
+	 */
+	protected static int calculateShift(int minimumValue, int maximumValue) {
+<span class="fc" id="L434">		int shift = 0;</span>
+<span class="fc" id="L435">		int value = 1;</span>
+<span class="pc bpc" id="L436" title="1 of 4 branches missed.">		while (value &lt; minimumValue &amp;&amp; value &lt; maximumValue) {</span>
+<span class="fc" id="L437">			value &lt;&lt;= 1;</span>
+<span class="fc" id="L438">			shift++;</span>
+		}
+<span class="fc" id="L440">		return shift;</span>
+	}
+
+
+	/**
+	 * Various reference types supported by this map.
+	 */
+<span class="fc" id="L447">	public enum ReferenceType {</span>
+
+		/** Use {@link SoftReference SoftReferences}. */
+<span class="fc" id="L450">		SOFT,</span>
+
+		/** Use {@link WeakReference WeakReferences}. */
+<span class="fc" id="L453">		WEAK</span>
+	}
+
+
+	/**
+	 * A single segment used to divide the map to allow better concurrent performance.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	protected final class Segment extends ReentrantLock {
+
+		private final ReferenceManager referenceManager;
+
+		private final int initialSize;
+
+		/**
+		 * Array of references indexed using the low order bits from the hash.
+		 * This property should only be set along with {@code resizeThreshold}.
+		 */
+		private volatile Reference&lt;K, V&gt;[] references;
+
+		/**
+		 * The total number of references contained in this segment. This includes chained
+		 * references and references that have been garbage collected but not purged.
+		 */
+<span class="fc" id="L477">		private final AtomicInteger count = new AtomicInteger(0);</span>
+
+		/**
+		 * The threshold when resizing of the references should occur. When {@code count}
+		 * exceeds this value references will be resized.
+		 */
+		private int resizeThreshold;
+
+<span class="fc" id="L485">		public Segment(int initialSize, int resizeThreshold) {</span>
+<span class="fc" id="L486">			this.referenceManager = createReferenceManager();</span>
+<span class="fc" id="L487">			this.initialSize = initialSize;</span>
+<span class="fc" id="L488">			this.references = createReferenceArray(initialSize);</span>
+<span class="fc" id="L489">			this.resizeThreshold = resizeThreshold;</span>
+<span class="fc" id="L490">		}</span>
+
+		@Nullable
+		public Reference&lt;K, V&gt; getReference(@Nullable Object key, int hash, Restructure restructure) {
+<span class="fc bfc" id="L494" title="All 2 branches covered.">			if (restructure == Restructure.WHEN_NECESSARY) {</span>
+<span class="fc" id="L495">				restructureIfNecessary(false);</span>
+			}
+<span class="fc bfc" id="L497" title="All 2 branches covered.">			if (this.count.get() == 0) {</span>
+<span class="fc" id="L498">				return null;</span>
+			}
+			// Use a local copy to protect against other threads writing
+<span class="fc" id="L501">			Reference&lt;K, V&gt;[] references = this.references;</span>
+<span class="fc" id="L502">			int index = getIndex(hash, references);</span>
+<span class="fc" id="L503">			Reference&lt;K, V&gt; head = references[index];</span>
+<span class="fc" id="L504">			return findInChain(head, key, hash);</span>
+		}
+
+		/**
+		 * Apply an update operation to this segment.
+		 * The segment will be locked during the update.
+		 * @param hash the hash of the key
+		 * @param key the key
+		 * @param task the update operation
+		 * @return the result of the operation
+		 */
+		@Nullable
+		public &lt;T&gt; T doTask(final int hash, @Nullable final Object key, final Task&lt;T&gt; task) {
+<span class="fc" id="L517">			boolean resize = task.hasOption(TaskOption.RESIZE);</span>
+<span class="fc bfc" id="L518" title="All 2 branches covered.">			if (task.hasOption(TaskOption.RESTRUCTURE_BEFORE)) {</span>
+<span class="fc" id="L519">				restructureIfNecessary(resize);</span>
+			}
+<span class="fc bfc" id="L521" title="All 4 branches covered.">			if (task.hasOption(TaskOption.SKIP_IF_EMPTY) &amp;&amp; this.count.get() == 0) {</span>
+<span class="fc" id="L522">				return task.execute(null, null, null);</span>
+			}
+<span class="fc" id="L524">			lock();</span>
+			try {
+<span class="fc" id="L526">				final int index = getIndex(hash, this.references);</span>
+<span class="fc" id="L527">				final Reference&lt;K, V&gt; head = this.references[index];</span>
+<span class="fc" id="L528">				Reference&lt;K, V&gt; ref = findInChain(head, key, hash);</span>
+<span class="fc bfc" id="L529" title="All 2 branches covered.">				Entry&lt;K, V&gt; entry = (ref != null ? ref.get() : null);</span>
+<span class="fc" id="L530">				Entries&lt;V&gt; entries = value -&gt; {</span>
+					@SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L532">					Entry&lt;K, V&gt; newEntry = new Entry&lt;&gt;((K) key, value);</span>
+<span class="fc" id="L533">					Reference&lt;K, V&gt; newReference = Segment.this.referenceManager.createReference(newEntry, hash, head);</span>
+<span class="fc" id="L534">					Segment.this.references[index] = newReference;</span>
+<span class="fc" id="L535">					Segment.this.count.incrementAndGet();</span>
+<span class="fc" id="L536">				};</span>
+<span class="fc" id="L537">				return task.execute(ref, entry, entries);</span>
+			}
+			finally {
+<span class="fc" id="L540">				unlock();</span>
+<span class="fc bfc" id="L541" title="All 2 branches covered.">				if (task.hasOption(TaskOption.RESTRUCTURE_AFTER)) {</span>
+<span class="fc" id="L542">					restructureIfNecessary(resize);</span>
+				}
+			}
+		}
+
+		/**
+		 * Clear all items from this segment.
+		 */
+		public void clear() {
+<span class="fc bfc" id="L551" title="All 2 branches covered.">			if (this.count.get() == 0) {</span>
+<span class="fc" id="L552">				return;</span>
+			}
+<span class="fc" id="L554">			lock();</span>
+			try {
+<span class="fc" id="L556">				this.references = createReferenceArray(this.initialSize);</span>
+<span class="fc" id="L557">				this.resizeThreshold = (int) (this.references.length * getLoadFactor());</span>
+<span class="fc" id="L558">				this.count.set(0);</span>
+			}
+			finally {
+<span class="fc" id="L561">				unlock();</span>
+			}
+<span class="fc" id="L563">		}</span>
+
+		/**
+		 * Restructure the underlying data structure when it becomes necessary. This
+		 * method can increase the size of the references table as well as purge any
+		 * references that have been garbage collected.
+		 * @param allowResize if resizing is permitted
+		 */
+		protected final void restructureIfNecessary(boolean allowResize) {
+<span class="fc" id="L572">			int currCount = this.count.get();</span>
+<span class="fc bfc" id="L573" title="All 6 branches covered.">			boolean needsResize = allowResize &amp;&amp; (currCount &gt; 0 &amp;&amp; currCount &gt;= this.resizeThreshold);</span>
+<span class="fc" id="L574">			Reference&lt;K, V&gt; ref = this.referenceManager.pollForPurge();</span>
+<span class="fc bfc" id="L575" title="All 4 branches covered.">			if (ref != null || (needsResize)) {</span>
+<span class="fc" id="L576">				restructure(allowResize, ref);</span>
+			}
+<span class="fc" id="L578">		}</span>
+
+		private void restructure(boolean allowResize, @Nullable Reference&lt;K, V&gt; ref) {
+			boolean needsResize;
+<span class="fc" id="L582">			lock();</span>
+			try {
+<span class="fc" id="L584">				int countAfterRestructure = this.count.get();</span>
+<span class="fc" id="L585">				Set&lt;Reference&lt;K, V&gt;&gt; toPurge = Collections.emptySet();</span>
+<span class="fc bfc" id="L586" title="All 2 branches covered.">				if (ref != null) {</span>
+<span class="fc" id="L587">					toPurge = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L588" title="All 2 branches covered.">					while (ref != null) {</span>
+<span class="fc" id="L589">						toPurge.add(ref);</span>
+<span class="fc" id="L590">						ref = this.referenceManager.pollForPurge();</span>
+					}
+				}
+<span class="fc" id="L593">				countAfterRestructure -= toPurge.size();</span>
+
+				// Recalculate taking into account count inside lock and items that
+				// will be purged
+<span class="fc bfc" id="L597" title="All 4 branches covered.">				needsResize = (countAfterRestructure &gt; 0 &amp;&amp; countAfterRestructure &gt;= this.resizeThreshold);</span>
+<span class="fc" id="L598">				boolean resizing = false;</span>
+<span class="fc" id="L599">				int restructureSize = this.references.length;</span>
+<span class="pc bpc" id="L600" title="1 of 6 branches missed.">				if (allowResize &amp;&amp; needsResize &amp;&amp; restructureSize &lt; MAXIMUM_SEGMENT_SIZE) {</span>
+<span class="fc" id="L601">					restructureSize &lt;&lt;= 1;</span>
+<span class="fc" id="L602">					resizing = true;</span>
+				}
+
+				// Either create a new table or reuse the existing one
+<span class="fc bfc" id="L606" title="All 2 branches covered.">				Reference&lt;K, V&gt;[] restructured =</span>
+<span class="fc" id="L607">						(resizing ? createReferenceArray(restructureSize) : this.references);</span>
+
+				// Restructure
+<span class="fc bfc" id="L610" title="All 2 branches covered.">				for (int i = 0; i &lt; this.references.length; i++) {</span>
+<span class="fc" id="L611">					ref = this.references[i];</span>
+<span class="fc bfc" id="L612" title="All 2 branches covered.">					if (!resizing) {</span>
+<span class="fc" id="L613">						restructured[i] = null;</span>
+					}
+<span class="fc bfc" id="L615" title="All 2 branches covered.">					while (ref != null) {</span>
+<span class="fc bfc" id="L616" title="All 2 branches covered.">						if (!toPurge.contains(ref)) {</span>
+<span class="fc" id="L617">							Entry&lt;K, V&gt; entry = ref.get();</span>
+<span class="pc bpc" id="L618" title="1 of 2 branches missed.">							if (entry != null) {</span>
+<span class="fc" id="L619">								int index = getIndex(ref.getHash(), restructured);</span>
+<span class="fc" id="L620">								restructured[index] = this.referenceManager.createReference(</span>
+<span class="fc" id="L621">										entry, ref.getHash(), restructured[index]);</span>
+							}
+						}
+<span class="fc" id="L624">						ref = ref.getNext();</span>
+					}
+				}
+
+				// Replace volatile members
+<span class="fc bfc" id="L629" title="All 2 branches covered.">				if (resizing) {</span>
+<span class="fc" id="L630">					this.references = restructured;</span>
+<span class="fc" id="L631">					this.resizeThreshold = (int) (this.references.length * getLoadFactor());</span>
+				}
+<span class="fc" id="L633">				this.count.set(Math.max(countAfterRestructure, 0));</span>
+			}
+			finally {
+<span class="fc" id="L636">				unlock();</span>
+			}
+<span class="fc" id="L638">		}</span>
+
+		@Nullable
+		private Reference&lt;K, V&gt; findInChain(Reference&lt;K, V&gt; ref, @Nullable Object key, int hash) {
+<span class="fc" id="L642">			Reference&lt;K, V&gt; currRef = ref;</span>
+<span class="fc bfc" id="L643" title="All 2 branches covered.">			while (currRef != null) {</span>
+<span class="fc bfc" id="L644" title="All 2 branches covered.">				if (currRef.getHash() == hash) {</span>
+<span class="fc" id="L645">					Entry&lt;K, V&gt; entry = currRef.get();</span>
+<span class="pc bpc" id="L646" title="1 of 2 branches missed.">					if (entry != null) {</span>
+<span class="fc" id="L647">						K entryKey = entry.getKey();</span>
+<span class="fc bfc" id="L648" title="All 2 branches covered.">						if (ObjectUtils.nullSafeEquals(entryKey, key)) {</span>
+<span class="fc" id="L649">							return currRef;</span>
+						}
+					}
+				}
+<span class="fc" id="L653">				currRef = currRef.getNext();</span>
+			}
+<span class="fc" id="L655">			return null;</span>
+		}
+
+		@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+		private Reference&lt;K, V&gt;[] createReferenceArray(int size) {
+<span class="fc" id="L660">			return new Reference[size];</span>
+		}
+
+		private int getIndex(int hash, Reference&lt;K, V&gt;[] references) {
+<span class="fc" id="L664">			return (hash &amp; (references.length - 1));</span>
+		}
+
+		/**
+		 * Return the size of the current references array.
+		 */
+		public final int getSize() {
+<span class="fc" id="L671">			return this.references.length;</span>
+		}
+
+		/**
+		 * Return the total number of references in this segment.
+		 */
+		public final int getCount() {
+<span class="fc" id="L678">			return this.count.get();</span>
+		}
+	}
+
+
+	/**
+	 * A reference to an {@link Entry} contained in the map. Implementations are usually
+	 * wrappers around specific Java reference implementations (e.g., {@link SoftReference}).
+	 * @param &lt;K&gt; the key type
+	 * @param &lt;V&gt; the value type
+	 */
+	protected interface Reference&lt;K, V&gt; {
+
+		/**
+		 * Return the referenced entry, or {@code null} if the entry is no longer available.
+		 */
+		@Nullable
+		Entry&lt;K, V&gt; get();
+
+		/**
+		 * Return the hash for the reference.
+		 */
+		int getHash();
+
+		/**
+		 * Return the next reference in the chain, or {@code null} if none.
+		 */
+		@Nullable
+		Reference&lt;K, V&gt; getNext();
+
+		/**
+		 * Release this entry and ensure that it will be returned from
+		 * {@code ReferenceManager#pollForPurge()}.
+		 */
+		void release();
+	}
+
+
+	/**
+	 * A single map entry.
+	 * @param &lt;K&gt; the key type
+	 * @param &lt;V&gt; the value type
+	 */
+	protected static final class Entry&lt;K, V&gt; implements Map.Entry&lt;K, V&gt; {
+
+		@Nullable
+		private final K key;
+
+		@Nullable
+		private volatile V value;
+
+<span class="fc" id="L729">		public Entry(@Nullable K key, @Nullable V value) {</span>
+<span class="fc" id="L730">			this.key = key;</span>
+<span class="fc" id="L731">			this.value = value;</span>
+<span class="fc" id="L732">		}</span>
+
+		@Override
+		@Nullable
+		public K getKey() {
+<span class="fc" id="L737">			return this.key;</span>
+		}
+
+		@Override
+		@Nullable
+		public V getValue() {
+<span class="fc" id="L743">			return this.value;</span>
+		}
+
+		@Override
+		@Nullable
+		public V setValue(@Nullable V value) {
+<span class="fc" id="L749">			V previous = this.value;</span>
+<span class="fc" id="L750">			this.value = value;</span>
+<span class="fc" id="L751">			return previous;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L756">			return (this.key + &quot;=&quot; + this.value);</span>
+		}
+
+		@Override
+		@SuppressWarnings(&quot;rawtypes&quot;)
+		public final boolean equals(Object other) {
+<span class="nc bnc" id="L762" title="All 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L763">				return true;</span>
+			}
+<span class="nc bnc" id="L765" title="All 2 branches missed.">			if (!(other instanceof Map.Entry)) {</span>
+<span class="nc" id="L766">				return false;</span>
+			}
+<span class="nc" id="L768">			Map.Entry otherEntry = (Map.Entry) other;</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">			return (ObjectUtils.nullSafeEquals(getKey(), otherEntry.getKey()) &amp;&amp;</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">					ObjectUtils.nullSafeEquals(getValue(), otherEntry.getValue()));</span>
+		}
+
+		@Override
+		public final int hashCode() {
+<span class="nc" id="L775">			return (ObjectUtils.nullSafeHashCode(this.key) ^ ObjectUtils.nullSafeHashCode(this.value));</span>
+		}
+	}
+
+
+	/**
+	 * A task that can be {@link Segment#doTask run} against a {@link Segment}.
+	 */
+	private abstract class Task&lt;T&gt; {
+
+		private final EnumSet&lt;TaskOption&gt; options;
+
+<span class="fc" id="L787">		public Task(TaskOption... options) {</span>
+<span class="pc bpc" id="L788" title="1 of 2 branches missed.">			this.options = (options.length == 0 ? EnumSet.noneOf(TaskOption.class) : EnumSet.of(options[0], options));</span>
+<span class="fc" id="L789">		}</span>
+
+		public boolean hasOption(TaskOption option) {
+<span class="fc" id="L792">			return this.options.contains(option);</span>
+		}
+
+		/**
+		 * Execute the task.
+		 * @param ref the found reference (or {@code null})
+		 * @param entry the found entry (or {@code null})
+		 * @param entries access to the underlying entries
+		 * @return the result of the task
+		 * @see #execute(Reference, Entry)
+		 */
+		@Nullable
+		protected T execute(@Nullable Reference&lt;K, V&gt; ref, @Nullable Entry&lt;K, V&gt; entry, @Nullable Entries&lt;V&gt; entries) {
+<span class="fc" id="L805">			return execute(ref, entry);</span>
+		}
+
+		/**
+		 * Convenience method that can be used for tasks that do not need access to {@link Entries}.
+		 * @param ref the found reference (or {@code null})
+		 * @param entry the found entry (or {@code null})
+		 * @return the result of the task
+		 * @see #execute(Reference, Entry, Entries)
+		 */
+		@Nullable
+		protected T execute(@Nullable Reference&lt;K, V&gt; ref, @Nullable Entry&lt;K, V&gt; entry) {
+<span class="nc" id="L817">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * Various options supported by a {@code Task}.
+	 */
+<span class="fc" id="L825">	private enum TaskOption {</span>
+
+<span class="fc" id="L827">		RESTRUCTURE_BEFORE, RESTRUCTURE_AFTER, SKIP_IF_EMPTY, RESIZE</span>
+	}
+
+
+	/**
+	 * Allows a task access to {@link ConcurrentReferenceHashMap.Segment} entries.
+	 */
+	private interface Entries&lt;V&gt; {
+
+		/**
+		 * Add a new entry with the specified value.
+		 * @param value the value to add
+		 */
+		void add(@Nullable V value);
+	}
+
+
+	/**
+	 * Internal entry-set implementation.
+	 */
+<span class="fc" id="L847">	private class EntrySet extends AbstractSet&lt;Map.Entry&lt;K, V&gt;&gt; {</span>
+
+		@Override
+		public Iterator&lt;Map.Entry&lt;K, V&gt;&gt; iterator() {
+<span class="fc" id="L851">			return new EntryIterator();</span>
+		}
+
+		@Override
+		public boolean contains(@Nullable Object o) {
+<span class="pc bpc" id="L856" title="1 of 2 branches missed.">			if (o instanceof Map.Entry&lt;?, ?&gt;) {</span>
+<span class="fc" id="L857">				Map.Entry&lt;?, ?&gt; entry = (Map.Entry&lt;?, ?&gt;) o;</span>
+<span class="fc" id="L858">				Reference&lt;K, V&gt; ref = ConcurrentReferenceHashMap.this.getReference(entry.getKey(), Restructure.NEVER);</span>
+<span class="pc bpc" id="L859" title="1 of 2 branches missed.">				Entry&lt;K, V&gt; otherEntry = (ref != null ? ref.get() : null);</span>
+<span class="pc bpc" id="L860" title="1 of 2 branches missed.">				if (otherEntry != null) {</span>
+<span class="fc" id="L861">					return ObjectUtils.nullSafeEquals(otherEntry.getValue(), otherEntry.getValue());</span>
+				}
+			}
+<span class="nc" id="L864">			return false;</span>
+		}
+
+		@Override
+		public boolean remove(Object o) {
+<span class="nc bnc" id="L869" title="All 2 branches missed.">			if (o instanceof Map.Entry&lt;?, ?&gt;) {</span>
+<span class="nc" id="L870">				Map.Entry&lt;?, ?&gt; entry = (Map.Entry&lt;?, ?&gt;) o;</span>
+<span class="nc" id="L871">				return ConcurrentReferenceHashMap.this.remove(entry.getKey(), entry.getValue());</span>
+			}
+<span class="nc" id="L873">			return false;</span>
+		}
+
+		@Override
+		public int size() {
+<span class="fc" id="L878">			return ConcurrentReferenceHashMap.this.size();</span>
+		}
+
+		@Override
+		public void clear() {
+<span class="nc" id="L883">			ConcurrentReferenceHashMap.this.clear();</span>
+<span class="nc" id="L884">		}</span>
+	}
+
+
+	/**
+	 * Internal entry iterator implementation.
+	 */
+	private class EntryIterator implements Iterator&lt;Map.Entry&lt;K, V&gt;&gt; {
+
+		private int segmentIndex;
+
+		private int referenceIndex;
+
+		@Nullable
+		private Reference&lt;K, V&gt;[] references;
+
+		@Nullable
+		private Reference&lt;K, V&gt; reference;
+
+		@Nullable
+		private Entry&lt;K, V&gt; next;
+
+		@Nullable
+		private Entry&lt;K, V&gt; last;
+
+<span class="fc" id="L909">		public EntryIterator() {</span>
+<span class="fc" id="L910">			moveToNextSegment();</span>
+<span class="fc" id="L911">		}</span>
+
+		@Override
+		public boolean hasNext() {
+<span class="fc" id="L915">			getNextIfNecessary();</span>
+<span class="fc bfc" id="L916" title="All 2 branches covered.">			return (this.next != null);</span>
+		}
+
+		@Override
+		public Entry&lt;K, V&gt; next() {
+<span class="fc" id="L921">			getNextIfNecessary();</span>
+<span class="pc bpc" id="L922" title="1 of 2 branches missed.">			if (this.next == null) {</span>
+<span class="nc" id="L923">				throw new NoSuchElementException();</span>
+			}
+<span class="fc" id="L925">			this.last = this.next;</span>
+<span class="fc" id="L926">			this.next = null;</span>
+<span class="fc" id="L927">			return this.last;</span>
+		}
+
+		private void getNextIfNecessary() {
+<span class="fc bfc" id="L931" title="All 2 branches covered.">			while (this.next == null) {</span>
+<span class="fc" id="L932">				moveToNextReference();</span>
+<span class="fc bfc" id="L933" title="All 2 branches covered.">				if (this.reference == null) {</span>
+<span class="fc" id="L934">					return;</span>
+				}
+<span class="fc" id="L936">				this.next = this.reference.get();</span>
+			}
+<span class="fc" id="L938">		}</span>
+
+		private void moveToNextReference() {
+<span class="fc bfc" id="L941" title="All 2 branches covered.">			if (this.reference != null) {</span>
+<span class="fc" id="L942">				this.reference = this.reference.getNext();</span>
+			}
+<span class="fc bfc" id="L944" title="All 4 branches covered.">			while (this.reference == null &amp;&amp; this.references != null) {</span>
+<span class="fc bfc" id="L945" title="All 2 branches covered.">				if (this.referenceIndex &gt;= this.references.length) {</span>
+<span class="fc" id="L946">					moveToNextSegment();</span>
+<span class="fc" id="L947">					this.referenceIndex = 0;</span>
+				}
+				else {
+<span class="fc" id="L950">					this.reference = this.references[this.referenceIndex];</span>
+<span class="fc" id="L951">					this.referenceIndex++;</span>
+				}
+			}
+<span class="fc" id="L954">		}</span>
+
+		private void moveToNextSegment() {
+<span class="fc" id="L957">			this.reference = null;</span>
+<span class="fc" id="L958">			this.references = null;</span>
+<span class="fc bfc" id="L959" title="All 2 branches covered.">			if (this.segmentIndex &lt; ConcurrentReferenceHashMap.this.segments.length) {</span>
+<span class="fc" id="L960">				this.references = ConcurrentReferenceHashMap.this.segments[this.segmentIndex].references;</span>
+<span class="fc" id="L961">				this.segmentIndex++;</span>
+			}
+<span class="fc" id="L963">		}</span>
+
+		@Override
+		public void remove() {
+<span class="pc bpc" id="L967" title="1 of 2 branches missed.">			Assert.state(this.last != null, &quot;No element to remove&quot;);</span>
+<span class="fc" id="L968">			ConcurrentReferenceHashMap.this.remove(this.last.getKey());</span>
+<span class="fc" id="L969">		}</span>
+	}
+
+
+	/**
+	 * The types of restructuring that can be performed.
+	 */
+<span class="fc" id="L976">	protected enum Restructure {</span>
+
+<span class="fc" id="L978">		WHEN_NECESSARY, NEVER</span>
+	}
+
+
+	/**
+	 * Strategy class used to manage {@link Reference References}. This class can be overridden if
+	 * alternative reference types need to be supported.
+	 */
+<span class="fc" id="L986">	protected class ReferenceManager {</span>
+
+<span class="fc" id="L988">		private final ReferenceQueue&lt;Entry&lt;K, V&gt;&gt; queue = new ReferenceQueue&lt;&gt;();</span>
+
+		/**
+		 * Factory method used to create a new {@link Reference}.
+		 * @param entry the entry contained in the reference
+		 * @param hash the hash
+		 * @param next the next reference in the chain, or {@code null} if none
+		 * @return a new {@link Reference}
+		 */
+		public Reference&lt;K, V&gt; createReference(Entry&lt;K, V&gt; entry, int hash, @Nullable Reference&lt;K, V&gt; next) {
+<span class="pc bpc" id="L998" title="1 of 2 branches missed.">			if (ConcurrentReferenceHashMap.this.referenceType == ReferenceType.WEAK) {</span>
+<span class="nc" id="L999">				return new WeakEntryReference&lt;&gt;(entry, hash, next, this.queue);</span>
+			}
+<span class="fc" id="L1001">			return new SoftEntryReference&lt;&gt;(entry, hash, next, this.queue);</span>
+		}
+
+		/**
+		 * Return any reference that has been garbage collected and can be purged from the
+		 * underlying structure or {@code null} if no references need purging. This
+		 * method must be thread safe and ideally should not block when returning
+		 * {@code null}. References should be returned once and only once.
+		 * @return a reference to purge or {@code null}
+		 */
+		@SuppressWarnings(&quot;unchecked&quot;)
+		@Nullable
+		public Reference&lt;K, V&gt; pollForPurge() {
+<span class="fc" id="L1014">			return (Reference&lt;K, V&gt;) this.queue.poll();</span>
+		}
+	}
+
+
+	/**
+	 * Internal {@link Reference} implementation for {@link SoftReference SoftReferences}.
+	 */
+	private static final class SoftEntryReference&lt;K, V&gt; extends SoftReference&lt;Entry&lt;K, V&gt;&gt; implements Reference&lt;K, V&gt; {
+
+		private final int hash;
+
+		@Nullable
+		private final Reference&lt;K, V&gt; nextReference;
+
+		public SoftEntryReference(Entry&lt;K, V&gt; entry, int hash, @Nullable Reference&lt;K, V&gt; next,
+				ReferenceQueue&lt;Entry&lt;K, V&gt;&gt; queue) {
+
+<span class="fc" id="L1032">			super(entry, queue);</span>
+<span class="fc" id="L1033">			this.hash = hash;</span>
+<span class="fc" id="L1034">			this.nextReference = next;</span>
+<span class="fc" id="L1035">		}</span>
+
+		@Override
+		public int getHash() {
+<span class="fc" id="L1039">			return this.hash;</span>
+		}
+
+		@Override
+		@Nullable
+		public Reference&lt;K, V&gt; getNext() {
+<span class="fc" id="L1045">			return this.nextReference;</span>
+		}
+
+		@Override
+		public void release() {
+<span class="nc" id="L1050">			enqueue();</span>
+<span class="nc" id="L1051">			clear();</span>
+<span class="nc" id="L1052">		}</span>
+	}
+
+
+	/**
+	 * Internal {@link Reference} implementation for {@link WeakReference WeakReferences}.
+	 */
+	private static final class WeakEntryReference&lt;K, V&gt; extends WeakReference&lt;Entry&lt;K, V&gt;&gt; implements Reference&lt;K, V&gt; {
+
+		private final int hash;
+
+		@Nullable
+		private final Reference&lt;K, V&gt; nextReference;
+
+		public WeakEntryReference(Entry&lt;K, V&gt; entry, int hash, @Nullable Reference&lt;K, V&gt; next,
+				ReferenceQueue&lt;Entry&lt;K, V&gt;&gt; queue) {
+
+<span class="nc" id="L1069">			super(entry, queue);</span>
+<span class="nc" id="L1070">			this.hash = hash;</span>
+<span class="nc" id="L1071">			this.nextReference = next;</span>
+<span class="nc" id="L1072">		}</span>
+
+		@Override
+		public int getHash() {
+<span class="nc" id="L1076">			return this.hash;</span>
+		}
+
+		@Override
+		@Nullable
+		public Reference&lt;K, V&gt; getNext() {
+<span class="nc" id="L1082">			return this.nextReference;</span>
+		}
+
+		@Override
+		public void release() {
+<span class="nc" id="L1087">			enqueue();</span>
+<span class="nc" id="L1088">			clear();</span>
+<span class="nc" id="L1089">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

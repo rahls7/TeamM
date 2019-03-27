@@ -1,0 +1,1282 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultMessageListenerContainer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.listener</a> &gt; <span class="el_source">DefaultMessageListenerContainer.java</span></div><h1>DefaultMessageListenerContainer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.listener;
+
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.Executor;
+import javax.jms.Connection;
+import javax.jms.JMSException;
+import javax.jms.MessageConsumer;
+import javax.jms.Session;
+
+import org.springframework.core.Constants;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.jms.JmsException;
+import org.springframework.jms.support.JmsUtils;
+import org.springframework.jms.support.destination.CachingDestinationResolver;
+import org.springframework.jms.support.destination.DestinationResolver;
+import org.springframework.lang.Nullable;
+import org.springframework.scheduling.SchedulingAwareRunnable;
+import org.springframework.scheduling.SchedulingTaskExecutor;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.backoff.BackOff;
+import org.springframework.util.backoff.BackOffExecution;
+import org.springframework.util.backoff.FixedBackOff;
+
+/**
+ * Message listener container variant that uses plain JMS client APIs, specifically
+ * a loop of {@code MessageConsumer.receive()} calls that also allow for
+ * transactional reception of messages (registering them with XA transactions).
+ * Designed to work in a native JMS environment as well as in a Java EE environment,
+ * with only minimal differences in configuration.
+ *
+ * &lt;p&gt;This is a simple but nevertheless powerful form of message listener container.
+ * On startup, it obtains a fixed number of JMS Sessions to invoke the listener,
+ * and optionally allows for dynamic adaptation at runtime (up to a maximum number).
+ * Like {@link SimpleMessageListenerContainer}, its main advantage is its low level
+ * of runtime complexity, in particular the minimal requirements on the JMS provider:
+ * not even the JMS {@code ServerSessionPool} facility is required. Beyond that, it is
+ * fully self-recovering in case the broker is temporarily unavailable, and allows
+ * for stops/restarts as well as runtime changes to its configuration.
+ *
+ * &lt;p&gt;Actual {@code MessageListener} execution happens in asynchronous work units which are
+ * created through Spring's {@link org.springframework.core.task.TaskExecutor TaskExecutor}
+ * abstraction. By default, the specified number of invoker tasks will be created
+ * on startup, according to the {@link #setConcurrentConsumers &quot;concurrentConsumers&quot;}
+ * setting. Specify an alternative {@code TaskExecutor} to integrate with an existing
+ * thread pool facility (such as a Java EE server's), for example using a
+ * {@link org.springframework.scheduling.commonj.WorkManagerTaskExecutor CommonJ WorkManager}.
+ * With a native JMS setup, each of those listener threads is going to use a
+ * cached JMS {@code Session} and {@code MessageConsumer} (only refreshed in case
+ * of failure), using the JMS provider's resources as efficiently as possible.
+ *
+ * &lt;p&gt;Message reception and listener execution can automatically be wrapped
+ * in transactions by passing a Spring
+ * {@link org.springframework.transaction.PlatformTransactionManager} into the
+ * {@link #setTransactionManager &quot;transactionManager&quot;} property. This will usually
+ * be a {@link org.springframework.transaction.jta.JtaTransactionManager} in a
+ * Java EE environment, in combination with a JTA-aware JMS {@code ConnectionFactory}
+ * obtained from JNDI (check your Java EE server's documentation). Note that this
+ * listener container will automatically reobtain all JMS handles for each transaction
+ * in case an external transaction manager is specified, for compatibility with
+ * all Java EE servers (in particular JBoss). This non-caching behavior can be
+ * overridden through the {@link #setCacheLevel &quot;cacheLevel&quot;} /
+ * {@link #setCacheLevelName &quot;cacheLevelName&quot;} property, enforcing caching of
+ * the {@code Connection} (or also {@code Session} and {@code MessageConsumer})
+ * even if an external transaction manager is involved.
+ *
+ * &lt;p&gt;Dynamic scaling of the number of concurrent invokers can be activated
+ * by specifying a {@link #setMaxConcurrentConsumers &quot;maxConcurrentConsumers&quot;}
+ * value that is higher than the {@link #setConcurrentConsumers &quot;concurrentConsumers&quot;}
+ * value. Since the latter's default is 1, you can also simply specify a
+ * &quot;maxConcurrentConsumers&quot; of e.g. 5, which will lead to dynamic scaling up to
+ * 5 concurrent consumers in case of increasing message load, as well as dynamic
+ * shrinking back to the standard number of consumers once the load decreases.
+ * Consider adapting the {@link #setIdleTaskExecutionLimit &quot;idleTaskExecutionLimit&quot;}
+ * setting to control the lifespan of each new task, to avoid frequent scaling up
+ * and down, in particular if the {@code ConnectionFactory} does not pool JMS
+ * {@code Sessions} and/or the {@code TaskExecutor} does not pool threads (check
+ * your configuration!). Note that dynamic scaling only really makes sense for a
+ * queue in the first place; for a topic, you will typically stick with the default
+ * number of 1 consumer, otherwise you'd receive the same message multiple times on
+ * the same node.
+ *
+ * &lt;p&gt;&lt;b&gt;Note: Don't use Spring's {@link org.springframework.jms.connection.CachingConnectionFactory}
+ * in combination with dynamic scaling.&lt;/b&gt; Ideally, don't use it with a message
+ * listener container at all, since it is generally preferable to let the
+ * listener container itself handle appropriate caching within its lifecycle.
+ * Also, stopping and restarting a listener container will only work with an
+ * independent, locally cached Connection - not with an externally cached one.
+ *
+ * &lt;p&gt;&lt;b&gt;It is strongly recommended to either set {@link #setSessionTransacted
+ * &quot;sessionTransacted&quot;} to &quot;true&quot; or specify an external {@link #setTransactionManager
+ * &quot;transactionManager&quot;}.&lt;/b&gt; See the {@link AbstractMessageListenerContainer}
+ * javadoc for details on acknowledge modes and native transaction options, as
+ * well as the {@link AbstractPollingMessageListenerContainer} javadoc for details
+ * on configuring an external transaction manager. Note that for the default
+ * &quot;AUTO_ACKNOWLEDGE&quot; mode, this container applies automatic message acknowledgment
+ * before listener execution, with no redelivery in case of an exception.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see #setTransactionManager
+ * @see #setCacheLevel
+ * @see javax.jms.MessageConsumer#receive(long)
+ * @see SimpleMessageListenerContainer
+ * @see org.springframework.jms.listener.endpoint.JmsMessageEndpointManager
+ */
+<span class="fc" id="L125">public class DefaultMessageListenerContainer extends AbstractPollingMessageListenerContainer {</span>
+
+	/**
+	 * Default thread name prefix: &quot;DefaultMessageListenerContainer-&quot;.
+	 */
+<span class="fc" id="L130">	public static final String DEFAULT_THREAD_NAME_PREFIX =</span>
+<span class="fc" id="L131">			ClassUtils.getShortName(DefaultMessageListenerContainer.class) + &quot;-&quot;;</span>
+
+	/**
+	 * The default recovery interval: 5000 ms = 5 seconds.
+	 */
+	public static final long DEFAULT_RECOVERY_INTERVAL = 5000;
+
+
+	/**
+	 * Constant that indicates to cache no JMS resources at all.
+	 * @see #setCacheLevel
+	 */
+	public static final int CACHE_NONE = 0;
+
+	/**
+	 * Constant that indicates to cache a shared JMS {@code Connection} for each
+	 * listener thread.
+	 * @see #setCacheLevel
+	 */
+	public static final int CACHE_CONNECTION = 1;
+
+	/**
+	 * Constant that indicates to cache a shared JMS {@code Connection} and a JMS
+	 * {@code Session} for each listener thread.
+	 * @see #setCacheLevel
+	 */
+	public static final int CACHE_SESSION = 2;
+
+	/**
+	 * Constant that indicates to cache a shared JMS {@code Connection}, a JMS
+	 * {@code Session}, and a JMS MessageConsumer for each listener thread.
+	 * @see #setCacheLevel
+	 */
+	public static final int CACHE_CONSUMER = 3;
+
+	/**
+	 * Constant that indicates automatic choice of an appropriate caching level
+	 * (depending on the transaction management strategy).
+	 * @see #setCacheLevel
+	 */
+	public static final int CACHE_AUTO = 4;
+
+
+<span class="fc" id="L174">	private static final Constants constants = new Constants(DefaultMessageListenerContainer.class);</span>
+
+
+	@Nullable
+	private Executor taskExecutor;
+
+<span class="fc" id="L180">	private BackOff backOff = new FixedBackOff(DEFAULT_RECOVERY_INTERVAL, Long.MAX_VALUE);</span>
+
+<span class="fc" id="L182">	private int cacheLevel = CACHE_AUTO;</span>
+
+<span class="fc" id="L184">	private int concurrentConsumers = 1;</span>
+
+<span class="fc" id="L186">	private int maxConcurrentConsumers = 1;</span>
+
+<span class="fc" id="L188">	private int maxMessagesPerTask = Integer.MIN_VALUE;</span>
+
+<span class="fc" id="L190">	private int idleConsumerLimit = 1;</span>
+
+<span class="fc" id="L192">	private int idleTaskExecutionLimit = 1;</span>
+
+<span class="fc" id="L194">	private final Set&lt;AsyncMessageListenerInvoker&gt; scheduledInvokers = new HashSet&lt;&gt;();</span>
+
+<span class="fc" id="L196">	private int activeInvokerCount = 0;</span>
+
+<span class="fc" id="L198">	private int registeredWithDestination = 0;</span>
+
+<span class="fc" id="L200">	private volatile boolean recovering = false;</span>
+
+<span class="fc" id="L202">	private volatile boolean interrupted = false;</span>
+
+	@Nullable
+	private Runnable stopCallback;
+
+<span class="fc" id="L207">	private Object currentRecoveryMarker = new Object();</span>
+
+<span class="fc" id="L209">	private final Object recoveryMonitor = new Object();</span>
+
+
+	/**
+	 * Set the Spring {@code TaskExecutor} to use for running the listener threads.
+	 * &lt;p&gt;Default is a {@link org.springframework.core.task.SimpleAsyncTaskExecutor},
+	 * starting up a number of new threads, according to the specified number
+	 * of concurrent consumers.
+	 * &lt;p&gt;Specify an alternative {@code TaskExecutor} for integration with an existing
+	 * thread pool. Note that this really only adds value if the threads are
+	 * managed in a specific fashion, for example within a Java EE environment.
+	 * A plain thread pool does not add much value, as this listener container
+	 * will occupy a number of threads for its entire lifetime.
+	 * @see #setConcurrentConsumers
+	 * @see org.springframework.core.task.SimpleAsyncTaskExecutor
+	 * @see org.springframework.scheduling.commonj.WorkManagerTaskExecutor
+	 */
+	public void setTaskExecutor(Executor taskExecutor) {
+<span class="fc" id="L227">		this.taskExecutor = taskExecutor;</span>
+<span class="fc" id="L228">	}</span>
+
+	/**
+	 * Specify the {@link BackOff} instance to use to compute the interval
+	 * between recovery attempts. If the {@link BackOffExecution} implementation
+	 * returns {@link BackOffExecution#STOP}, this listener container will not further
+	 * attempt to recover.
+	 * &lt;p&gt;The {@link #setRecoveryInterval(long) recovery interval} is ignored
+	 * when this property is set.
+	 * @since 4.1
+	 */
+	public void setBackOff(BackOff backOff) {
+<span class="fc" id="L240">		this.backOff = backOff;</span>
+<span class="fc" id="L241">	}</span>
+
+	/**
+	 * Specify the interval between recovery attempts, in &lt;b&gt;milliseconds&lt;/b&gt;.
+	 * The default is 5000 ms, that is, 5 seconds. This is a convenience method
+	 * to create a {@link FixedBackOff} with the specified interval.
+	 * &lt;p&gt;For more recovery options, consider specifying a {@link BackOff}
+	 * instance instead.
+	 * @see #setBackOff(BackOff)
+	 * @see #handleListenerSetupFailure
+	 */
+	public void setRecoveryInterval(long recoveryInterval) {
+<span class="nc" id="L253">		this.backOff = new FixedBackOff(recoveryInterval, Long.MAX_VALUE);</span>
+<span class="nc" id="L254">	}</span>
+
+	/**
+	 * Specify the level of caching that this listener container is allowed to apply,
+	 * in the form of the name of the corresponding constant: e.g. &quot;CACHE_CONNECTION&quot;.
+	 * @see #setCacheLevel
+	 */
+	public void setCacheLevelName(String constantName) throws IllegalArgumentException {
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">		if (!constantName.startsWith(&quot;CACHE_&quot;)) {</span>
+<span class="nc" id="L263">			throw new IllegalArgumentException(&quot;Only cache constants allowed&quot;);</span>
+		}
+<span class="fc" id="L265">		setCacheLevel(constants.asNumber(constantName).intValue());</span>
+<span class="fc" id="L266">	}</span>
+
+	/**
+	 * Specify the level of caching that this listener container is allowed to apply.
+	 * &lt;p&gt;Default is {@link #CACHE_NONE} if an external transaction manager has been specified
+	 * (to reobtain all resources freshly within the scope of the external transaction),
+	 * and {@link #CACHE_CONSUMER} otherwise (operating with local JMS resources).
+	 * &lt;p&gt;Some Java EE servers only register their JMS resources with an ongoing XA
+	 * transaction in case of a freshly obtained JMS {@code Connection} and {@code Session},
+	 * which is why this listener container by default does not cache any of those.
+	 * However, depending on the rules of your server with respect to the caching
+	 * of transactional resources, consider switching this setting to at least
+	 * {@link #CACHE_CONNECTION} or {@link #CACHE_SESSION} even in conjunction with an
+	 * external transaction manager.
+	 * @see #CACHE_NONE
+	 * @see #CACHE_CONNECTION
+	 * @see #CACHE_SESSION
+	 * @see #CACHE_CONSUMER
+	 * @see #setCacheLevelName
+	 * @see #setTransactionManager
+	 */
+	public void setCacheLevel(int cacheLevel) {
+<span class="fc" id="L288">		this.cacheLevel = cacheLevel;</span>
+<span class="fc" id="L289">	}</span>
+
+	/**
+	 * Return the level of caching that this listener container is allowed to apply.
+	 */
+	public int getCacheLevel() {
+<span class="fc" id="L295">		return this.cacheLevel;</span>
+	}
+
+
+	/**
+	 * Specify concurrency limits via a &quot;lower-upper&quot; String, e.g. &quot;5-10&quot;, or a simple
+	 * upper limit String, e.g. &quot;10&quot; (the lower limit will be 1 in this case).
+	 * &lt;p&gt;This listener container will always hold on to the minimum number of consumers
+	 * ({@link #setConcurrentConsumers}) and will slowly scale up to the maximum number
+	 * of consumers {@link #setMaxConcurrentConsumers} in case of increasing load.
+	 */
+	@Override
+	public void setConcurrency(String concurrency) {
+		try {
+<span class="fc" id="L309">			int separatorIndex = concurrency.indexOf('-');</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">			if (separatorIndex != -1) {</span>
+<span class="fc" id="L311">				setConcurrentConsumers(Integer.parseInt(concurrency.substring(0, separatorIndex)));</span>
+<span class="fc" id="L312">				setMaxConcurrentConsumers(Integer.parseInt(concurrency.substring(separatorIndex + 1, concurrency.length())));</span>
+			}
+			else {
+<span class="nc" id="L315">				setConcurrentConsumers(1);</span>
+<span class="nc" id="L316">				setMaxConcurrentConsumers(Integer.parseInt(concurrency));</span>
+			}
+		}
+<span class="nc" id="L319">		catch (NumberFormatException ex) {</span>
+<span class="nc" id="L320">			throw new IllegalArgumentException(&quot;Invalid concurrency value [&quot; + concurrency + &quot;]: only &quot; +</span>
+					&quot;single maximum integer (e.g. \&quot;5\&quot;) and minimum-maximum combo (e.g. \&quot;3-5\&quot;) supported.&quot;);
+<span class="fc" id="L322">		}</span>
+<span class="fc" id="L323">	}</span>
+
+	/**
+	 * Specify the number of concurrent consumers to create. Default is 1.
+	 * &lt;p&gt;Specifying a higher value for this setting will increase the standard
+	 * level of scheduled concurrent consumers at runtime: This is effectively
+	 * the minimum number of concurrent consumers which will be scheduled
+	 * at any given time. This is a static setting; for dynamic scaling,
+	 * consider specifying the &quot;maxConcurrentConsumers&quot; setting instead.
+	 * &lt;p&gt;Raising the number of concurrent consumers is recommendable in order
+	 * to scale the consumption of messages coming in from a queue. However,
+	 * note that any ordering guarantees are lost once multiple consumers are
+	 * registered. In general, stick with 1 consumer for low-volume queues.
+	 * &lt;p&gt;&lt;b&gt;Do not raise the number of concurrent consumers for a topic,
+	 * unless vendor-specific setup measures clearly allow for it.&lt;/b&gt;
+	 * With regular setup, this would lead to concurrent consumption
+	 * of the same message, which is hardly ever desirable.
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 * @see #setMaxConcurrentConsumers
+	 */
+	public void setConcurrentConsumers(int concurrentConsumers) {
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">		Assert.isTrue(concurrentConsumers &gt; 0, &quot;'concurrentConsumers' value must be at least 1 (one)&quot;);</span>
+<span class="fc" id="L345">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L346">			this.concurrentConsumers = concurrentConsumers;</span>
+<span class="fc bfc" id="L347" title="All 2 branches covered.">			if (this.maxConcurrentConsumers &lt; concurrentConsumers) {</span>
+<span class="fc" id="L348">				this.maxConcurrentConsumers = concurrentConsumers;</span>
+			}
+<span class="fc" id="L350">		}</span>
+<span class="fc" id="L351">	}</span>
+
+	/**
+	 * Return the &quot;concurrentConsumer&quot; setting.
+	 * &lt;p&gt;This returns the currently configured &quot;concurrentConsumers&quot; value;
+	 * the number of currently scheduled/active consumers might differ.
+	 * @see #getScheduledConsumerCount()
+	 * @see #getActiveConsumerCount()
+	 */
+	public final int getConcurrentConsumers() {
+<span class="fc" id="L361">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L362">			return this.concurrentConsumers;</span>
+		}
+	}
+
+	/**
+	 * Specify the maximum number of concurrent consumers to create. Default is 1.
+	 * &lt;p&gt;If this setting is higher than &quot;concurrentConsumers&quot;, the listener container
+	 * will dynamically schedule new consumers at runtime, provided that enough
+	 * incoming messages are encountered. Once the load goes down again, the number of
+	 * consumers will be reduced to the standard level (&quot;concurrentConsumers&quot;) again.
+	 * &lt;p&gt;Raising the number of concurrent consumers is recommendable in order
+	 * to scale the consumption of messages coming in from a queue. However,
+	 * note that any ordering guarantees are lost once multiple consumers are
+	 * registered. In general, stick with 1 consumer for low-volume queues.
+	 * &lt;p&gt;&lt;b&gt;Do not raise the number of concurrent consumers for a topic,
+	 * unless vendor-specific setup measures clearly allow for it.&lt;/b&gt;
+	 * With regular setup, this would lead to concurrent consumption
+	 * of the same message, which is hardly ever desirable.
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 * @see #setConcurrentConsumers
+	 */
+	public void setMaxConcurrentConsumers(int maxConcurrentConsumers) {
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">		Assert.isTrue(maxConcurrentConsumers &gt; 0, &quot;'maxConcurrentConsumers' value must be at least 1 (one)&quot;);</span>
+<span class="fc" id="L385">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L386">			this.maxConcurrentConsumers = Math.max(maxConcurrentConsumers, this.concurrentConsumers);</span>
+<span class="fc" id="L387">		}</span>
+<span class="fc" id="L388">	}</span>
+
+	/**
+	 * Return the &quot;maxConcurrentConsumer&quot; setting.
+	 * &lt;p&gt;This returns the currently configured &quot;maxConcurrentConsumers&quot; value;
+	 * the number of currently scheduled/active consumers might differ.
+	 * @see #getScheduledConsumerCount()
+	 * @see #getActiveConsumerCount()
+	 */
+	public final int getMaxConcurrentConsumers() {
+<span class="fc" id="L398">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L399">			return this.maxConcurrentConsumers;</span>
+		}
+	}
+
+	/**
+	 * Specify the maximum number of messages to process in one task.
+	 * More concretely, this limits the number of message reception attempts
+	 * per task, which includes receive iterations that did not actually
+	 * pick up a message until they hit their timeout (see the
+	 * {@link #setReceiveTimeout &quot;receiveTimeout&quot;} property).
+	 * &lt;p&gt;Default is unlimited (-1) in case of a standard TaskExecutor,
+	 * reusing the original invoker threads until shutdown (at the
+	 * expense of limited dynamic scheduling).
+	 * &lt;p&gt;In case of a SchedulingTaskExecutor indicating a preference for
+	 * short-lived tasks, the default is 10 instead. Specify a number
+	 * of 10 to 100 messages to balance between rather long-lived and
+	 * rather short-lived tasks here.
+	 * &lt;p&gt;Long-lived tasks avoid frequent thread context switches through
+	 * sticking with the same thread all the way through, while short-lived
+	 * tasks allow thread pools to control the scheduling. Hence, thread
+	 * pools will usually prefer short-lived tasks.
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 * @see #setTaskExecutor
+	 * @see #setReceiveTimeout
+	 * @see org.springframework.scheduling.SchedulingTaskExecutor#prefersShortLivedTasks()
+	 */
+	public void setMaxMessagesPerTask(int maxMessagesPerTask) {
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">		Assert.isTrue(maxMessagesPerTask != 0, &quot;'maxMessagesPerTask' must not be 0&quot;);</span>
+<span class="fc" id="L427">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L428">			this.maxMessagesPerTask = maxMessagesPerTask;</span>
+<span class="fc" id="L429">		}</span>
+<span class="fc" id="L430">	}</span>
+
+	/**
+	 * Return the maximum number of messages to process in one task.
+	 */
+	public final int getMaxMessagesPerTask() {
+<span class="fc" id="L436">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L437">			return this.maxMessagesPerTask;</span>
+		}
+	}
+
+	/**
+	 * Specify the limit for the number of consumers that are allowed to be idle
+	 * at any given time.
+	 * &lt;p&gt;This limit is used by the {@link #scheduleNewInvokerIfAppropriate} method
+	 * to determine if a new invoker should be created. Increasing the limit causes
+	 * invokers to be created more aggressively. This can be useful to ramp up the
+	 * number of invokers faster.
+	 * &lt;p&gt;The default is 1, only scheduling a new invoker (which is likely to
+	 * be idle initially) if none of the existing invokers is currently idle.
+	 */
+	public void setIdleConsumerLimit(int idleConsumerLimit) {
+<span class="nc bnc" id="L452" title="All 2 branches missed.">		Assert.isTrue(idleConsumerLimit &gt; 0, &quot;'idleConsumerLimit' must be 1 or higher&quot;);</span>
+<span class="nc" id="L453">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L454">			this.idleConsumerLimit = idleConsumerLimit;</span>
+<span class="nc" id="L455">		}</span>
+<span class="nc" id="L456">	}</span>
+
+	/**
+	 * Return the limit for the number of idle consumers.
+	 */
+	public final int getIdleConsumerLimit() {
+<span class="nc" id="L462">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L463">			return this.idleConsumerLimit;</span>
+		}
+	}
+
+	/**
+	 * Specify the limit for idle executions of a consumer task, not having
+	 * received any message within its execution. If this limit is reached,
+	 * the task will shut down and leave receiving to other executing tasks.
+	 * &lt;p&gt;The default is 1, closing idle resources early once a task didn't
+	 * receive a message. This applies to dynamic scheduling only; see the
+	 * {@link #setMaxConcurrentConsumers &quot;maxConcurrentConsumers&quot;} setting.
+	 * The minimum number of consumers
+	 * (see {@link #setConcurrentConsumers &quot;concurrentConsumers&quot;})
+	 * will be kept around until shutdown in any case.
+	 * &lt;p&gt;Within each task execution, a number of message reception attempts
+	 * (according to the &quot;maxMessagesPerTask&quot; setting) will each wait for an incoming
+	 * message (according to the &quot;receiveTimeout&quot; setting). If all of those receive
+	 * attempts in a given task return without a message, the task is considered
+	 * idle with respect to received messages. Such a task may still be rescheduled;
+	 * however, once it reached the specified &quot;idleTaskExecutionLimit&quot;, it will
+	 * shut down (in case of dynamic scaling).
+	 * &lt;p&gt;Raise this limit if you encounter too frequent scaling up and down.
+	 * With this limit being higher, an idle consumer will be kept around longer,
+	 * avoiding the restart of a consumer once a new load of messages comes in.
+	 * Alternatively, specify a higher &quot;maxMessagesPerTask&quot; and/or &quot;receiveTimeout&quot; value,
+	 * which will also lead to idle consumers being kept around for a longer time
+	 * (while also increasing the average execution time of each scheduled task).
+	 * &lt;p&gt;&lt;b&gt;This setting can be modified at runtime, for example through JMX.&lt;/b&gt;
+	 * @see #setMaxMessagesPerTask
+	 * @see #setReceiveTimeout
+	 */
+	public void setIdleTaskExecutionLimit(int idleTaskExecutionLimit) {
+<span class="nc bnc" id="L495" title="All 2 branches missed.">		Assert.isTrue(idleTaskExecutionLimit &gt; 0, &quot;'idleTaskExecutionLimit' must be 1 or higher&quot;);</span>
+<span class="nc" id="L496">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L497">			this.idleTaskExecutionLimit = idleTaskExecutionLimit;</span>
+<span class="nc" id="L498">		}</span>
+<span class="nc" id="L499">	}</span>
+
+	/**
+	 * Return the limit for idle executions of a consumer task.
+	 */
+	public final int getIdleTaskExecutionLimit() {
+<span class="nc" id="L505">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L506">			return this.idleTaskExecutionLimit;</span>
+		}
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Implementation of AbstractMessageListenerContainer's template methods
+	//-------------------------------------------------------------------------
+
+	@Override
+	public void initialize() {
+		// Adapt default cache level.
+<span class="fc bfc" id="L518" title="All 2 branches covered.">		if (this.cacheLevel == CACHE_AUTO) {</span>
+<span class="pc bpc" id="L519" title="1 of 2 branches missed.">			this.cacheLevel = (getTransactionManager() != null ? CACHE_NONE : CACHE_CONSUMER);</span>
+		}
+
+		// Prepare taskExecutor and maxMessagesPerTask.
+<span class="fc" id="L523">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc bfc" id="L524" title="All 2 branches covered.">			if (this.taskExecutor == null) {</span>
+<span class="fc" id="L525">				this.taskExecutor = createDefaultTaskExecutor();</span>
+			}
+<span class="pc bpc" id="L527" title="1 of 2 branches missed.">			else if (this.taskExecutor instanceof SchedulingTaskExecutor &amp;&amp;</span>
+<span class="nc bnc" id="L528" title="All 4 branches missed.">					((SchedulingTaskExecutor) this.taskExecutor).prefersShortLivedTasks() &amp;&amp;</span>
+					this.maxMessagesPerTask == Integer.MIN_VALUE) {
+				// TaskExecutor indicated a preference for short-lived tasks. According to
+				// setMaxMessagesPerTask javadoc, we'll use 10 message per task in this case
+				// unless the user specified a custom value.
+<span class="nc" id="L533">				this.maxMessagesPerTask = 10;</span>
+			}
+<span class="fc" id="L535">		}</span>
+
+		// Proceed with actual listener initialization.
+<span class="fc" id="L538">		super.initialize();</span>
+<span class="fc" id="L539">	}</span>
+
+	/**
+	 * Creates the specified number of concurrent consumers,
+	 * in the form of a JMS Session plus associated MessageConsumer
+	 * running in a separate thread.
+	 * @see #scheduleNewInvoker
+	 * @see #setTaskExecutor
+	 */
+	@Override
+	protected void doInitialize() throws JMSException {
+<span class="fc" id="L550">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc bfc" id="L551" title="All 2 branches covered.">			for (int i = 0; i &lt; this.concurrentConsumers; i++) {</span>
+<span class="fc" id="L552">				scheduleNewInvoker();</span>
+			}
+<span class="fc" id="L554">		}</span>
+<span class="fc" id="L555">	}</span>
+
+	/**
+	 * Destroy the registered JMS Sessions and associated MessageConsumers.
+	 */
+	@Override
+	protected void doShutdown() throws JMSException {
+<span class="fc" id="L562">		logger.debug(&quot;Waiting for shutdown of message listener invokers&quot;);</span>
+		try {
+<span class="fc" id="L564">			synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L565">				long receiveTimeout = getReceiveTimeout();</span>
+<span class="fc" id="L566">				long waitStartTime = System.currentTimeMillis();</span>
+<span class="fc" id="L567">				int waitCount = 0;</span>
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">				while (this.activeInvokerCount &gt; 0) {</span>
+<span class="nc bnc" id="L569" title="All 4 branches missed.">					if (waitCount &gt; 0 &amp;&amp; !isAcceptMessagesWhileStopping() &amp;&amp;</span>
+<span class="nc bnc" id="L570" title="All 2 branches missed.">							System.currentTimeMillis() - waitStartTime &gt;= receiveTimeout) {</span>
+						// Unexpectedly some invokers are still active after the receive timeout period
+						// -&gt; interrupt remaining receive attempts since we'd reject the messages anyway
+<span class="nc bnc" id="L573" title="All 2 branches missed.">						for (AsyncMessageListenerInvoker scheduledInvoker : this.scheduledInvokers) {</span>
+<span class="nc" id="L574">							scheduledInvoker.interruptIfNecessary();</span>
+<span class="nc" id="L575">						}</span>
+					}
+<span class="nc bnc" id="L577" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L578">						logger.debug(&quot;Still waiting for shutdown of &quot; + this.activeInvokerCount +</span>
+								&quot; message listener invokers (iteration &quot; + waitCount + &quot;)&quot;);
+					}
+					// Wait for AsyncMessageListenerInvokers to deactivate themselves...
+<span class="nc bnc" id="L582" title="All 2 branches missed.">					if (receiveTimeout &gt; 0) {</span>
+<span class="nc" id="L583">						this.lifecycleMonitor.wait(receiveTimeout);</span>
+					}
+					else {
+<span class="nc" id="L586">						this.lifecycleMonitor.wait();</span>
+					}
+<span class="nc" id="L588">					waitCount++;</span>
+				}
+				// Clear remaining scheduled invokers, possibly left over as paused tasks
+<span class="fc bfc" id="L591" title="All 2 branches covered.">				for (AsyncMessageListenerInvoker scheduledInvoker : this.scheduledInvokers) {</span>
+<span class="fc" id="L592">					scheduledInvoker.clearResources();</span>
+<span class="fc" id="L593">				}</span>
+<span class="fc" id="L594">				this.scheduledInvokers.clear();</span>
+<span class="fc" id="L595">			}</span>
+		}
+<span class="nc" id="L597">		catch (InterruptedException ex) {</span>
+			// Re-interrupt current thread, to allow other threads to react.
+<span class="nc" id="L599">			Thread.currentThread().interrupt();</span>
+<span class="fc" id="L600">		}</span>
+<span class="fc" id="L601">	}</span>
+
+	/**
+	 * Overridden to reset the stop callback, if any.
+	 */
+	@Override
+	public void start() throws JmsException {
+<span class="fc" id="L608">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L609">			this.stopCallback = null;</span>
+<span class="fc" id="L610">		}</span>
+<span class="fc" id="L611">		super.start();</span>
+<span class="fc" id="L612">	}</span>
+
+	/**
+	 * Stop this listener container, invoking the specific callback
+	 * once all listener processing has actually stopped.
+	 * &lt;p&gt;Note: Further {@code stop(runnable)} calls (before processing
+	 * has actually stopped) will override the specified callback. Only the
+	 * latest specified callback will be invoked.
+	 * &lt;p&gt;If a subsequent {@link #start()} call restarts the listener container
+	 * before it has fully stopped, the callback will not get invoked at all.
+	 * @param callback the callback to invoke once listener processing
+	 * has fully stopped
+	 * @throws JmsException if stopping failed
+	 * @see #stop()
+	 */
+	@Override
+	public void stop(Runnable callback) throws JmsException {
+<span class="fc" id="L629">		synchronized (this.lifecycleMonitor) {</span>
+<span class="pc bpc" id="L630" title="1 of 4 branches missed.">			if (!isRunning() || this.stopCallback != null) {</span>
+				// Not started, already stopped, or previous stop attempt in progress
+				// -&gt; return immediately, no stop process to control anymore.
+<span class="fc" id="L633">				callback.run();</span>
+<span class="fc" id="L634">				return;</span>
+			}
+<span class="fc" id="L636">			this.stopCallback = callback;</span>
+<span class="fc" id="L637">		}</span>
+<span class="fc" id="L638">		stop();</span>
+<span class="fc" id="L639">	}</span>
+
+	/**
+	 * Return the number of currently scheduled consumers.
+	 * &lt;p&gt;This number will always be between &quot;concurrentConsumers&quot; and
+	 * &quot;maxConcurrentConsumers&quot;, but might be higher than &quot;activeConsumerCount&quot;
+	 * (in case some consumers are scheduled but not executing at the moment).
+	 * @see #getConcurrentConsumers()
+	 * @see #getMaxConcurrentConsumers()
+	 * @see #getActiveConsumerCount()
+	 */
+	public final int getScheduledConsumerCount() {
+<span class="nc" id="L651">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L652">			return this.scheduledInvokers.size();</span>
+		}
+	}
+
+	/**
+	 * Return the number of currently active consumers.
+	 * &lt;p&gt;This number will always be between &quot;concurrentConsumers&quot; and
+	 * &quot;maxConcurrentConsumers&quot;, but might be lower than &quot;scheduledConsumerCount&quot;
+	 * (in case some consumers are scheduled but not executing at the moment).
+	 * @see #getConcurrentConsumers()
+	 * @see #getMaxConcurrentConsumers()
+	 * @see #getActiveConsumerCount()
+	 */
+	public final int getActiveConsumerCount() {
+<span class="nc" id="L666">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L667">			return this.activeInvokerCount;</span>
+		}
+	}
+
+	/**
+	 * Return whether at least one consumer has entered a fixed registration with the
+	 * target destination. This is particularly interesting for the pub-sub case where
+	 * it might be important to have an actual consumer registered that is guaranteed
+	 * not to miss any messages that are just about to be published.
+	 * &lt;p&gt;This method may be polled after a {@link #start()} call, until asynchronous
+	 * registration of consumers has happened which is when the method will start returning
+	 * {@code true} &amp;ndash; provided that the listener container ever actually establishes
+	 * a fixed registration. It will then keep returning {@code true} until shutdown,
+	 * since the container will hold on to at least one consumer registration thereafter.
+	 * &lt;p&gt;Note that a listener container is not bound to having a fixed registration in
+	 * the first place. It may also keep recreating consumers for every invoker execution.
+	 * This particularly depends on the {@link #setCacheLevel cache level} setting:
+	 * only {@link #CACHE_CONSUMER} will lead to a fixed registration.
+	 */
+	public boolean isRegisteredWithDestination() {
+<span class="nc" id="L687">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">			return (this.registeredWithDestination &gt; 0);</span>
+		}
+	}
+
+
+	/**
+	 * Create a default TaskExecutor. Called if no explicit TaskExecutor has been specified.
+	 * &lt;p&gt;The default implementation builds a {@link org.springframework.core.task.SimpleAsyncTaskExecutor}
+	 * with the specified bean name (or the class name, if no bean name specified) as thread name prefix.
+	 * @see org.springframework.core.task.SimpleAsyncTaskExecutor#SimpleAsyncTaskExecutor(String)
+	 */
+	protected TaskExecutor createDefaultTaskExecutor() {
+<span class="fc" id="L700">		String beanName = getBeanName();</span>
+<span class="pc bpc" id="L701" title="1 of 2 branches missed.">		String threadNamePrefix = (beanName != null ? beanName + &quot;-&quot; : DEFAULT_THREAD_NAME_PREFIX);</span>
+<span class="fc" id="L702">		return new SimpleAsyncTaskExecutor(threadNamePrefix);</span>
+	}
+
+	/**
+	 * Schedule a new invoker, increasing the total number of scheduled
+	 * invokers for this listener container.
+	 */
+	private void scheduleNewInvoker() {
+<span class="fc" id="L710">		AsyncMessageListenerInvoker invoker = new AsyncMessageListenerInvoker();</span>
+<span class="pc bpc" id="L711" title="1 of 2 branches missed.">		if (rescheduleTaskIfNecessary(invoker)) {</span>
+			// This should always be true, since we're only calling this when active.
+<span class="fc" id="L713">			this.scheduledInvokers.add(invoker);</span>
+		}
+<span class="fc" id="L715">	}</span>
+
+	/**
+	 * Use a shared JMS Connection depending on the &quot;cacheLevel&quot; setting.
+	 * @see #setCacheLevel
+	 * @see #CACHE_CONNECTION
+	 */
+	@Override
+	protected final boolean sharedConnectionEnabled() {
+<span class="fc bfc" id="L724" title="All 2 branches covered.">		return (getCacheLevel() &gt;= CACHE_CONNECTION);</span>
+	}
+
+	/**
+	 * Re-executes the given task via this listener container's TaskExecutor.
+	 * @see #setTaskExecutor
+	 */
+	@Override
+	protected void doRescheduleTask(Object task) {
+<span class="pc bpc" id="L733" title="1 of 2 branches missed.">		Assert.state(this.taskExecutor != null, &quot;No TaskExecutor available&quot;);</span>
+<span class="fc" id="L734">		this.taskExecutor.execute((Runnable) task);</span>
+<span class="fc" id="L735">	}</span>
+
+	/**
+	 * Tries scheduling a new invoker, since we know messages are coming in...
+	 * @see #scheduleNewInvokerIfAppropriate()
+	 */
+	@Override
+	protected void messageReceived(Object invoker, Session session) {
+<span class="nc" id="L743">		((AsyncMessageListenerInvoker) invoker).setIdle(false);</span>
+<span class="nc" id="L744">		scheduleNewInvokerIfAppropriate();</span>
+<span class="nc" id="L745">	}</span>
+
+	/**
+	 * Marks the affected invoker as idle.
+	 */
+	@Override
+	protected void noMessageReceived(Object invoker, Session session) {
+<span class="nc" id="L752">		((AsyncMessageListenerInvoker) invoker).setIdle(true);</span>
+<span class="nc" id="L753">	}</span>
+
+	/**
+	 * Schedule a new invoker, increasing the total number of scheduled
+	 * invokers for this listener container, but only if the specified
+	 * &quot;maxConcurrentConsumers&quot; limit has not been reached yet, and only
+	 * if the specified &quot;idleConsumerLimit&quot; has not been reached either.
+	 * &lt;p&gt;Called once a message has been received, in order to scale up while
+	 * processing the message in the invoker that originally received it.
+	 * @see #setTaskExecutor
+	 * @see #getMaxConcurrentConsumers()
+	 * @see #getIdleConsumerLimit()
+	 */
+	protected void scheduleNewInvokerIfAppropriate() {
+<span class="nc bnc" id="L767" title="All 2 branches missed.">		if (isRunning()) {</span>
+<span class="nc" id="L768">			resumePausedTasks();</span>
+<span class="nc" id="L769">			synchronized (this.lifecycleMonitor) {</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">				if (this.scheduledInvokers.size() &lt; this.maxConcurrentConsumers &amp;&amp;</span>
+<span class="nc bnc" id="L771" title="All 2 branches missed.">						getIdleInvokerCount() &lt; this.idleConsumerLimit) {</span>
+<span class="nc" id="L772">					scheduleNewInvoker();</span>
+<span class="nc bnc" id="L773" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L774">						logger.debug(&quot;Raised scheduled invoker count: &quot; + this.scheduledInvokers.size());</span>
+					}
+				}
+<span class="nc" id="L777">			}</span>
+		}
+<span class="nc" id="L779">	}</span>
+
+	/**
+	 * Determine whether the current invoker should be rescheduled,
+	 * given that it might not have received a message in a while.
+	 * @param idleTaskExecutionCount the number of idle executions
+	 * that this invoker task has already accumulated (in a row)
+	 */
+	private boolean shouldRescheduleInvoker(int idleTaskExecutionCount) {
+<span class="nc bnc" id="L788" title="All 2 branches missed.">		boolean superfluous =</span>
+<span class="nc bnc" id="L789" title="All 2 branches missed.">				(idleTaskExecutionCount &gt;= this.idleTaskExecutionLimit &amp;&amp; getIdleInvokerCount() &gt; 1);</span>
+<span class="nc bnc" id="L790" title="All 4 branches missed.">		return (this.scheduledInvokers.size() &lt;=</span>
+				(superfluous ? this.concurrentConsumers : this.maxConcurrentConsumers));
+	}
+
+	/**
+	 * Determine whether this listener container currently has more
+	 * than one idle instance among its scheduled invokers.
+	 */
+	private int getIdleInvokerCount() {
+<span class="nc" id="L799">		int count = 0;</span>
+<span class="nc bnc" id="L800" title="All 2 branches missed.">		for (AsyncMessageListenerInvoker invoker : this.scheduledInvokers) {</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">			if (invoker.isIdle()) {</span>
+<span class="nc" id="L802">				count++;</span>
+			}
+<span class="nc" id="L804">		}</span>
+<span class="nc" id="L805">		return count;</span>
+	}
+
+
+	/**
+	 * Overridden to accept a failure in the initial setup - leaving it up to the
+	 * asynchronous invokers to establish the shared Connection on first access.
+	 * @see #refreshConnectionUntilSuccessful()
+	 */
+	@Override
+	protected void establishSharedConnection() {
+		try {
+<span class="fc" id="L817">			super.establishSharedConnection();</span>
+		}
+<span class="nc" id="L819">		catch (Exception ex) {</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">			if (ex instanceof JMSException) {</span>
+<span class="nc" id="L821">				invokeExceptionListener((JMSException) ex);</span>
+			}
+<span class="nc" id="L823">			logger.debug(&quot;Could not establish shared JMS Connection - &quot; +</span>
+					&quot;leaving it up to asynchronous invokers to establish a Connection as soon as possible&quot;, ex);
+<span class="fc" id="L825">		}</span>
+<span class="fc" id="L826">	}</span>
+
+	/**
+	 * This implementations proceeds even after an exception thrown from
+	 * {@code Connection.start()}, relying on listeners to perform
+	 * appropriate recovery.
+	 */
+	@Override
+	protected void startSharedConnection() {
+		try {
+<span class="fc" id="L836">			super.startSharedConnection();</span>
+		}
+<span class="nc" id="L838">		catch (Exception ex) {</span>
+<span class="nc" id="L839">			logger.debug(&quot;Connection start failed - relying on listeners to perform recovery&quot;, ex);</span>
+<span class="fc" id="L840">		}</span>
+<span class="fc" id="L841">	}</span>
+
+	/**
+	 * This implementations proceeds even after an exception thrown from
+	 * {@code Connection.stop()}, relying on listeners to perform
+	 * appropriate recovery after a restart.
+	 */
+	@Override
+	protected void stopSharedConnection() {
+		try {
+<span class="fc" id="L851">			super.stopSharedConnection();</span>
+		}
+<span class="nc" id="L853">		catch (Exception ex) {</span>
+<span class="nc" id="L854">			logger.debug(&quot;Connection stop failed - relying on listeners to perform recovery after restart&quot;, ex);</span>
+<span class="fc" id="L855">		}</span>
+<span class="fc" id="L856">	}</span>
+
+	/**
+	 * Handle the given exception that arose during setup of a listener.
+	 * Called for every such exception in every concurrent listener.
+	 * &lt;p&gt;The default implementation logs the exception at warn level
+	 * if not recovered yet, and at debug level if already recovered.
+	 * Can be overridden in subclasses.
+	 * @param ex the exception to handle
+	 * @param alreadyRecovered whether a previously executing listener
+	 * already recovered from the present listener setup failure
+	 * (this usually indicates a follow-up failure than can be ignored
+	 * other than for debug log purposes)
+	 * @see #recoverAfterListenerSetupFailure()
+	 */
+	protected void handleListenerSetupFailure(Throwable ex, boolean alreadyRecovered) {
+<span class="nc bnc" id="L872" title="All 2 branches missed.">		if (ex instanceof JMSException) {</span>
+<span class="nc" id="L873">			invokeExceptionListener((JMSException) ex);</span>
+		}
+<span class="nc bnc" id="L875" title="All 2 branches missed.">		if (ex instanceof SharedConnectionNotInitializedException) {</span>
+<span class="nc bnc" id="L876" title="All 2 branches missed.">			if (!alreadyRecovered) {</span>
+<span class="nc" id="L877">				logger.debug(&quot;JMS message listener invoker needs to establish shared Connection&quot;);</span>
+			}
+		}
+		else {
+			// Recovery during active operation..
+<span class="nc bnc" id="L882" title="All 2 branches missed.">			if (alreadyRecovered) {</span>
+<span class="nc" id="L883">				logger.debug(&quot;Setup of JMS message listener invoker failed - already recovered by other invoker&quot;, ex);</span>
+			}
+			else {
+<span class="nc" id="L886">				StringBuilder msg = new StringBuilder();</span>
+<span class="nc" id="L887">				msg.append(&quot;Setup of JMS message listener invoker failed for destination '&quot;);</span>
+<span class="nc" id="L888">				msg.append(getDestinationDescription()).append(&quot;' - trying to recover. Cause: &quot;);</span>
+<span class="nc bnc" id="L889" title="All 2 branches missed.">				msg.append(ex instanceof JMSException ? JmsUtils.buildExceptionMessage((JMSException) ex) : ex.getMessage());</span>
+<span class="nc bnc" id="L890" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L891">					logger.warn(msg, ex);</span>
+				}
+				else {
+<span class="nc" id="L894">					logger.warn(msg);</span>
+				}
+			}
+		}
+<span class="nc" id="L898">	}</span>
+
+	/**
+	 * Recover this listener container after a listener failed to set itself up,
+	 * for example re-establishing the underlying Connection.
+	 * &lt;p&gt;The default implementation delegates to DefaultMessageListenerContainer's
+	 * recovery-capable {@link #refreshConnectionUntilSuccessful()} method, which will
+	 * try to re-establish a Connection to the JMS provider both for the shared
+	 * and the non-shared Connection case.
+	 * @see #refreshConnectionUntilSuccessful()
+	 * @see #refreshDestination()
+	 */
+	protected void recoverAfterListenerSetupFailure() {
+<span class="nc" id="L911">		this.recovering = true;</span>
+		try {
+<span class="nc" id="L913">			refreshConnectionUntilSuccessful();</span>
+<span class="nc" id="L914">			refreshDestination();</span>
+		}
+		finally {
+<span class="nc" id="L917">			this.recovering = false;</span>
+<span class="nc" id="L918">			this.interrupted = false;</span>
+		}
+<span class="nc" id="L920">	}</span>
+
+	/**
+	 * Refresh the underlying Connection, not returning before an attempt has been
+	 * successful. Called in case of a shared Connection as well as without shared
+	 * Connection, so either needs to operate on the shared Connection or on a
+	 * temporary Connection that just gets established for validation purposes.
+	 * &lt;p&gt;The default implementation retries until it successfully established a
+	 * Connection, for as long as this message listener container is running.
+	 * Applies the specified recovery interval between retries.
+	 * @see #setRecoveryInterval
+	 * @see #start()
+	 * @see #stop()
+	 */
+	protected void refreshConnectionUntilSuccessful() {
+<span class="fc" id="L935">		BackOffExecution execution = this.backOff.start();</span>
+<span class="fc bfc" id="L936" title="All 2 branches covered.">		while (isRunning()) {</span>
+			try {
+<span class="pc bpc" id="L938" title="1 of 2 branches missed.">				if (sharedConnectionEnabled()) {</span>
+<span class="nc" id="L939">					refreshSharedConnection();</span>
+				}
+				else {
+<span class="fc" id="L942">					Connection con = createConnection();</span>
+<span class="fc" id="L943">					JmsUtils.closeConnection(con);</span>
+				}
+<span class="fc" id="L945">				logger.debug(&quot;Successfully refreshed JMS Connection&quot;);</span>
+<span class="fc" id="L946">				break;</span>
+			}
+<span class="fc" id="L948">			catch (Exception ex) {</span>
+<span class="pc bpc" id="L949" title="1 of 2 branches missed.">				if (ex instanceof JMSException) {</span>
+<span class="fc" id="L950">					invokeExceptionListener((JMSException) ex);</span>
+				}
+<span class="fc" id="L952">				StringBuilder msg = new StringBuilder();</span>
+<span class="fc" id="L953">				msg.append(&quot;Could not refresh JMS Connection for destination '&quot;);</span>
+<span class="fc" id="L954">				msg.append(getDestinationDescription()).append(&quot;' - retrying using &quot;);</span>
+<span class="fc" id="L955">				msg.append(execution).append(&quot;. Cause: &quot;);</span>
+<span class="pc bpc" id="L956" title="1 of 2 branches missed.">				msg.append(ex instanceof JMSException ? JmsUtils.buildExceptionMessage((JMSException) ex) : ex.getMessage());</span>
+<span class="pc bpc" id="L957" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L958">					logger.error(msg, ex);</span>
+				}
+				else {
+<span class="fc" id="L961">					logger.error(msg);</span>
+				}
+			}
+<span class="fc bfc" id="L964" title="All 2 branches covered.">			if (!applyBackOffTime(execution)) {</span>
+<span class="fc" id="L965">				StringBuilder msg = new StringBuilder();</span>
+<span class="fc" id="L966">				msg.append(&quot;Stopping container for destination '&quot;)</span>
+<span class="fc" id="L967">						.append(getDestinationDescription())</span>
+<span class="fc" id="L968">						.append(&quot;': back-off policy does not allow &quot;).append(&quot;for further attempts.&quot;);</span>
+<span class="fc" id="L969">				logger.error(msg.toString());</span>
+<span class="fc" id="L970">				stop();</span>
+<span class="fc" id="L971">			}</span>
+		}
+<span class="fc" id="L973">	}</span>
+
+	/**
+	 * Refresh the JMS destination that this listener container operates on.
+	 * &lt;p&gt;Called after listener setup failure, assuming that a cached Destination
+	 * object might have become invalid (a typical case on WebLogic JMS).
+	 * &lt;p&gt;The default implementation removes the destination from a
+	 * DestinationResolver's cache, in case of a CachingDestinationResolver.
+	 * @see #setDestinationName
+	 * @see org.springframework.jms.support.destination.CachingDestinationResolver
+	 */
+	protected void refreshDestination() {
+<span class="nc" id="L985">		String destName = getDestinationName();</span>
+<span class="nc bnc" id="L986" title="All 2 branches missed.">		if (destName != null) {</span>
+<span class="nc" id="L987">			DestinationResolver destResolver = getDestinationResolver();</span>
+<span class="nc bnc" id="L988" title="All 2 branches missed.">			if (destResolver instanceof CachingDestinationResolver) {</span>
+<span class="nc" id="L989">				((CachingDestinationResolver) destResolver).removeFromCache(destName);</span>
+			}
+		}
+<span class="nc" id="L992">	}</span>
+
+	/**
+	 * Apply the next back-off time using the specified {@link BackOffExecution}.
+	 * &lt;p&gt;Return {@code true} if the back-off period has been applied and a new
+	 * attempt to recover should be made, {@code false} if no further attempt
+	 * should be made.
+	 * @since 4.1
+	 */
+	protected boolean applyBackOffTime(BackOffExecution execution) {
+<span class="pc bpc" id="L1002" title="3 of 4 branches missed.">		if (this.recovering &amp;&amp; this.interrupted) {</span>
+			// Interrupted right before and still failing... give up.
+<span class="nc" id="L1004">			return false;</span>
+		}
+<span class="fc" id="L1006">		long interval = execution.nextBackOff();</span>
+<span class="fc bfc" id="L1007" title="All 2 branches covered.">		if (interval == BackOffExecution.STOP) {</span>
+<span class="fc" id="L1008">			return false;</span>
+		}
+		else {
+			try {
+<span class="fc" id="L1012">				synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L1013">					this.lifecycleMonitor.wait(interval);</span>
+<span class="fc" id="L1014">				}</span>
+			}
+<span class="nc" id="L1016">			catch (InterruptedException interEx) {</span>
+				// Re-interrupt current thread, to allow other threads to react.
+<span class="nc" id="L1018">				Thread.currentThread().interrupt();</span>
+<span class="nc bnc" id="L1019" title="All 2 branches missed.">				if (this.recovering) {</span>
+<span class="nc" id="L1020">					this.interrupted = true;</span>
+				}
+<span class="fc" id="L1022">			}</span>
+<span class="fc" id="L1023">			return true;</span>
+		}
+	}
+
+	/**
+	 * Return whether this listener container is currently in a recovery attempt.
+	 * &lt;p&gt;May be used to detect recovery phases but also the end of a recovery phase,
+	 * with {@code isRecovering()} switching to {@code false} after having been found
+	 * to return {@code true} before.
+	 * @see #recoverAfterListenerSetupFailure()
+	 */
+	public final boolean isRecovering() {
+<span class="nc" id="L1035">		return this.recovering;</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Inner classes used as internal adapters
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Runnable that performs looped {@code MessageConsumer.receive()} calls.
+	 */
+<span class="fc" id="L1046">	private class AsyncMessageListenerInvoker implements SchedulingAwareRunnable {</span>
+
+		@Nullable
+		private Session session;
+
+		@Nullable
+		private MessageConsumer consumer;
+
+		@Nullable
+		private Object lastRecoveryMarker;
+
+		private boolean lastMessageSucceeded;
+
+<span class="fc" id="L1059">		private int idleTaskExecutionCount = 0;</span>
+
+<span class="fc" id="L1061">		private volatile boolean idle = true;</span>
+
+		@Nullable
+		private volatile Thread currentReceiveThread;
+
+		@Override
+		public void run() {
+<span class="fc" id="L1068">			synchronized (lifecycleMonitor) {</span>
+<span class="fc" id="L1069">				activeInvokerCount++;</span>
+<span class="fc" id="L1070">				lifecycleMonitor.notifyAll();</span>
+<span class="fc" id="L1071">			}</span>
+<span class="fc" id="L1072">			boolean messageReceived = false;</span>
+			try {
+<span class="pc bpc" id="L1074" title="1 of 2 branches missed.">				if (maxMessagesPerTask &lt; 0) {</span>
+<span class="nc" id="L1075">					messageReceived = executeOngoingLoop();</span>
+				}
+				else {
+<span class="nc" id="L1078">					int messageCount = 0;</span>
+<span class="nc bnc" id="L1079" title="All 4 branches missed.">					while (isRunning() &amp;&amp; messageCount &lt; maxMessagesPerTask) {</span>
+<span class="nc bnc" id="L1080" title="All 4 branches missed.">						messageReceived = (invokeListener() || messageReceived);</span>
+<span class="nc" id="L1081">						messageCount++;</span>
+					}
+				}
+			}
+<span class="nc" id="L1085">			catch (Throwable ex) {</span>
+<span class="nc" id="L1086">				clearResources();</span>
+<span class="nc bnc" id="L1087" title="All 2 branches missed.">				if (!this.lastMessageSucceeded) {</span>
+					// We failed more than once in a row or on startup -
+					// wait before first recovery attempt.
+<span class="nc" id="L1090">					waitBeforeRecoveryAttempt();</span>
+				}
+<span class="nc" id="L1092">				this.lastMessageSucceeded = false;</span>
+<span class="nc" id="L1093">				boolean alreadyRecovered = false;</span>
+<span class="nc" id="L1094">				synchronized (recoveryMonitor) {</span>
+<span class="nc bnc" id="L1095" title="All 2 branches missed.">					if (this.lastRecoveryMarker == currentRecoveryMarker) {</span>
+<span class="nc" id="L1096">						handleListenerSetupFailure(ex, false);</span>
+<span class="nc" id="L1097">						recoverAfterListenerSetupFailure();</span>
+<span class="nc" id="L1098">						currentRecoveryMarker = new Object();</span>
+					}
+					else {
+<span class="nc" id="L1101">						alreadyRecovered = true;</span>
+					}
+<span class="nc" id="L1103">				}</span>
+<span class="nc bnc" id="L1104" title="All 2 branches missed.">				if (alreadyRecovered) {</span>
+<span class="nc" id="L1105">					handleListenerSetupFailure(ex, true);</span>
+				}
+			}
+			finally {
+<span class="nc" id="L1109">				synchronized (lifecycleMonitor) {</span>
+<span class="nc" id="L1110">					decreaseActiveInvokerCount();</span>
+<span class="nc" id="L1111">					lifecycleMonitor.notifyAll();</span>
+<span class="nc" id="L1112">				}</span>
+<span class="nc bnc" id="L1113" title="All 2 branches missed.">				if (!messageReceived) {</span>
+<span class="nc" id="L1114">					this.idleTaskExecutionCount++;</span>
+				}
+				else {
+<span class="nc" id="L1117">					this.idleTaskExecutionCount = 0;</span>
+				}
+<span class="nc" id="L1119">				synchronized (lifecycleMonitor) {</span>
+<span class="nc bnc" id="L1120" title="All 4 branches missed.">					if (!shouldRescheduleInvoker(this.idleTaskExecutionCount) || !rescheduleTaskIfNecessary(this)) {</span>
+						// We're shutting down completely.
+<span class="nc" id="L1122">						scheduledInvokers.remove(this);</span>
+<span class="nc bnc" id="L1123" title="All 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1124">							logger.debug(&quot;Lowered scheduled invoker count: &quot; + scheduledInvokers.size());</span>
+						}
+<span class="nc" id="L1126">						lifecycleMonitor.notifyAll();</span>
+<span class="nc" id="L1127">						clearResources();</span>
+					}
+<span class="nc bnc" id="L1129" title="All 2 branches missed.">					else if (isRunning()) {</span>
+<span class="nc" id="L1130">						int nonPausedConsumers = getScheduledConsumerCount() - getPausedTaskCount();</span>
+<span class="nc bnc" id="L1131" title="All 2 branches missed.">						if (nonPausedConsumers &lt; 1) {</span>
+<span class="nc" id="L1132">							logger.error(&quot;All scheduled consumers have been paused, probably due to tasks having been rejected. &quot; +</span>
+									&quot;Check your thread pool configuration! Manual recovery necessary through a start() call.&quot;);
+						}
+<span class="nc bnc" id="L1135" title="All 2 branches missed.">						else if (nonPausedConsumers &lt; getConcurrentConsumers()) {</span>
+<span class="nc" id="L1136">							logger.warn(&quot;Number of scheduled consumers has dropped below concurrentConsumers limit, probably &quot; +</span>
+									&quot;due to tasks having been rejected. Check your thread pool configuration! Automatic recovery &quot; +
+									&quot;to be triggered by remaining consumers.&quot;);
+						}
+					}
+<span class="nc" id="L1141">				}</span>
+			}
+<span class="nc" id="L1143">		}</span>
+
+		private boolean executeOngoingLoop() throws JMSException {
+<span class="fc" id="L1146">			boolean messageReceived = false;</span>
+<span class="fc" id="L1147">			boolean active = true;</span>
+<span class="pc bpc" id="L1148" title="1 of 2 branches missed.">			while (active) {</span>
+<span class="fc" id="L1149">				synchronized (lifecycleMonitor) {</span>
+<span class="fc" id="L1150">					boolean interrupted = false;</span>
+<span class="fc" id="L1151">					boolean wasWaiting = false;</span>
+<span class="pc bpc" id="L1152" title="2 of 4 branches missed.">					while ((active = isActive()) &amp;&amp; !isRunning()) {</span>
+<span class="pc bpc" id="L1153" title="1 of 2 branches missed.">						if (interrupted) {</span>
+<span class="nc" id="L1154">							throw new IllegalStateException(&quot;Thread was interrupted while waiting for &quot; +</span>
+									&quot;a restart of the listener container, but container is still stopped&quot;);
+						}
+<span class="pc bpc" id="L1157" title="1 of 2 branches missed.">						if (!wasWaiting) {</span>
+<span class="fc" id="L1158">							decreaseActiveInvokerCount();</span>
+						}
+<span class="fc" id="L1160">						wasWaiting = true;</span>
+						try {
+<span class="nc" id="L1162">							lifecycleMonitor.wait();</span>
+						}
+<span class="nc" id="L1164">						catch (InterruptedException ex) {</span>
+							// Re-interrupt current thread, to allow other threads to react.
+<span class="nc" id="L1166">							Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1167">							interrupted = true;</span>
+<span class="nc" id="L1168">						}</span>
+					}
+<span class="nc bnc" id="L1170" title="All 2 branches missed.">					if (wasWaiting) {</span>
+<span class="nc" id="L1171">						activeInvokerCount++;</span>
+					}
+<span class="nc bnc" id="L1173" title="All 2 branches missed.">					if (scheduledInvokers.size() &gt; maxConcurrentConsumers) {</span>
+<span class="nc" id="L1174">						active = false;</span>
+					}
+<span class="nc" id="L1176">				}</span>
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">				if (active) {</span>
+<span class="nc bnc" id="L1178" title="All 4 branches missed.">					messageReceived = (invokeListener() || messageReceived);</span>
+				}
+			}
+<span class="nc" id="L1181">			return messageReceived;</span>
+		}
+
+		private boolean invokeListener() throws JMSException {
+<span class="nc" id="L1185">			this.currentReceiveThread = Thread.currentThread();</span>
+			try {
+<span class="nc" id="L1187">				initResourcesIfNecessary();</span>
+<span class="nc" id="L1188">				boolean messageReceived = receiveAndExecute(this, this.session, this.consumer);</span>
+<span class="nc" id="L1189">				this.lastMessageSucceeded = true;</span>
+<span class="nc" id="L1190">				return messageReceived;</span>
+			}
+			finally {
+<span class="nc" id="L1193">				this.currentReceiveThread = null;</span>
+			}
+		}
+
+		private void decreaseActiveInvokerCount() {
+<span class="fc" id="L1198">			activeInvokerCount--;</span>
+<span class="pc bpc" id="L1199" title="3 of 4 branches missed.">			if (stopCallback != null &amp;&amp; activeInvokerCount == 0) {</span>
+<span class="nc" id="L1200">				stopCallback.run();</span>
+<span class="nc" id="L1201">				stopCallback = null;</span>
+			}
+<span class="fc" id="L1203">		}</span>
+
+		private void initResourcesIfNecessary() throws JMSException {
+<span class="nc bnc" id="L1206" title="All 2 branches missed.">			if (getCacheLevel() &lt;= CACHE_CONNECTION) {</span>
+<span class="nc" id="L1207">				updateRecoveryMarker();</span>
+			}
+			else {
+<span class="nc bnc" id="L1210" title="All 4 branches missed.">				if (this.session == null &amp;&amp; getCacheLevel() &gt;= CACHE_SESSION) {</span>
+<span class="nc" id="L1211">					updateRecoveryMarker();</span>
+<span class="nc" id="L1212">					this.session = createSession(getSharedConnection());</span>
+				}
+<span class="nc bnc" id="L1214" title="All 4 branches missed.">				if (this.consumer == null &amp;&amp; getCacheLevel() &gt;= CACHE_CONSUMER) {</span>
+<span class="nc" id="L1215">					this.consumer = createListenerConsumer(this.session);</span>
+<span class="nc" id="L1216">					synchronized (lifecycleMonitor) {</span>
+<span class="nc" id="L1217">						registeredWithDestination++;</span>
+<span class="nc" id="L1218">					}</span>
+				}
+			}
+<span class="nc" id="L1221">		}</span>
+
+		private void updateRecoveryMarker() {
+<span class="nc" id="L1224">			synchronized (recoveryMonitor) {</span>
+<span class="nc" id="L1225">				this.lastRecoveryMarker = currentRecoveryMarker;</span>
+<span class="nc" id="L1226">			}</span>
+<span class="nc" id="L1227">		}</span>
+
+		private void interruptIfNecessary() {
+<span class="nc" id="L1230">			Thread currentReceiveThread = this.currentReceiveThread;</span>
+<span class="nc bnc" id="L1231" title="All 4 branches missed.">			if (currentReceiveThread != null &amp;&amp; !currentReceiveThread.isInterrupted()) {</span>
+<span class="nc" id="L1232">				currentReceiveThread.interrupt();</span>
+			}
+<span class="nc" id="L1234">		}</span>
+
+		private void clearResources() {
+<span class="pc bpc" id="L1237" title="1 of 2 branches missed.">			if (sharedConnectionEnabled()) {</span>
+<span class="fc" id="L1238">				synchronized (sharedConnectionMonitor) {</span>
+<span class="fc" id="L1239">					JmsUtils.closeMessageConsumer(this.consumer);</span>
+<span class="fc" id="L1240">					JmsUtils.closeSession(this.session);</span>
+<span class="fc" id="L1241">				}</span>
+			}
+			else {
+<span class="nc" id="L1244">				JmsUtils.closeMessageConsumer(this.consumer);</span>
+<span class="nc" id="L1245">				JmsUtils.closeSession(this.session);</span>
+			}
+<span class="pc bpc" id="L1247" title="1 of 2 branches missed.">			if (this.consumer != null) {</span>
+<span class="nc" id="L1248">				synchronized (lifecycleMonitor) {</span>
+<span class="nc" id="L1249">					registeredWithDestination--;</span>
+<span class="nc" id="L1250">				}</span>
+			}
+<span class="fc" id="L1252">			this.consumer = null;</span>
+<span class="fc" id="L1253">			this.session = null;</span>
+<span class="fc" id="L1254">		}</span>
+
+		/**
+		 * Apply the back-off time once. In a regular scenario, the back-off is only applied if we
+		 * failed to recover with the broker. This additional wait period avoids a burst retry
+		 * scenario when the broker is actually up but something else if failing (i.e. listener
+		 * specific).
+		 */
+		private void waitBeforeRecoveryAttempt() {
+<span class="nc" id="L1263">			BackOffExecution execution = DefaultMessageListenerContainer.this.backOff.start();</span>
+<span class="nc" id="L1264">			applyBackOffTime(execution);</span>
+<span class="nc" id="L1265">		}</span>
+
+		@Override
+		public boolean isLongLived() {
+<span class="nc bnc" id="L1269" title="All 2 branches missed.">			return (maxMessagesPerTask &lt; 0);</span>
+		}
+
+		public void setIdle(boolean idle) {
+<span class="nc" id="L1273">			this.idle = idle;</span>
+<span class="nc" id="L1274">		}</span>
+
+		public boolean isIdle() {
+<span class="nc" id="L1277">			return this.idle;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

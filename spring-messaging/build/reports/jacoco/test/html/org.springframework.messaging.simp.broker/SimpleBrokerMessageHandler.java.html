@@ -1,0 +1,527 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SimpleBrokerMessageHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.broker</a> &gt; <span class="el_source">SimpleBrokerMessageHandler.java</span></div><h1>SimpleBrokerMessageHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.broker;
+
+import java.security.Principal;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledFuture;
+
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.SubscribableChannel;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageType;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.messaging.support.MessageHeaderInitializer;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.util.Assert;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.PathMatcher;
+
+/**
+ * A &quot;simple&quot; message broker that recognizes the message types defined in
+ * {@link SimpMessageType}, keeps track of subscriptions with the help of a
+ * {@link SubscriptionRegistry} and sends messages to subscribers.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 4.0
+ */
+public class SimpleBrokerMessageHandler extends AbstractBrokerMessageHandler {
+
+<span class="fc" id="L52">	private static final byte[] EMPTY_PAYLOAD = new byte[0];</span>
+
+
+	@Nullable
+	private PathMatcher pathMatcher;
+
+	@Nullable
+	private Integer cacheLimit;
+
+<span class="fc" id="L61">	@Nullable</span>
+	private String selectorHeaderName = &quot;selector&quot;;
+
+	@Nullable
+	private TaskScheduler taskScheduler;
+
+	@Nullable
+	private long[] heartbeatValue;
+
+	@Nullable
+	private MessageHeaderInitializer headerInitializer;
+
+
+	private SubscriptionRegistry subscriptionRegistry;
+
+<span class="fc" id="L76">	private final Map&lt;String, SessionInfo&gt; sessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+	@Nullable
+	private ScheduledFuture&lt;?&gt; heartbeatFuture;
+
+
+	/**
+	 * Create a SimpleBrokerMessageHandler instance with the given message channels
+	 * and destination prefixes.
+	 * @param clientInboundChannel the channel for receiving messages from clients (e.g. WebSocket clients)
+	 * @param clientOutboundChannel the channel for sending messages to clients (e.g. WebSocket clients)
+	 * @param brokerChannel the channel for the application to send messages to the broker
+	 * @param destinationPrefixes prefixes to use to filter out messages
+	 */
+	public SimpleBrokerMessageHandler(SubscribableChannel clientInboundChannel, MessageChannel clientOutboundChannel,
+			SubscribableChannel brokerChannel, Collection&lt;String&gt; destinationPrefixes) {
+
+<span class="fc" id="L93">		super(clientInboundChannel, clientOutboundChannel, brokerChannel, destinationPrefixes);</span>
+<span class="fc" id="L94">		this.subscriptionRegistry = new DefaultSubscriptionRegistry();</span>
+<span class="fc" id="L95">	}</span>
+
+
+	/**
+	 * Configure a custom SubscriptionRegistry to use for storing subscriptions.
+	 * &lt;p&gt;&lt;strong&gt;Note&lt;/strong&gt; that when a custom PathMatcher is configured via
+	 * {@link #setPathMatcher}, if the custom registry is not an instance of
+	 * {@link DefaultSubscriptionRegistry}, the provided PathMatcher is not used
+	 * and must be configured directly on the custom registry.
+	 */
+	public void setSubscriptionRegistry(SubscriptionRegistry subscriptionRegistry) {
+<span class="nc" id="L106">		Assert.notNull(subscriptionRegistry, &quot;SubscriptionRegistry must not be null&quot;);</span>
+<span class="nc" id="L107">		this.subscriptionRegistry = subscriptionRegistry;</span>
+<span class="nc" id="L108">		initPathMatcherToUse();</span>
+<span class="nc" id="L109">		initCacheLimitToUse();</span>
+<span class="nc" id="L110">		initSelectorHeaderNameToUse();</span>
+<span class="nc" id="L111">	}</span>
+
+	public SubscriptionRegistry getSubscriptionRegistry() {
+<span class="fc" id="L114">		return this.subscriptionRegistry;</span>
+	}
+
+	/**
+	 * When configured, the given PathMatcher is passed down to the underlying
+	 * SubscriptionRegistry to use for matching destination to subscriptions.
+	 * &lt;p&gt;Default is a standard {@link org.springframework.util.AntPathMatcher}.
+	 * @since 4.1
+	 * @see #setSubscriptionRegistry
+	 * @see DefaultSubscriptionRegistry#setPathMatcher
+	 * @see org.springframework.util.AntPathMatcher
+	 */
+	public void setPathMatcher(@Nullable PathMatcher pathMatcher) {
+<span class="fc" id="L127">		this.pathMatcher = pathMatcher;</span>
+<span class="fc" id="L128">		initPathMatcherToUse();</span>
+<span class="fc" id="L129">	}</span>
+
+	private void initPathMatcherToUse() {
+<span class="pc bpc" id="L132" title="1 of 4 branches missed.">		if (this.pathMatcher != null &amp;&amp; this.subscriptionRegistry instanceof DefaultSubscriptionRegistry) {</span>
+<span class="fc" id="L133">			((DefaultSubscriptionRegistry) this.subscriptionRegistry).setPathMatcher(this.pathMatcher);</span>
+		}
+<span class="fc" id="L135">	}</span>
+
+	/**
+	 * When configured, the specified cache limit is passed down to the
+	 * underlying SubscriptionRegistry, overriding any default there.
+	 * &lt;p&gt;With a standard {@link DefaultSubscriptionRegistry}, the default
+	 * cache limit is 1024.
+	 * @since 4.3.2
+	 * @see #setSubscriptionRegistry
+	 * @see DefaultSubscriptionRegistry#setCacheLimit
+	 * @see DefaultSubscriptionRegistry#DEFAULT_CACHE_LIMIT
+	 */
+	public void setCacheLimit(@Nullable Integer cacheLimit) {
+<span class="fc" id="L148">		this.cacheLimit = cacheLimit;</span>
+<span class="fc" id="L149">		initCacheLimitToUse();</span>
+<span class="fc" id="L150">	}</span>
+
+	private void initCacheLimitToUse() {
+<span class="pc bpc" id="L153" title="1 of 4 branches missed.">		if (this.cacheLimit != null &amp;&amp; this.subscriptionRegistry instanceof DefaultSubscriptionRegistry) {</span>
+<span class="fc" id="L154">			((DefaultSubscriptionRegistry) this.subscriptionRegistry).setCacheLimit(this.cacheLimit);</span>
+		}
+<span class="fc" id="L156">	}</span>
+
+	/**
+	 * Configure the name of a header that a subscription message can have for
+	 * the purpose of filtering messages matched to the subscription. The header
+	 * value is expected to be a Spring EL boolean expression to be applied to
+	 * the headers of messages matched to the subscription.
+	 * &lt;p&gt;For example:
+	 * &lt;pre&gt;
+	 * headers.foo == 'bar'
+	 * &lt;/pre&gt;
+	 * &lt;p&gt;By default this is set to &quot;selector&quot;. You can set it to a different
+	 * name, or to {@code null} to turn off support for a selector header.
+	 * @param selectorHeaderName the name to use for a selector header
+	 * @since 4.3.17
+	 * @see #setSubscriptionRegistry
+	 * @see DefaultSubscriptionRegistry#setSelectorHeaderName(String)
+	 */
+	public void setSelectorHeaderName(@Nullable String selectorHeaderName) {
+<span class="fc" id="L175">		this.selectorHeaderName = selectorHeaderName;</span>
+<span class="fc" id="L176">		initSelectorHeaderNameToUse();</span>
+<span class="fc" id="L177">	}</span>
+
+	private void initSelectorHeaderNameToUse() {
+<span class="pc bpc" id="L180" title="1 of 2 branches missed.">		if (this.subscriptionRegistry instanceof DefaultSubscriptionRegistry) {</span>
+<span class="fc" id="L181">			((DefaultSubscriptionRegistry) this.subscriptionRegistry).setSelectorHeaderName(this.selectorHeaderName);</span>
+		}
+<span class="fc" id="L183">	}</span>
+
+	/**
+	 * Configure the {@link org.springframework.scheduling.TaskScheduler} to
+	 * use for providing heartbeat support. Setting this property also sets the
+	 * {@link #setHeartbeatValue heartbeatValue} to &quot;10000, 10000&quot;.
+	 * &lt;p&gt;By default this is not set.
+	 * @since 4.2
+	 */
+	public void setTaskScheduler(@Nullable TaskScheduler taskScheduler) {
+<span class="fc" id="L193">		this.taskScheduler = taskScheduler;</span>
+<span class="pc bpc" id="L194" title="1 of 4 branches missed.">		if (taskScheduler != null &amp;&amp; this.heartbeatValue == null) {</span>
+<span class="fc" id="L195">			this.heartbeatValue = new long[] {10000, 10000};</span>
+		}
+<span class="fc" id="L197">	}</span>
+
+	/**
+	 * Return the configured TaskScheduler.
+	 * @since 4.2
+	 */
+	@Nullable
+	public TaskScheduler getTaskScheduler() {
+<span class="nc" id="L205">		return this.taskScheduler;</span>
+	}
+
+	/**
+	 * Configure the value for the heart-beat settings. The first number
+	 * represents how often the server will write or send a heartbeat.
+	 * The second is how often the client should write. 0 means no heartbeats.
+	 * &lt;p&gt;By default this is set to &quot;0, 0&quot; unless the {@link #setTaskScheduler
+	 * taskScheduler} in which case the default becomes &quot;10000,10000&quot;
+	 * (in milliseconds).
+	 * @since 4.2
+	 */
+	public void setHeartbeatValue(@Nullable long[] heartbeat) {
+<span class="pc bpc" id="L218" title="4 of 8 branches missed.">		if (heartbeat != null &amp;&amp; (heartbeat.length != 2 || heartbeat[0] &lt; 0 || heartbeat[1] &lt; 0)) {</span>
+<span class="nc" id="L219">			throw new IllegalArgumentException(&quot;Invalid heart-beat: &quot; + Arrays.toString(heartbeat));</span>
+		}
+<span class="fc" id="L221">		this.heartbeatValue = heartbeat;</span>
+<span class="fc" id="L222">	}</span>
+
+	/**
+	 * The configured value for the heart-beat settings.
+	 * @since 4.2
+	 */
+	@Nullable
+	public long[] getHeartbeatValue() {
+<span class="fc" id="L230">		return this.heartbeatValue;</span>
+	}
+
+	/**
+	 * Configure a {@link MessageHeaderInitializer} to apply to the headers
+	 * of all messages sent to the client outbound channel.
+	 * &lt;p&gt;By default this property is not set.
+	 * @since 4.1
+	 */
+	public void setHeaderInitializer(@Nullable MessageHeaderInitializer headerInitializer) {
+<span class="nc" id="L240">		this.headerInitializer = headerInitializer;</span>
+<span class="nc" id="L241">	}</span>
+
+	/**
+	 * Return the configured header initializer.
+	 * @since 4.1
+	 */
+	@Nullable
+	public MessageHeaderInitializer getHeaderInitializer() {
+<span class="fc" id="L249">		return this.headerInitializer;</span>
+	}
+
+
+	@Override
+	public void startInternal() {
+<span class="fc" id="L255">		publishBrokerAvailableEvent();</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">		if (this.taskScheduler != null) {</span>
+<span class="fc" id="L257">			long interval = initHeartbeatTaskDelay();</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">			if (interval &gt; 0) {</span>
+<span class="fc" id="L259">				this.heartbeatFuture = this.taskScheduler.scheduleWithFixedDelay(new HeartbeatTask(), interval);</span>
+			}
+<span class="fc" id="L261">		}</span>
+		else {
+<span class="fc bfc" id="L263" title="All 2 branches covered.">			Assert.isTrue(getHeartbeatValue() == null ||</span>
+<span class="pc bpc" id="L264" title="3 of 4 branches missed.">					(getHeartbeatValue()[0] == 0 &amp;&amp; getHeartbeatValue()[1] == 0),</span>
+					&quot;Heartbeat values configured but no TaskScheduler provided&quot;);
+		}
+<span class="fc" id="L267">	}</span>
+
+	private long initHeartbeatTaskDelay() {
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">		if (getHeartbeatValue() == null) {</span>
+<span class="nc" id="L271">			return 0;</span>
+		}
+<span class="fc bfc" id="L273" title="All 4 branches covered.">		else if (getHeartbeatValue()[0] &gt; 0 &amp;&amp; getHeartbeatValue()[1] &gt; 0) {</span>
+<span class="fc" id="L274">			return Math.min(getHeartbeatValue()[0], getHeartbeatValue()[1]);</span>
+		}
+		else {
+<span class="fc bfc" id="L277" title="All 2 branches covered.">			return (getHeartbeatValue()[0] &gt; 0 ? getHeartbeatValue()[0] : getHeartbeatValue()[1]);</span>
+		}
+	}
+
+	@Override
+	public void stopInternal() {
+<span class="fc" id="L283">		publishBrokerUnavailableEvent();</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">		if (this.heartbeatFuture != null) {</span>
+<span class="fc" id="L285">			this.heartbeatFuture.cancel(true);</span>
+		}
+<span class="fc" id="L287">	}</span>
+
+	@Override
+	protected void handleMessageInternal(Message&lt;?&gt; message) {
+<span class="fc" id="L291">		MessageHeaders headers = message.getHeaders();</span>
+<span class="fc" id="L292">		SimpMessageType messageType = SimpMessageHeaderAccessor.getMessageType(headers);</span>
+<span class="fc" id="L293">		String destination = SimpMessageHeaderAccessor.getDestination(headers);</span>
+<span class="fc" id="L294">		String sessionId = SimpMessageHeaderAccessor.getSessionId(headers);</span>
+
+<span class="fc" id="L296">		updateSessionReadTime(sessionId);</span>
+
+<span class="fc bfc" id="L298" title="All 2 branches covered.">		if (!checkDestinationPrefix(destination)) {</span>
+<span class="fc" id="L299">			return;</span>
+		}
+
+<span class="fc bfc" id="L302" title="All 2 branches covered.">		if (SimpMessageType.MESSAGE.equals(messageType)) {</span>
+<span class="fc" id="L303">			logMessage(message);</span>
+<span class="fc" id="L304">			sendMessageToSubscribers(destination, message);</span>
+		}
+<span class="fc bfc" id="L306" title="All 2 branches covered.">		else if (SimpMessageType.CONNECT.equals(messageType)) {</span>
+<span class="fc" id="L307">			logMessage(message);</span>
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">			if (sessionId != null) {</span>
+<span class="fc" id="L309">				long[] heartbeatIn = SimpMessageHeaderAccessor.getHeartbeat(headers);</span>
+<span class="fc" id="L310">				long[] heartbeatOut = getHeartbeatValue();</span>
+<span class="fc" id="L311">				Principal user = SimpMessageHeaderAccessor.getUser(headers);</span>
+<span class="fc" id="L312">				MessageChannel outChannel = getClientOutboundChannelForSession(sessionId);</span>
+<span class="fc" id="L313">				this.sessions.put(sessionId, new SessionInfo(sessionId, user, outChannel, heartbeatIn, heartbeatOut));</span>
+<span class="fc" id="L314">				SimpMessageHeaderAccessor connectAck = SimpMessageHeaderAccessor.create(SimpMessageType.CONNECT_ACK);</span>
+<span class="fc" id="L315">				initHeaders(connectAck);</span>
+<span class="fc" id="L316">				connectAck.setSessionId(sessionId);</span>
+<span class="fc bfc" id="L317" title="All 2 branches covered.">				if (user != null) {</span>
+<span class="fc" id="L318">					connectAck.setUser(user);</span>
+				}
+<span class="fc" id="L320">				connectAck.setHeader(SimpMessageHeaderAccessor.CONNECT_MESSAGE_HEADER, message);</span>
+<span class="fc" id="L321">				connectAck.setHeader(SimpMessageHeaderAccessor.HEART_BEAT_HEADER, heartbeatOut);</span>
+<span class="fc" id="L322">				Message&lt;byte[]&gt; messageOut = MessageBuilder.createMessage(EMPTY_PAYLOAD, connectAck.getMessageHeaders());</span>
+<span class="fc" id="L323">				getClientOutboundChannel().send(messageOut);</span>
+<span class="fc" id="L324">			}</span>
+		}
+<span class="fc bfc" id="L326" title="All 2 branches covered.">		else if (SimpMessageType.DISCONNECT.equals(messageType)) {</span>
+<span class="fc" id="L327">			logMessage(message);</span>
+<span class="pc bpc" id="L328" title="1 of 2 branches missed.">			if (sessionId != null) {</span>
+<span class="fc" id="L329">				Principal user = SimpMessageHeaderAccessor.getUser(headers);</span>
+<span class="fc" id="L330">				handleDisconnect(sessionId, user, message);</span>
+<span class="fc" id="L331">			}</span>
+		}
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">		else if (SimpMessageType.SUBSCRIBE.equals(messageType)) {</span>
+<span class="fc" id="L334">			logMessage(message);</span>
+<span class="fc" id="L335">			this.subscriptionRegistry.registerSubscription(message);</span>
+		}
+<span class="nc bnc" id="L337" title="All 2 branches missed.">		else if (SimpMessageType.UNSUBSCRIBE.equals(messageType)) {</span>
+<span class="nc" id="L338">			logMessage(message);</span>
+<span class="nc" id="L339">			this.subscriptionRegistry.unregisterSubscription(message);</span>
+		}
+<span class="fc" id="L341">	}</span>
+
+	private void updateSessionReadTime(@Nullable String sessionId) {
+<span class="fc bfc" id="L344" title="All 2 branches covered.">		if (sessionId != null) {</span>
+<span class="fc" id="L345">			SessionInfo info = this.sessions.get(sessionId);</span>
+<span class="fc bfc" id="L346" title="All 2 branches covered.">			if (info != null) {</span>
+<span class="fc" id="L347">				info.setLastReadTime(System.currentTimeMillis());</span>
+			}
+		}
+<span class="fc" id="L350">	}</span>
+
+	private void logMessage(Message&lt;?&gt; message) {
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L354">			SimpMessageHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, SimpMessageHeaderAccessor.class);</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">			accessor = (accessor != null ? accessor : SimpMessageHeaderAccessor.wrap(message));</span>
+<span class="nc" id="L356">			logger.debug(&quot;Processing &quot; + accessor.getShortLogMessage(message.getPayload()));</span>
+		}
+<span class="fc" id="L358">	}</span>
+
+	private void initHeaders(SimpMessageHeaderAccessor accessor) {
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">		if (getHeaderInitializer() != null) {</span>
+<span class="nc" id="L362">			getHeaderInitializer().initHeaders(accessor);</span>
+		}
+<span class="fc" id="L364">	}</span>
+
+	private void handleDisconnect(String sessionId, @Nullable Principal user, @Nullable Message&lt;?&gt; origMessage) {
+<span class="fc" id="L367">		this.sessions.remove(sessionId);</span>
+<span class="fc" id="L368">		this.subscriptionRegistry.unregisterAllSubscriptions(sessionId);</span>
+<span class="fc" id="L369">		SimpMessageHeaderAccessor accessor = SimpMessageHeaderAccessor.create(SimpMessageType.DISCONNECT_ACK);</span>
+<span class="fc" id="L370">		accessor.setSessionId(sessionId);</span>
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">		if (user != null) {</span>
+<span class="fc" id="L372">			accessor.setUser(user);</span>
+		}
+<span class="fc bfc" id="L374" title="All 2 branches covered.">		if (origMessage != null) {</span>
+<span class="fc" id="L375">			accessor.setHeader(SimpMessageHeaderAccessor.DISCONNECT_MESSAGE_HEADER, origMessage);</span>
+		}
+<span class="fc" id="L377">		initHeaders(accessor);</span>
+<span class="fc" id="L378">		Message&lt;byte[]&gt; message = MessageBuilder.createMessage(EMPTY_PAYLOAD, accessor.getMessageHeaders());</span>
+<span class="fc" id="L379">		getClientOutboundChannel().send(message);</span>
+<span class="fc" id="L380">	}</span>
+
+	protected void sendMessageToSubscribers(@Nullable String destination, Message&lt;?&gt; message) {
+<span class="fc" id="L383">		MultiValueMap&lt;String,String&gt; subscriptions = this.subscriptionRegistry.findSubscriptions(message);</span>
+<span class="pc bpc" id="L384" title="2 of 4 branches missed.">		if (!subscriptions.isEmpty() &amp;&amp; logger.isDebugEnabled()) {</span>
+<span class="nc" id="L385">			logger.debug(&quot;Broadcasting to &quot; + subscriptions.size() + &quot; sessions.&quot;);</span>
+		}
+<span class="fc" id="L387">		long now = System.currentTimeMillis();</span>
+<span class="fc" id="L388">		subscriptions.forEach((sessionId, subscriptionIds) -&gt; {</span>
+<span class="fc bfc" id="L389" title="All 2 branches covered.">			for (String subscriptionId : subscriptionIds) {</span>
+<span class="fc" id="L390">				SimpMessageHeaderAccessor headerAccessor = SimpMessageHeaderAccessor.create(SimpMessageType.MESSAGE);</span>
+<span class="fc" id="L391">				initHeaders(headerAccessor);</span>
+<span class="fc" id="L392">				headerAccessor.setSessionId(sessionId);</span>
+<span class="fc" id="L393">				headerAccessor.setSubscriptionId(subscriptionId);</span>
+<span class="fc" id="L394">				headerAccessor.copyHeadersIfAbsent(message.getHeaders());</span>
+<span class="fc" id="L395">				headerAccessor.setLeaveMutable(true);</span>
+<span class="fc" id="L396">				Object payload = message.getPayload();</span>
+<span class="fc" id="L397">				Message&lt;?&gt; reply = MessageBuilder.createMessage(payload, headerAccessor.getMessageHeaders());</span>
+<span class="fc" id="L398">				SessionInfo info = this.sessions.get(sessionId);</span>
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">				if (info != null) {</span>
+					try {
+<span class="fc" id="L401">						info.getClientOutboundChannel().send(reply);</span>
+					}
+<span class="nc" id="L403">					catch (Throwable ex) {</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">						if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L405">							logger.error(&quot;Failed to send &quot; + message, ex);</span>
+						}
+					}
+					finally {
+<span class="fc" id="L409">						info.setLastWriteTime(now);</span>
+					}
+				}
+<span class="fc" id="L412">			}</span>
+<span class="fc" id="L413">		});</span>
+<span class="fc" id="L414">	}</span>
+
+	@Override
+	public String toString() {
+<span class="nc" id="L418">		return &quot;SimpleBrokerMessageHandler [&quot; + this.subscriptionRegistry + &quot;]&quot;;</span>
+	}
+
+
+	private static class SessionInfo {
+
+		/* STOMP spec: receiver SHOULD take into account an error margin */
+		private static final long HEARTBEAT_MULTIPLIER = 3;
+
+		private final String sessionId;
+
+		@Nullable
+		private final Principal user;
+
+		private final MessageChannel clientOutboundChannel;
+
+		private final long readInterval;
+
+		private final long writeInterval;
+
+		private volatile long lastReadTime;
+
+		private volatile long lastWriteTime;
+
+
+		public SessionInfo(String sessionId, @Nullable Principal user, MessageChannel outboundChannel,
+<span class="fc" id="L444">				@Nullable long[] clientHeartbeat, @Nullable long[] serverHeartbeat) {</span>
+
+<span class="fc" id="L446">			this.sessionId = sessionId;</span>
+<span class="fc" id="L447">			this.user = user;</span>
+<span class="fc" id="L448">			this.clientOutboundChannel = outboundChannel;</span>
+<span class="fc bfc" id="L449" title="All 4 branches covered.">			if (clientHeartbeat != null &amp;&amp; serverHeartbeat != null) {</span>
+<span class="pc bpc" id="L450" title="1 of 4 branches missed.">				this.readInterval = (clientHeartbeat[0] &gt; 0 &amp;&amp; serverHeartbeat[1] &gt; 0 ?</span>
+<span class="fc" id="L451">						Math.max(clientHeartbeat[0], serverHeartbeat[1]) * HEARTBEAT_MULTIPLIER : 0);</span>
+<span class="pc bpc" id="L452" title="1 of 4 branches missed.">				this.writeInterval = (clientHeartbeat[1] &gt; 0 &amp;&amp; serverHeartbeat[0] &gt; 0 ?</span>
+<span class="fc" id="L453">						Math.max(clientHeartbeat[1], serverHeartbeat[0]) : 0);</span>
+			}
+			else {
+<span class="fc" id="L456">				this.readInterval = 0;</span>
+<span class="fc" id="L457">				this.writeInterval = 0;</span>
+			}
+<span class="fc" id="L459">			this.lastReadTime = this.lastWriteTime = System.currentTimeMillis();</span>
+<span class="fc" id="L460">		}</span>
+
+		public String getSessionId() {
+<span class="fc" id="L463">			return this.sessionId;</span>
+		}
+
+		@Nullable
+		public Principal getUser() {
+<span class="fc" id="L468">			return this.user;</span>
+		}
+
+		public MessageChannel getClientOutboundChannel() {
+<span class="fc" id="L472">			return this.clientOutboundChannel;</span>
+		}
+
+		public long getReadInterval() {
+<span class="fc" id="L476">			return this.readInterval;</span>
+		}
+
+		public long getWriteInterval() {
+<span class="fc" id="L480">			return this.writeInterval;</span>
+		}
+
+		public long getLastReadTime() {
+<span class="fc" id="L484">			return this.lastReadTime;</span>
+		}
+
+		public void setLastReadTime(long lastReadTime) {
+<span class="fc" id="L488">			this.lastReadTime = lastReadTime;</span>
+<span class="fc" id="L489">		}</span>
+
+		public long getLastWriteTime() {
+<span class="fc" id="L492">			return this.lastWriteTime;</span>
+		}
+
+		public void setLastWriteTime(long lastWriteTime) {
+<span class="fc" id="L496">			this.lastWriteTime = lastWriteTime;</span>
+<span class="fc" id="L497">		}</span>
+	}
+
+
+<span class="fc" id="L501">	private class HeartbeatTask implements Runnable {</span>
+
+		@Override
+		public void run() {
+<span class="fc" id="L505">			long now = System.currentTimeMillis();</span>
+<span class="fc bfc" id="L506" title="All 2 branches covered.">			for (SessionInfo info : sessions.values()) {</span>
+<span class="fc bfc" id="L507" title="All 4 branches covered.">				if (info.getReadInterval() &gt; 0 &amp;&amp; (now - info.getLastReadTime()) &gt; info.getReadInterval()) {</span>
+<span class="fc" id="L508">					handleDisconnect(info.getSessionId(), info.getUser(), null);</span>
+				}
+<span class="fc bfc" id="L510" title="All 4 branches covered.">				if (info.getWriteInterval() &gt; 0 &amp;&amp; (now - info.getLastWriteTime()) &gt; info.getWriteInterval()) {</span>
+<span class="fc" id="L511">					SimpMessageHeaderAccessor accessor = SimpMessageHeaderAccessor.create(SimpMessageType.HEARTBEAT);</span>
+<span class="fc" id="L512">					accessor.setSessionId(info.getSessionId());</span>
+<span class="fc" id="L513">					Principal user = info.getUser();</span>
+<span class="pc bpc" id="L514" title="1 of 2 branches missed.">					if (user != null) {</span>
+<span class="fc" id="L515">						accessor.setUser(user);</span>
+					}
+<span class="fc" id="L517">					initHeaders(accessor);</span>
+<span class="fc" id="L518">					accessor.setLeaveMutable(true);</span>
+<span class="fc" id="L519">					MessageHeaders headers = accessor.getMessageHeaders();</span>
+<span class="fc" id="L520">					info.getClientOutboundChannel().send(MessageBuilder.createMessage(EMPTY_PAYLOAD, headers));</span>
+				}
+<span class="fc" id="L522">			}</span>
+<span class="fc" id="L523">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

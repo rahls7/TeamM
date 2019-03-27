@@ -1,0 +1,626 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReloadableResourceBundleMessageSource.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.support</a> &gt; <span class="el_source">ReloadableResourceBundleMessageSource.java</span></div><h1>ReloadableResourceBundleMessageSource.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.support;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.text.MessageFormat;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.springframework.context.ResourceLoaderAware;
+import org.springframework.core.io.DefaultResourceLoader;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.lang.Nullable;
+import org.springframework.util.DefaultPropertiesPersister;
+import org.springframework.util.PropertiesPersister;
+import org.springframework.util.StringUtils;
+
+/**
+ * Spring-specific {@link org.springframework.context.MessageSource} implementation
+ * that accesses resource bundles using specified basenames, participating in the
+ * Spring {@link org.springframework.context.ApplicationContext}'s resource loading.
+ *
+ * &lt;p&gt;In contrast to the JDK-based {@link ResourceBundleMessageSource}, this class uses
+ * {@link java.util.Properties} instances as its custom data structure for messages,
+ * loading them via a {@link org.springframework.util.PropertiesPersister} strategy
+ * from Spring {@link Resource} handles. This strategy is not only capable of
+ * reloading files based on timestamp changes, but also of loading properties files
+ * with a specific character encoding. It will detect XML property files as well.
+ *
+ * &lt;p&gt;Note that the basenames set as {@link #setBasenames &quot;basenames&quot;} property
+ * are treated in a slightly different fashion than the &quot;basenames&quot; property of
+ * {@link ResourceBundleMessageSource}. It follows the basic ResourceBundle rule of not
+ * specifying file extension or language codes, but can refer to any Spring resource
+ * location (instead of being restricted to classpath resources). With a &quot;classpath:&quot;
+ * prefix, resources can still be loaded from the classpath, but &quot;cacheSeconds&quot; values
+ * other than &quot;-1&quot; (caching forever) might not work reliably in this case.
+ *
+ * &lt;p&gt;For a typical web application, message files could be placed in {@code WEB-INF}:
+ * e.g. a &quot;WEB-INF/messages&quot; basename would find a &quot;WEB-INF/messages.properties&quot;,
+ * &quot;WEB-INF/messages_en.properties&quot; etc arrangement as well as &quot;WEB-INF/messages.xml&quot;,
+ * &quot;WEB-INF/messages_en.xml&quot; etc. Note that message definitions in a &lt;i&gt;previous&lt;/i&gt;
+ * resource bundle will override ones in a later bundle, due to sequential lookup.
+
+ * &lt;p&gt;This MessageSource can easily be used outside of an
+ * {@link org.springframework.context.ApplicationContext}: it will use a
+ * {@link org.springframework.core.io.DefaultResourceLoader} as default,
+ * simply getting overridden with the ApplicationContext's resource loader
+ * if running in a context. It does not have any other specific dependencies.
+ *
+ * &lt;p&gt;Thanks to Thomas Achleitner for providing the initial implementation of
+ * this message source!
+ *
+ * @author Juergen Hoeller
+ * @see #setCacheSeconds
+ * @see #setBasenames
+ * @see #setDefaultEncoding
+ * @see #setFileEncodings
+ * @see #setPropertiesPersister
+ * @see #setResourceLoader
+ * @see org.springframework.util.DefaultPropertiesPersister
+ * @see org.springframework.core.io.DefaultResourceLoader
+ * @see ResourceBundleMessageSource
+ * @see java.util.ResourceBundle
+ */
+<span class="fc" id="L88">public class ReloadableResourceBundleMessageSource extends AbstractResourceBasedMessageSource</span>
+		implements ResourceLoaderAware {
+
+	private static final String PROPERTIES_SUFFIX = &quot;.properties&quot;;
+
+	private static final String XML_SUFFIX = &quot;.xml&quot;;
+
+
+	@Nullable
+	private Properties fileEncodings;
+
+<span class="fc" id="L99">	private boolean concurrentRefresh = true;</span>
+
+<span class="fc" id="L101">	private PropertiesPersister propertiesPersister = new DefaultPropertiesPersister();</span>
+
+<span class="fc" id="L103">	private ResourceLoader resourceLoader = new DefaultResourceLoader();</span>
+
+	// Cache to hold filename lists per Locale
+<span class="fc" id="L106">	private final ConcurrentMap&lt;String, Map&lt;Locale, List&lt;String&gt;&gt;&gt; cachedFilenames = new ConcurrentHashMap&lt;&gt;();</span>
+
+	// Cache to hold already loaded properties per filename
+<span class="fc" id="L109">	private final ConcurrentMap&lt;String, PropertiesHolder&gt; cachedProperties = new ConcurrentHashMap&lt;&gt;();</span>
+
+	// Cache to hold already loaded properties per filename
+<span class="fc" id="L112">	private final ConcurrentMap&lt;Locale, PropertiesHolder&gt; cachedMergedProperties = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Set per-file charsets to use for parsing properties files.
+	 * &lt;p&gt;Only applies to classic properties files, not to XML files.
+	 * @param fileEncodings a Properties with filenames as keys and charset
+	 * names as values. Filenames have to match the basename syntax,
+	 * with optional locale-specific components: e.g. &quot;WEB-INF/messages&quot;
+	 * or &quot;WEB-INF/messages_en&quot;.
+	 * @see #setBasenames
+	 * @see org.springframework.util.PropertiesPersister#load
+	 */
+	public void setFileEncodings(Properties fileEncodings) {
+<span class="fc" id="L126">		this.fileEncodings = fileEncodings;</span>
+<span class="fc" id="L127">	}</span>
+
+	/**
+	 * Specify whether to allow for concurrent refresh behavior, i.e. one thread
+	 * locked in a refresh attempt for a specific cached properties file whereas
+	 * other threads keep returning the old properties for the time being, until
+	 * the refresh attempt has completed.
+	 * &lt;p&gt;Default is &quot;true&quot;: this behavior is new as of Spring Framework 4.1,
+	 * minimizing contention between threads. If you prefer the old behavior,
+	 * i.e. to fully block on refresh, switch this flag to &quot;false&quot;.
+	 * @since 4.1
+	 * @see #setCacheSeconds
+	 */
+	public void setConcurrentRefresh(boolean concurrentRefresh) {
+<span class="fc" id="L141">		this.concurrentRefresh = concurrentRefresh;</span>
+<span class="fc" id="L142">	}</span>
+
+	/**
+	 * Set the PropertiesPersister to use for parsing properties files.
+	 * &lt;p&gt;The default is a DefaultPropertiesPersister.
+	 * @see org.springframework.util.DefaultPropertiesPersister
+	 */
+	public void setPropertiesPersister(@Nullable PropertiesPersister propertiesPersister) {
+<span class="nc bnc" id="L150" title="All 2 branches missed.">		this.propertiesPersister =</span>
+				(propertiesPersister != null ? propertiesPersister : new DefaultPropertiesPersister());
+<span class="nc" id="L152">	}</span>
+
+	/**
+	 * Set the ResourceLoader to use for loading bundle properties files.
+	 * &lt;p&gt;The default is a DefaultResourceLoader. Will get overridden by the
+	 * ApplicationContext if running in a context, as it implements the
+	 * ResourceLoaderAware interface. Can be manually overridden when
+	 * running outside of an ApplicationContext.
+	 * @see org.springframework.core.io.DefaultResourceLoader
+	 * @see org.springframework.context.ResourceLoaderAware
+	 */
+	@Override
+	public void setResourceLoader(@Nullable ResourceLoader resourceLoader) {
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">		this.resourceLoader = (resourceLoader != null ? resourceLoader : new DefaultResourceLoader());</span>
+<span class="fc" id="L166">	}</span>
+
+
+	/**
+	 * Resolves the given message code as key in the retrieved bundle files,
+	 * returning the value found in the bundle as-is (without MessageFormat parsing).
+	 */
+	@Override
+	protected String resolveCodeWithoutArguments(String code, Locale locale) {
+<span class="fc bfc" id="L175" title="All 2 branches covered.">		if (getCacheMillis() &lt; 0) {</span>
+<span class="fc" id="L176">			PropertiesHolder propHolder = getMergedProperties(locale);</span>
+<span class="fc" id="L177">			String result = propHolder.getProperty(code);</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">			if (result != null) {</span>
+<span class="fc" id="L179">				return result;</span>
+			}
+<span class="fc" id="L181">		}</span>
+		else {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">			for (String basename : getBasenameSet()) {</span>
+<span class="fc" id="L184">				List&lt;String&gt; filenames = calculateAllFilenames(basename, locale);</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">				for (String filename : filenames) {</span>
+<span class="fc" id="L186">					PropertiesHolder propHolder = getProperties(filename);</span>
+<span class="fc" id="L187">					String result = propHolder.getProperty(code);</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">					if (result != null) {</span>
+<span class="fc" id="L189">						return result;</span>
+					}
+<span class="fc" id="L191">				}</span>
+<span class="nc" id="L192">			}</span>
+		}
+<span class="fc" id="L194">		return null;</span>
+	}
+
+	/**
+	 * Resolves the given message code as key in the retrieved bundle files,
+	 * using a cached MessageFormat instance per message code.
+	 */
+	@Override
+	@Nullable
+	protected MessageFormat resolveCode(String code, Locale locale) {
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">		if (getCacheMillis() &lt; 0) {</span>
+<span class="fc" id="L205">			PropertiesHolder propHolder = getMergedProperties(locale);</span>
+<span class="fc" id="L206">			MessageFormat result = propHolder.getMessageFormat(code, locale);</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">			if (result != null) {</span>
+<span class="fc" id="L208">				return result;</span>
+			}
+<span class="fc" id="L210">		}</span>
+		else {
+<span class="nc bnc" id="L212" title="All 2 branches missed.">			for (String basename : getBasenameSet()) {</span>
+<span class="nc" id="L213">				List&lt;String&gt; filenames = calculateAllFilenames(basename, locale);</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">				for (String filename : filenames) {</span>
+<span class="nc" id="L215">					PropertiesHolder propHolder = getProperties(filename);</span>
+<span class="nc" id="L216">					MessageFormat result = propHolder.getMessageFormat(code, locale);</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">					if (result != null) {</span>
+<span class="nc" id="L218">						return result;</span>
+					}
+<span class="nc" id="L220">				}</span>
+<span class="nc" id="L221">			}</span>
+		}
+<span class="fc" id="L223">		return null;</span>
+	}
+
+
+	/**
+	 * Get a PropertiesHolder that contains the actually visible properties
+	 * for a Locale, after merging all specified resource bundles.
+	 * Either fetches the holder from the cache or freshly loads it.
+	 * &lt;p&gt;Only used when caching resource bundle contents forever, i.e.
+	 * with cacheSeconds &lt; 0. Therefore, merged properties are always
+	 * cached forever.
+	 */
+	protected PropertiesHolder getMergedProperties(Locale locale) {
+<span class="fc" id="L236">		PropertiesHolder mergedHolder = this.cachedMergedProperties.get(locale);</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">		if (mergedHolder != null) {</span>
+<span class="fc" id="L238">			return mergedHolder;</span>
+		}
+<span class="fc" id="L240">		Properties mergedProps = newProperties();</span>
+<span class="fc" id="L241">		long latestTimestamp = -1;</span>
+<span class="fc" id="L242">		String[] basenames = StringUtils.toStringArray(getBasenameSet());</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">		for (int i = basenames.length - 1; i &gt;= 0; i--) {</span>
+<span class="fc" id="L244">			List&lt;String&gt; filenames = calculateAllFilenames(basenames[i], locale);</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">			for (int j = filenames.size() - 1; j &gt;= 0; j--) {</span>
+<span class="fc" id="L246">				String filename = filenames.get(j);</span>
+<span class="fc" id="L247">				PropertiesHolder propHolder = getProperties(filename);</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">				if (propHolder.getProperties() != null) {</span>
+<span class="fc" id="L249">					mergedProps.putAll(propHolder.getProperties());</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">					if (propHolder.getFileTimestamp() &gt; latestTimestamp) {</span>
+<span class="nc" id="L251">						latestTimestamp = propHolder.getFileTimestamp();</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L256">		mergedHolder = new PropertiesHolder(mergedProps, latestTimestamp);</span>
+<span class="fc" id="L257">		PropertiesHolder existing = this.cachedMergedProperties.putIfAbsent(locale, mergedHolder);</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">		if (existing != null) {</span>
+<span class="nc" id="L259">			mergedHolder = existing;</span>
+		}
+<span class="fc" id="L261">		return mergedHolder;</span>
+	}
+
+	/**
+	 * Calculate all filenames for the given bundle basename and Locale.
+	 * Will calculate filenames for the given Locale, the system Locale
+	 * (if applicable), and the default file.
+	 * @param basename the basename of the bundle
+	 * @param locale the locale
+	 * @return the List of filenames to check
+	 * @see #setFallbackToSystemLocale
+	 * @see #calculateFilenamesForLocale
+	 */
+	protected List&lt;String&gt; calculateAllFilenames(String basename, Locale locale) {
+<span class="fc" id="L275">		Map&lt;Locale, List&lt;String&gt;&gt; localeMap = this.cachedFilenames.get(basename);</span>
+<span class="fc bfc" id="L276" title="All 2 branches covered.">		if (localeMap != null) {</span>
+<span class="fc" id="L277">			List&lt;String&gt; filenames = localeMap.get(locale);</span>
+<span class="fc bfc" id="L278" title="All 2 branches covered.">			if (filenames != null) {</span>
+<span class="fc" id="L279">				return filenames;</span>
+			}
+		}
+<span class="fc" id="L282">		List&lt;String&gt; filenames = new ArrayList&lt;&gt;(7);</span>
+<span class="fc" id="L283">		filenames.addAll(calculateFilenamesForLocale(basename, locale));</span>
+<span class="fc bfc" id="L284" title="All 4 branches covered.">		if (isFallbackToSystemLocale() &amp;&amp; !locale.equals(Locale.getDefault())) {</span>
+<span class="fc" id="L285">			List&lt;String&gt; fallbackFilenames = calculateFilenamesForLocale(basename, Locale.getDefault());</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">			for (String fallbackFilename : fallbackFilenames) {</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">				if (!filenames.contains(fallbackFilename)) {</span>
+					// Entry for fallback locale that isn't already in filenames list.
+<span class="fc" id="L289">					filenames.add(fallbackFilename);</span>
+				}
+<span class="fc" id="L291">			}</span>
+		}
+<span class="fc" id="L293">		filenames.add(basename);</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">		if (localeMap == null) {</span>
+<span class="fc" id="L295">			localeMap = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L296">			Map&lt;Locale, List&lt;String&gt;&gt; existing = this.cachedFilenames.putIfAbsent(basename, localeMap);</span>
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">			if (existing != null) {</span>
+<span class="nc" id="L298">				localeMap = existing;</span>
+			}
+		}
+<span class="fc" id="L301">		localeMap.put(locale, filenames);</span>
+<span class="fc" id="L302">		return filenames;</span>
+	}
+
+	/**
+	 * Calculate the filenames for the given bundle basename and Locale,
+	 * appending language code, country code, and variant code.
+	 * E.g.: basename &quot;messages&quot;, Locale &quot;de_AT_oo&quot; -&gt; &quot;messages_de_AT_OO&quot;,
+	 * &quot;messages_de_AT&quot;, &quot;messages_de&quot;.
+	 * &lt;p&gt;Follows the rules defined by {@link java.util.Locale#toString()}.
+	 * @param basename the basename of the bundle
+	 * @param locale the locale
+	 * @return the List of filenames to check
+	 */
+	protected List&lt;String&gt; calculateFilenamesForLocale(String basename, Locale locale) {
+<span class="fc" id="L316">		List&lt;String&gt; result = new ArrayList&lt;&gt;(3);</span>
+<span class="fc" id="L317">		String language = locale.getLanguage();</span>
+<span class="fc" id="L318">		String country = locale.getCountry();</span>
+<span class="fc" id="L319">		String variant = locale.getVariant();</span>
+<span class="fc" id="L320">		StringBuilder temp = new StringBuilder(basename);</span>
+
+<span class="fc" id="L322">		temp.append('_');</span>
+<span class="fc bfc" id="L323" title="All 2 branches covered.">		if (language.length() &gt; 0) {</span>
+<span class="fc" id="L324">			temp.append(language);</span>
+<span class="fc" id="L325">			result.add(0, temp.toString());</span>
+		}
+
+<span class="fc" id="L328">		temp.append('_');</span>
+<span class="fc bfc" id="L329" title="All 2 branches covered.">		if (country.length() &gt; 0) {</span>
+<span class="fc" id="L330">			temp.append(country);</span>
+<span class="fc" id="L331">			result.add(0, temp.toString());</span>
+		}
+
+<span class="fc bfc" id="L334" title="All 6 branches covered.">		if (variant.length() &gt; 0 &amp;&amp; (language.length() &gt; 0 || country.length() &gt; 0)) {</span>
+<span class="fc" id="L335">			temp.append('_').append(variant);</span>
+<span class="fc" id="L336">			result.add(0, temp.toString());</span>
+		}
+
+<span class="fc" id="L339">		return result;</span>
+	}
+
+
+	/**
+	 * Get a PropertiesHolder for the given filename, either from the
+	 * cache or freshly loaded.
+	 * @param filename the bundle filename (basename + Locale)
+	 * @return the current PropertiesHolder for the bundle
+	 */
+	protected PropertiesHolder getProperties(String filename) {
+<span class="fc" id="L350">		PropertiesHolder propHolder = this.cachedProperties.get(filename);</span>
+<span class="fc" id="L351">		long originalTimestamp = -2;</span>
+
+<span class="fc bfc" id="L353" title="All 2 branches covered.">		if (propHolder != null) {</span>
+<span class="fc" id="L354">			originalTimestamp = propHolder.getRefreshTimestamp();</span>
+<span class="fc bfc" id="L355" title="All 4 branches covered.">			if (originalTimestamp == -1 || originalTimestamp &gt; System.currentTimeMillis() - getCacheMillis()) {</span>
+				// Up to date
+<span class="fc" id="L357">				return propHolder;</span>
+			}
+		}
+		else {
+<span class="fc" id="L361">			propHolder = new PropertiesHolder();</span>
+<span class="fc" id="L362">			PropertiesHolder existingHolder = this.cachedProperties.putIfAbsent(filename, propHolder);</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">			if (existingHolder != null) {</span>
+<span class="nc" id="L364">				propHolder = existingHolder;</span>
+			}
+		}
+
+		// At this point, we need to refresh...
+<span class="fc bfc" id="L369" title="All 4 branches covered.">		if (this.concurrentRefresh &amp;&amp; propHolder.getRefreshTimestamp() &gt;= 0) {</span>
+			// A populated but stale holder -&gt; could keep using it.
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">			if (!propHolder.refreshLock.tryLock()) {</span>
+				// Getting refreshed by another thread already -&gt;
+				// let's return the existing properties for the time being.
+<span class="nc" id="L374">				return propHolder;</span>
+			}
+		}
+		else {
+<span class="fc" id="L378">			propHolder.refreshLock.lock();</span>
+		}
+		try {
+<span class="fc" id="L381">			PropertiesHolder existingHolder = this.cachedProperties.get(filename);</span>
+<span class="pc bpc" id="L382" title="2 of 4 branches missed.">			if (existingHolder != null &amp;&amp; existingHolder.getRefreshTimestamp() &gt; originalTimestamp) {</span>
+<span class="nc" id="L383">				return existingHolder;</span>
+			}
+<span class="fc" id="L385">			return refreshProperties(filename, propHolder);</span>
+		}
+		finally {
+<span class="fc" id="L388">			propHolder.refreshLock.unlock();</span>
+		}
+	}
+
+	/**
+	 * Refresh the PropertiesHolder for the given bundle filename.
+	 * The holder can be {@code null} if not cached before, or a timed-out cache entry
+	 * (potentially getting re-validated against the current last-modified timestamp).
+	 * @param filename the bundle filename (basename + Locale)
+	 * @param propHolder the current PropertiesHolder for the bundle
+	 */
+	protected PropertiesHolder refreshProperties(String filename, @Nullable PropertiesHolder propHolder) {
+<span class="fc bfc" id="L400" title="All 2 branches covered.">		long refreshTimestamp = (getCacheMillis() &lt; 0 ? -1 : System.currentTimeMillis());</span>
+
+<span class="fc" id="L402">		Resource resource = this.resourceLoader.getResource(filename + PROPERTIES_SUFFIX);</span>
+<span class="fc bfc" id="L403" title="All 2 branches covered.">		if (!resource.exists()) {</span>
+<span class="fc" id="L404">			resource = this.resourceLoader.getResource(filename + XML_SUFFIX);</span>
+		}
+
+<span class="fc bfc" id="L407" title="All 2 branches covered.">		if (resource.exists()) {</span>
+<span class="fc" id="L408">			long fileTimestamp = -1;</span>
+<span class="fc bfc" id="L409" title="All 2 branches covered.">			if (getCacheMillis() &gt;= 0) {</span>
+				// Last-modified timestamp of file will just be read if caching with timeout.
+				try {
+<span class="fc" id="L412">					fileTimestamp = resource.lastModified();</span>
+<span class="pc bpc" id="L413" title="1 of 4 branches missed.">					if (propHolder != null &amp;&amp; propHolder.getFileTimestamp() == fileTimestamp) {</span>
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L415">							logger.debug(&quot;Re-caching properties for filename [&quot; + filename + &quot;] - file hasn't been modified&quot;);</span>
+						}
+<span class="fc" id="L417">						propHolder.setRefreshTimestamp(refreshTimestamp);</span>
+<span class="fc" id="L418">						return propHolder;</span>
+					}
+				}
+<span class="nc" id="L421">				catch (IOException ex) {</span>
+					// Probably a class path resource: cache it forever.
+<span class="nc bnc" id="L423" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L424">						logger.debug(resource + &quot; could not be resolved in the file system - assuming that it hasn't changed&quot;, ex);</span>
+					}
+<span class="nc" id="L426">					fileTimestamp = -1;</span>
+<span class="fc" id="L427">				}</span>
+			}
+			try {
+<span class="fc" id="L430">				Properties props = loadProperties(resource, filename);</span>
+<span class="fc" id="L431">				propHolder = new PropertiesHolder(props, fileTimestamp);</span>
+			}
+<span class="nc" id="L433">			catch (IOException ex) {</span>
+<span class="nc bnc" id="L434" title="All 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L435">					logger.warn(&quot;Could not parse properties file [&quot; + resource.getFilename() + &quot;]&quot;, ex);</span>
+				}
+				// Empty holder representing &quot;not valid&quot;.
+<span class="nc" id="L438">				propHolder = new PropertiesHolder();</span>
+<span class="fc" id="L439">			}</span>
+<span class="fc" id="L440">		}</span>
+
+		else {
+			// Resource does not exist.
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L445">				logger.debug(&quot;No properties file found for [&quot; + filename + &quot;] - neither plain properties nor XML&quot;);</span>
+			}
+			// Empty holder representing &quot;not found&quot;.
+<span class="fc" id="L448">			propHolder = new PropertiesHolder();</span>
+		}
+
+<span class="fc" id="L451">		propHolder.setRefreshTimestamp(refreshTimestamp);</span>
+<span class="fc" id="L452">		this.cachedProperties.put(filename, propHolder);</span>
+<span class="fc" id="L453">		return propHolder;</span>
+	}
+
+	/**
+	 * Load the properties from the given resource.
+	 * @param resource the resource to load from
+	 * @param filename the original bundle filename (basename + Locale)
+	 * @return the populated Properties instance
+	 * @throws IOException if properties loading failed
+	 */
+	protected Properties loadProperties(Resource resource, String filename) throws IOException {
+<span class="fc" id="L464">		Properties props = newProperties();</span>
+<span class="fc" id="L465">		try (InputStream is = resource.getInputStream()) {</span>
+<span class="fc" id="L466">			String resourceFilename = resource.getFilename();</span>
+<span class="pc bpc" id="L467" title="1 of 4 branches missed.">			if (resourceFilename != null &amp;&amp; resourceFilename.endsWith(XML_SUFFIX)) {</span>
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L469">					logger.debug(&quot;Loading properties [&quot; + resource.getFilename() + &quot;]&quot;);</span>
+				}
+<span class="fc" id="L471">				this.propertiesPersister.loadFromXml(props, is);</span>
+			}
+			else {
+<span class="fc" id="L474">				String encoding = null;</span>
+<span class="fc bfc" id="L475" title="All 2 branches covered.">				if (this.fileEncodings != null) {</span>
+<span class="fc" id="L476">					encoding = this.fileEncodings.getProperty(filename);</span>
+				}
+<span class="fc bfc" id="L478" title="All 2 branches covered.">				if (encoding == null) {</span>
+<span class="fc" id="L479">					encoding = getDefaultEncoding();</span>
+				}
+<span class="fc bfc" id="L481" title="All 2 branches covered.">				if (encoding != null) {</span>
+<span class="pc bpc" id="L482" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L483">						logger.debug(&quot;Loading properties [&quot; + resource.getFilename() + &quot;] with encoding '&quot; + encoding + &quot;'&quot;);</span>
+					}
+<span class="fc" id="L485">					this.propertiesPersister.load(props, new InputStreamReader(is, encoding));</span>
+				}
+				else {
+<span class="pc bpc" id="L488" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L489">						logger.debug(&quot;Loading properties [&quot; + resource.getFilename() + &quot;]&quot;);</span>
+					}
+<span class="fc" id="L491">					this.propertiesPersister.load(props, is);</span>
+				}
+			}
+<span class="fc" id="L494">			return props;</span>
+		}
+	}
+
+	/**
+	 * Template method for creating a plain new {@link Properties} instance.
+	 * The default implementation simply calls {@link Properties#Properties()}.
+	 * &lt;p&gt;Allows for returning a custom {@link Properties} extension in subclasses.
+	 * Overriding methods should just instantiate a custom {@link Properties} subclass,
+	 * with no further initialization or population to be performed at that point.
+	 * @return a plain Properties instance
+	 * @since 4.2
+	 */
+	protected Properties newProperties() {
+<span class="fc" id="L508">		return new Properties();</span>
+	}
+
+
+	/**
+	 * Clear the resource bundle cache.
+	 * Subsequent resolve calls will lead to reloading of the properties files.
+	 */
+	public void clearCache() {
+<span class="nc" id="L517">		logger.debug(&quot;Clearing entire resource bundle cache&quot;);</span>
+<span class="nc" id="L518">		this.cachedProperties.clear();</span>
+<span class="nc" id="L519">		this.cachedMergedProperties.clear();</span>
+<span class="nc" id="L520">	}</span>
+
+	/**
+	 * Clear the resource bundle caches of this MessageSource and all its ancestors.
+	 * @see #clearCache
+	 */
+	public void clearCacheIncludingAncestors() {
+<span class="nc" id="L527">		clearCache();</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">		if (getParentMessageSource() instanceof ReloadableResourceBundleMessageSource) {</span>
+<span class="nc" id="L529">			((ReloadableResourceBundleMessageSource) getParentMessageSource()).clearCacheIncludingAncestors();</span>
+		}
+<span class="nc" id="L531">	}</span>
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L536">		return getClass().getName() + &quot;: basenames=&quot; + getBasenameSet();</span>
+	}
+
+
+	/**
+	 * PropertiesHolder for caching.
+	 * Stores the last-modified timestamp of the source file for efficient
+	 * change detection, and the timestamp of the last refresh attempt
+	 * (updated every time the cache entry gets re-validated).
+	 */
+	protected class PropertiesHolder {
+
+		@Nullable
+		private final Properties properties;
+
+		private final long fileTimestamp;
+
+<span class="fc" id="L553">		private volatile long refreshTimestamp = -2;</span>
+
+<span class="fc" id="L555">		private final ReentrantLock refreshLock = new ReentrantLock();</span>
+
+		/** Cache to hold already generated MessageFormats per message code. */
+<span class="fc" id="L558">		private final ConcurrentMap&lt;String, Map&lt;Locale, MessageFormat&gt;&gt; cachedMessageFormats =</span>
+				new ConcurrentHashMap&lt;&gt;();
+
+<span class="fc" id="L561">		public PropertiesHolder() {</span>
+<span class="fc" id="L562">			this.properties = null;</span>
+<span class="fc" id="L563">			this.fileTimestamp = -1;</span>
+<span class="fc" id="L564">		}</span>
+
+<span class="fc" id="L566">		public PropertiesHolder(Properties properties, long fileTimestamp) {</span>
+<span class="fc" id="L567">			this.properties = properties;</span>
+<span class="fc" id="L568">			this.fileTimestamp = fileTimestamp;</span>
+<span class="fc" id="L569">		}</span>
+
+		@Nullable
+		public Properties getProperties() {
+<span class="fc" id="L573">			return this.properties;</span>
+		}
+
+		public long getFileTimestamp() {
+<span class="fc" id="L577">			return this.fileTimestamp;</span>
+		}
+
+		public void setRefreshTimestamp(long refreshTimestamp) {
+<span class="fc" id="L581">			this.refreshTimestamp = refreshTimestamp;</span>
+<span class="fc" id="L582">		}</span>
+
+		public long getRefreshTimestamp() {
+<span class="fc" id="L585">			return this.refreshTimestamp;</span>
+		}
+
+		@Nullable
+		public String getProperty(String code) {
+<span class="fc bfc" id="L590" title="All 2 branches covered.">			if (this.properties == null) {</span>
+<span class="fc" id="L591">				return null;</span>
+			}
+<span class="fc" id="L593">			return this.properties.getProperty(code);</span>
+		}
+
+		@Nullable
+		public MessageFormat getMessageFormat(String code, Locale locale) {
+<span class="pc bpc" id="L598" title="1 of 2 branches missed.">			if (this.properties == null) {</span>
+<span class="nc" id="L599">				return null;</span>
+			}
+<span class="fc" id="L601">			Map&lt;Locale, MessageFormat&gt; localeMap = this.cachedMessageFormats.get(code);</span>
+<span class="fc bfc" id="L602" title="All 2 branches covered.">			if (localeMap != null) {</span>
+<span class="fc" id="L603">				MessageFormat result = localeMap.get(locale);</span>
+<span class="pc bpc" id="L604" title="1 of 2 branches missed.">				if (result != null) {</span>
+<span class="fc" id="L605">					return result;</span>
+				}
+			}
+<span class="fc" id="L608">			String msg = this.properties.getProperty(code);</span>
+<span class="fc bfc" id="L609" title="All 2 branches covered.">			if (msg != null) {</span>
+<span class="pc bpc" id="L610" title="1 of 2 branches missed.">				if (localeMap == null) {</span>
+<span class="fc" id="L611">					localeMap = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L612">					Map&lt;Locale, MessageFormat&gt; existing = this.cachedMessageFormats.putIfAbsent(code, localeMap);</span>
+<span class="pc bpc" id="L613" title="1 of 2 branches missed.">					if (existing != null) {</span>
+<span class="nc" id="L614">						localeMap = existing;</span>
+					}
+				}
+<span class="fc" id="L617">				MessageFormat result = createMessageFormat(msg, locale);</span>
+<span class="fc" id="L618">				localeMap.put(locale, result);</span>
+<span class="fc" id="L619">				return result;</span>
+			}
+<span class="fc" id="L621">			return null;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

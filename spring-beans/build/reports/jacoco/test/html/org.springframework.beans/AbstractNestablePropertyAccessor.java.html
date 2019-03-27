@@ -1,0 +1,1051 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractNestablePropertyAccessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans</a> &gt; <span class="el_source">AbstractNestablePropertyAccessor.java</span></div><h1>AbstractNestablePropertyAccessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans;
+
+import java.beans.PropertyChangeEvent;
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.UndeclaredThrowableException;
+import java.security.PrivilegedActionException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.CollectionFactory;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.convert.ConversionException;
+import org.springframework.core.convert.ConverterNotFoundException;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * A basic {@link ConfigurablePropertyAccessor} that provides the necessary
+ * infrastructure for all typical use cases.
+ *
+ * &lt;p&gt;This accessor will convert collection and array values to the corresponding
+ * target collections or arrays, if necessary. Custom property editors that deal
+ * with collections or arrays can either be written via PropertyEditor's
+ * {@code setValue}, or against a comma-delimited String via {@code setAsText},
+ * as String arrays are converted in such a format if the array itself is not
+ * assignable.
+ *
+ * @author Juergen Hoeller
+ * @author Stephane Nicoll
+ * @author Rod Johnson
+ * @author Rob Harrop
+ * @since 4.2
+ * @see #registerCustomEditor
+ * @see #setPropertyValues
+ * @see #setPropertyValue
+ * @see #getPropertyValue
+ * @see #getPropertyType
+ * @see BeanWrapper
+ * @see PropertyEditorRegistrySupport
+ */
+public abstract class AbstractNestablePropertyAccessor extends AbstractPropertyAccessor {
+
+	/**
+	 * We'll create a lot of these objects, so we don't want a new logger every time.
+	 */
+<span class="fc" id="L77">	private static final Log logger = LogFactory.getLog(AbstractNestablePropertyAccessor.class);</span>
+
+<span class="pc" id="L79">	private int autoGrowCollectionLimit = Integer.MAX_VALUE;</span>
+
+	@Nullable
+	Object wrappedObject;
+
+<span class="pc" id="L84">	private String nestedPath = &quot;&quot;;</span>
+
+	@Nullable
+	Object rootObject;
+
+	/** Map with cached nested Accessors: nested path -&gt; Accessor instance. */
+	@Nullable
+	private Map&lt;String, AbstractNestablePropertyAccessor&gt; nestedPropertyAccessors;
+
+
+	/**
+	 * Create a new empty accessor. Wrapped instance needs to be set afterwards.
+	 * Registers default editors.
+	 * @see #setWrappedInstance
+	 */
+	protected AbstractNestablePropertyAccessor() {
+<span class="nc" id="L100">		this(true);</span>
+<span class="nc" id="L101">	}</span>
+
+	/**
+	 * Create a new empty accessor. Wrapped instance needs to be set afterwards.
+	 * @param registerDefaultEditors whether to register default editors
+	 * (can be suppressed if the accessor won't need any type conversion)
+	 * @see #setWrappedInstance
+	 */
+<span class="fc" id="L109">	protected AbstractNestablePropertyAccessor(boolean registerDefaultEditors) {</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">		if (registerDefaultEditors) {</span>
+<span class="fc" id="L111">			registerDefaultEditors();</span>
+		}
+<span class="fc" id="L113">		this.typeConverterDelegate = new TypeConverterDelegate(this);</span>
+<span class="fc" id="L114">	}</span>
+
+	/**
+	 * Create a new accessor for the given object.
+	 * @param object object wrapped by this accessor
+	 */
+<span class="fc" id="L120">	protected AbstractNestablePropertyAccessor(Object object) {</span>
+<span class="fc" id="L121">		registerDefaultEditors();</span>
+<span class="fc" id="L122">		setWrappedInstance(object);</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Create a new accessor, wrapping a new instance of the specified class.
+	 * @param clazz class to instantiate and wrap
+	 */
+<span class="fc" id="L129">	protected AbstractNestablePropertyAccessor(Class&lt;?&gt; clazz) {</span>
+<span class="fc" id="L130">		registerDefaultEditors();</span>
+<span class="fc" id="L131">		setWrappedInstance(BeanUtils.instantiateClass(clazz));</span>
+<span class="fc" id="L132">	}</span>
+
+	/**
+	 * Create a new accessor for the given object,
+	 * registering a nested path that the object is in.
+	 * @param object object wrapped by this accessor
+	 * @param nestedPath the nested path of the object
+	 * @param rootObject the root object at the top of the path
+	 */
+<span class="nc" id="L141">	protected AbstractNestablePropertyAccessor(Object object, String nestedPath, Object rootObject) {</span>
+<span class="nc" id="L142">		registerDefaultEditors();</span>
+<span class="nc" id="L143">		setWrappedInstance(object, nestedPath, rootObject);</span>
+<span class="nc" id="L144">	}</span>
+
+	/**
+	 * Create a new accessor for the given object,
+	 * registering a nested path that the object is in.
+	 * @param object object wrapped by this accessor
+	 * @param nestedPath the nested path of the object
+	 * @param parent the containing accessor (must not be {@code null})
+	 */
+<span class="fc" id="L153">	protected AbstractNestablePropertyAccessor(Object object, String nestedPath, AbstractNestablePropertyAccessor parent) {</span>
+<span class="fc" id="L154">		setWrappedInstance(object, nestedPath, parent.getWrappedInstance());</span>
+<span class="fc" id="L155">		setExtractOldValueForEditor(parent.isExtractOldValueForEditor());</span>
+<span class="fc" id="L156">		setAutoGrowNestedPaths(parent.isAutoGrowNestedPaths());</span>
+<span class="fc" id="L157">		setAutoGrowCollectionLimit(parent.getAutoGrowCollectionLimit());</span>
+<span class="fc" id="L158">		setConversionService(parent.getConversionService());</span>
+<span class="fc" id="L159">	}</span>
+
+
+	/**
+	 * Specify a limit for array and collection auto-growing.
+	 * &lt;p&gt;Default is unlimited on a plain accessor.
+	 */
+	public void setAutoGrowCollectionLimit(int autoGrowCollectionLimit) {
+<span class="fc" id="L167">		this.autoGrowCollectionLimit = autoGrowCollectionLimit;</span>
+<span class="fc" id="L168">	}</span>
+
+	/**
+	 * Return the limit for array and collection auto-growing.
+	 */
+	public int getAutoGrowCollectionLimit() {
+<span class="fc" id="L174">		return this.autoGrowCollectionLimit;</span>
+	}
+
+	/**
+	 * Switch the target object, replacing the cached introspection results only
+	 * if the class of the new object is different to that of the replaced object.
+	 * @param object the new target object
+	 */
+	public void setWrappedInstance(Object object) {
+<span class="fc" id="L183">		setWrappedInstance(object, &quot;&quot;, null);</span>
+<span class="fc" id="L184">	}</span>
+
+	/**
+	 * Switch the target object, replacing the cached introspection results only
+	 * if the class of the new object is different to that of the replaced object.
+	 * @param object the new target object
+	 * @param nestedPath the nested path of the object
+	 * @param rootObject the root object at the top of the path
+	 */
+	public void setWrappedInstance(Object object, @Nullable String nestedPath, @Nullable Object rootObject) {
+<span class="fc" id="L194">		this.wrappedObject = ObjectUtils.unwrapOptional(object);</span>
+<span class="fc" id="L195">		Assert.notNull(this.wrappedObject, &quot;Target object must not be null&quot;);</span>
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">		this.nestedPath = (nestedPath != null ? nestedPath : &quot;&quot;);</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">		this.rootObject = (!this.nestedPath.isEmpty() ? rootObject : this.wrappedObject);</span>
+<span class="fc" id="L198">		this.nestedPropertyAccessors = null;</span>
+<span class="fc" id="L199">		this.typeConverterDelegate = new TypeConverterDelegate(this, this.wrappedObject);</span>
+<span class="fc" id="L200">	}</span>
+
+	public final Object getWrappedInstance() {
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">		Assert.state(this.wrappedObject != null, &quot;No wrapped object&quot;);</span>
+<span class="fc" id="L204">		return this.wrappedObject;</span>
+	}
+
+	public final Class&lt;?&gt; getWrappedClass() {
+<span class="fc" id="L208">		return getWrappedInstance().getClass();</span>
+	}
+
+	/**
+	 * Return the nested path of the object wrapped by this accessor.
+	 */
+	public final String getNestedPath() {
+<span class="fc" id="L215">		return this.nestedPath;</span>
+	}
+
+	/**
+	 * Return the root object at the top of the path of this accessor.
+	 * @see #getNestedPath
+	 */
+	public final Object getRootInstance() {
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">		Assert.state(this.rootObject != null, &quot;No root object&quot;);</span>
+<span class="fc" id="L224">		return this.rootObject;</span>
+	}
+
+	/**
+	 * Return the class of the root object at the top of the path of this accessor.
+	 * @see #getNestedPath
+	 */
+	public final Class&lt;?&gt; getRootClass() {
+<span class="fc" id="L232">		return getRootInstance().getClass();</span>
+	}
+
+	@Override
+	public void setPropertyValue(String propertyName, @Nullable Object value) throws BeansException {
+		AbstractNestablePropertyAccessor nestedPa;
+		try {
+<span class="fc" id="L239">			nestedPa = getPropertyAccessorForPropertyPath(propertyName);</span>
+		}
+<span class="nc" id="L241">		catch (NotReadablePropertyException ex) {</span>
+<span class="nc" id="L242">			throw new NotWritablePropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+					&quot;Nested property in path '&quot; + propertyName + &quot;' does not exist&quot;, ex);
+<span class="fc" id="L244">		}</span>
+<span class="fc" id="L245">		PropertyTokenHolder tokens = getPropertyNameTokens(getFinalPath(nestedPa, propertyName));</span>
+<span class="fc" id="L246">		nestedPa.setPropertyValue(tokens, new PropertyValue(propertyName, value));</span>
+<span class="fc" id="L247">	}</span>
+
+	@Override
+	public void setPropertyValue(PropertyValue pv) throws BeansException {
+<span class="fc" id="L251">		PropertyTokenHolder tokens = (PropertyTokenHolder) pv.resolvedTokens;</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">		if (tokens == null) {</span>
+<span class="fc" id="L253">			String propertyName = pv.getName();</span>
+			AbstractNestablePropertyAccessor nestedPa;
+			try {
+<span class="fc" id="L256">				nestedPa = getPropertyAccessorForPropertyPath(propertyName);</span>
+			}
+<span class="fc" id="L258">			catch (NotReadablePropertyException ex) {</span>
+<span class="fc" id="L259">				throw new NotWritablePropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+						&quot;Nested property in path '&quot; + propertyName + &quot;' does not exist&quot;, ex);
+<span class="fc" id="L261">			}</span>
+<span class="fc" id="L262">			tokens = getPropertyNameTokens(getFinalPath(nestedPa, propertyName));</span>
+<span class="fc bfc" id="L263" title="All 2 branches covered.">			if (nestedPa == this) {</span>
+<span class="fc" id="L264">				pv.getOriginalPropertyValue().resolvedTokens = tokens;</span>
+			}
+<span class="fc" id="L266">			nestedPa.setPropertyValue(tokens, pv);</span>
+<span class="fc" id="L267">		}</span>
+		else {
+<span class="fc" id="L269">			setPropertyValue(tokens, pv);</span>
+		}
+<span class="fc" id="L271">	}</span>
+
+	protected void setPropertyValue(PropertyTokenHolder tokens, PropertyValue pv) throws BeansException {
+<span class="fc bfc" id="L274" title="All 2 branches covered.">		if (tokens.keys != null) {</span>
+<span class="fc" id="L275">			processKeyedProperty(tokens, pv);</span>
+		}
+		else {
+<span class="fc" id="L278">			processLocalProperty(tokens, pv);</span>
+		}
+<span class="fc" id="L280">	}</span>
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private void processKeyedProperty(PropertyTokenHolder tokens, PropertyValue pv) {
+<span class="fc" id="L284">		Object propValue = getPropertyHoldingValue(tokens);</span>
+<span class="fc" id="L285">		PropertyHandler ph = getLocalPropertyHandler(tokens.actualName);</span>
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">		if (ph == null) {</span>
+<span class="nc" id="L287">			throw new InvalidPropertyException(</span>
+<span class="nc" id="L288">					getRootClass(), this.nestedPath + tokens.actualName, &quot;No property handler found&quot;);</span>
+		}
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">		Assert.state(tokens.keys != null, &quot;No token keys&quot;);</span>
+<span class="fc" id="L291">		String lastKey = tokens.keys[tokens.keys.length - 1];</span>
+
+<span class="fc bfc" id="L293" title="All 2 branches covered.">		if (propValue.getClass().isArray()) {</span>
+<span class="fc" id="L294">			Class&lt;?&gt; requiredType = propValue.getClass().getComponentType();</span>
+<span class="fc" id="L295">			int arrayIndex = Integer.parseInt(lastKey);</span>
+<span class="fc" id="L296">			Object oldValue = null;</span>
+			try {
+<span class="pc bpc" id="L298" title="3 of 4 branches missed.">				if (isExtractOldValueForEditor() &amp;&amp; arrayIndex &lt; Array.getLength(propValue)) {</span>
+<span class="nc" id="L299">					oldValue = Array.get(propValue, arrayIndex);</span>
+				}
+<span class="fc" id="L301">				Object convertedValue = convertIfNecessary(tokens.canonicalName, oldValue, pv.getValue(),</span>
+<span class="fc" id="L302">						requiredType, ph.nested(tokens.keys.length));</span>
+<span class="fc" id="L303">				int length = Array.getLength(propValue);</span>
+<span class="pc bpc" id="L304" title="1 of 4 branches missed.">				if (arrayIndex &gt;= length &amp;&amp; arrayIndex &lt; this.autoGrowCollectionLimit) {</span>
+<span class="fc" id="L305">					Class&lt;?&gt; componentType = propValue.getClass().getComponentType();</span>
+<span class="fc" id="L306">					Object newArray = Array.newInstance(componentType, arrayIndex + 1);</span>
+<span class="fc" id="L307">					System.arraycopy(propValue, 0, newArray, 0, length);</span>
+<span class="fc" id="L308">					setPropertyValue(tokens.actualName, newArray);</span>
+<span class="fc" id="L309">					propValue = getPropertyValue(tokens.actualName);</span>
+				}
+<span class="fc" id="L311">				Array.set(propValue, arrayIndex, convertedValue);</span>
+			}
+<span class="nc" id="L313">			catch (IndexOutOfBoundsException ex) {</span>
+<span class="nc" id="L314">				throw new InvalidPropertyException(getRootClass(), this.nestedPath + tokens.canonicalName,</span>
+						&quot;Invalid array index in property path '&quot; + tokens.canonicalName + &quot;'&quot;, ex);
+<span class="fc" id="L316">			}</span>
+<span class="fc" id="L317">		}</span>
+
+<span class="fc bfc" id="L319" title="All 2 branches covered.">		else if (propValue instanceof List) {</span>
+<span class="fc" id="L320">			Class&lt;?&gt; requiredType = ph.getCollectionType(tokens.keys.length);</span>
+<span class="fc" id="L321">			List&lt;Object&gt; list = (List&lt;Object&gt;) propValue;</span>
+<span class="fc" id="L322">			int index = Integer.parseInt(lastKey);</span>
+<span class="fc" id="L323">			Object oldValue = null;</span>
+<span class="pc bpc" id="L324" title="3 of 4 branches missed.">			if (isExtractOldValueForEditor() &amp;&amp; index &lt; list.size()) {</span>
+<span class="nc" id="L325">				oldValue = list.get(index);</span>
+			}
+<span class="fc" id="L327">			Object convertedValue = convertIfNecessary(tokens.canonicalName, oldValue, pv.getValue(),</span>
+<span class="fc" id="L328">					requiredType, ph.nested(tokens.keys.length));</span>
+<span class="fc" id="L329">			int size = list.size();</span>
+<span class="pc bpc" id="L330" title="1 of 4 branches missed.">			if (index &gt;= size &amp;&amp; index &lt; this.autoGrowCollectionLimit) {</span>
+<span class="fc bfc" id="L331" title="All 2 branches covered.">				for (int i = size; i &lt; index; i++) {</span>
+					try {
+<span class="fc" id="L333">						list.add(null);</span>
+					}
+<span class="nc" id="L335">					catch (NullPointerException ex) {</span>
+<span class="nc" id="L336">						throw new InvalidPropertyException(getRootClass(), this.nestedPath + tokens.canonicalName,</span>
+								&quot;Cannot set element with index &quot; + index + &quot; in List of size &quot; +
+								size + &quot;, accessed using property path '&quot; + tokens.canonicalName +
+								&quot;': List does not support filling up gaps with null elements&quot;);
+<span class="fc" id="L340">					}</span>
+				}
+<span class="fc" id="L342">				list.add(convertedValue);</span>
+			}
+			else {
+				try {
+<span class="fc" id="L346">					list.set(index, convertedValue);</span>
+				}
+<span class="nc" id="L348">				catch (IndexOutOfBoundsException ex) {</span>
+<span class="nc" id="L349">					throw new InvalidPropertyException(getRootClass(), this.nestedPath + tokens.canonicalName,</span>
+							&quot;Invalid list index in property path '&quot; + tokens.canonicalName + &quot;'&quot;, ex);
+<span class="fc" id="L351">				}</span>
+			}
+<span class="fc" id="L353">		}</span>
+
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">		else if (propValue instanceof Map) {</span>
+<span class="fc" id="L356">			Class&lt;?&gt; mapKeyType = ph.getMapKeyType(tokens.keys.length);</span>
+<span class="fc" id="L357">			Class&lt;?&gt; mapValueType = ph.getMapValueType(tokens.keys.length);</span>
+<span class="fc" id="L358">			Map&lt;Object, Object&gt; map = (Map&lt;Object, Object&gt;) propValue;</span>
+			// IMPORTANT: Do not pass full property name in here - property editors
+			// must not kick in for map keys but rather only for map values.
+<span class="fc" id="L361">			TypeDescriptor typeDescriptor = TypeDescriptor.valueOf(mapKeyType);</span>
+<span class="fc" id="L362">			Object convertedMapKey = convertIfNecessary(null, null, lastKey, mapKeyType, typeDescriptor);</span>
+<span class="fc" id="L363">			Object oldValue = null;</span>
+<span class="pc bpc" id="L364" title="1 of 2 branches missed.">			if (isExtractOldValueForEditor()) {</span>
+<span class="nc" id="L365">				oldValue = map.get(convertedMapKey);</span>
+			}
+			// Pass full property name and old value in here, since we want full
+			// conversion ability for map values.
+<span class="fc" id="L369">			Object convertedMapValue = convertIfNecessary(tokens.canonicalName, oldValue, pv.getValue(),</span>
+<span class="fc" id="L370">					mapValueType, ph.nested(tokens.keys.length));</span>
+<span class="fc" id="L371">			map.put(convertedMapKey, convertedMapValue);</span>
+<span class="fc" id="L372">		}</span>
+
+		else {
+<span class="nc" id="L375">			throw new InvalidPropertyException(getRootClass(), this.nestedPath + tokens.canonicalName,</span>
+					&quot;Property referenced in indexed property path '&quot; + tokens.canonicalName +
+					&quot;' is neither an array nor a List nor a Map; returned value was [&quot; + propValue + &quot;]&quot;);
+		}
+<span class="fc" id="L379">	}</span>
+
+	private Object getPropertyHoldingValue(PropertyTokenHolder tokens) {
+		// Apply indexes and map keys: fetch value for all keys but the last one.
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">		Assert.state(tokens.keys != null, &quot;No token keys&quot;);</span>
+<span class="fc" id="L384">		PropertyTokenHolder getterTokens = new PropertyTokenHolder(tokens.actualName);</span>
+<span class="fc" id="L385">		getterTokens.canonicalName = tokens.canonicalName;</span>
+<span class="fc" id="L386">		getterTokens.keys = new String[tokens.keys.length - 1];</span>
+<span class="fc" id="L387">		System.arraycopy(tokens.keys, 0, getterTokens.keys, 0, tokens.keys.length - 1);</span>
+
+		Object propValue;
+		try {
+<span class="fc" id="L391">			propValue = getPropertyValue(getterTokens);</span>
+		}
+<span class="fc" id="L393">		catch (NotReadablePropertyException ex) {</span>
+<span class="fc" id="L394">			throw new NotWritablePropertyException(getRootClass(), this.nestedPath + tokens.canonicalName,</span>
+					&quot;Cannot access indexed value in property referenced &quot; +
+					&quot;in indexed property path '&quot; + tokens.canonicalName + &quot;'&quot;, ex);
+<span class="fc" id="L397">		}</span>
+
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">		if (propValue == null) {</span>
+			// null map value case
+<span class="nc bnc" id="L401" title="All 2 branches missed.">			if (isAutoGrowNestedPaths()) {</span>
+<span class="nc" id="L402">				int lastKeyIndex = tokens.canonicalName.lastIndexOf('[');</span>
+<span class="nc" id="L403">				getterTokens.canonicalName = tokens.canonicalName.substring(0, lastKeyIndex);</span>
+<span class="nc" id="L404">				propValue = setDefaultValue(getterTokens);</span>
+<span class="nc" id="L405">			}</span>
+			else {
+<span class="nc" id="L407">				throw new NullValueInNestedPathException(getRootClass(), this.nestedPath + tokens.canonicalName,</span>
+						&quot;Cannot access indexed value in property referenced &quot; +
+						&quot;in indexed property path '&quot; + tokens.canonicalName + &quot;': returned null&quot;);
+			}
+		}
+<span class="fc" id="L412">		return propValue;</span>
+	}
+
+	private void processLocalProperty(PropertyTokenHolder tokens, PropertyValue pv) {
+<span class="fc" id="L416">		PropertyHandler ph = getLocalPropertyHandler(tokens.actualName);</span>
+<span class="pc bpc" id="L417" title="1 of 4 branches missed.">		if (ph == null || !ph.isWritable()) {</span>
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">			if (pv.isOptional()) {</span>
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L420">					logger.debug(&quot;Ignoring optional value for property '&quot; + tokens.actualName +</span>
+<span class="nc" id="L421">							&quot;' - property not found on bean class [&quot; + getRootClass().getName() + &quot;]&quot;);</span>
+				}
+<span class="fc" id="L423">				return;</span>
+			}
+			else {
+<span class="nc" id="L426">				throw createNotWritablePropertyException(tokens.canonicalName);</span>
+			}
+		}
+
+<span class="fc" id="L430">		Object oldValue = null;</span>
+		try {
+<span class="fc" id="L432">			Object originalValue = pv.getValue();</span>
+<span class="fc" id="L433">			Object valueToApply = originalValue;</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">			if (!Boolean.FALSE.equals(pv.conversionNecessary)) {</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">				if (pv.isConverted()) {</span>
+<span class="fc" id="L436">					valueToApply = pv.getConvertedValue();</span>
+				}
+				else {
+<span class="pc bpc" id="L439" title="1 of 4 branches missed.">					if (isExtractOldValueForEditor() &amp;&amp; ph.isReadable()) {</span>
+						try {
+<span class="fc" id="L441">							oldValue = ph.getValue();</span>
+						}
+<span class="fc" id="L443">						catch (Exception ex) {</span>
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">							if (ex instanceof PrivilegedActionException) {</span>
+<span class="nc" id="L445">								ex = ((PrivilegedActionException) ex).getException();</span>
+							}
+<span class="pc bpc" id="L447" title="1 of 2 branches missed.">							if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L448">								logger.debug(&quot;Could not read previous value of property '&quot; +</span>
+										this.nestedPath + tokens.canonicalName + &quot;'&quot;, ex);
+							}
+<span class="fc" id="L451">						}</span>
+					}
+<span class="fc" id="L453">					valueToApply = convertForProperty(</span>
+<span class="fc" id="L454">							tokens.canonicalName, oldValue, originalValue, ph.toTypeDescriptor());</span>
+				}
+<span class="fc bfc" id="L456" title="All 2 branches covered.">				pv.getOriginalPropertyValue().conversionNecessary = (valueToApply != originalValue);</span>
+			}
+<span class="fc" id="L458">			ph.setValue(valueToApply);</span>
+		}
+<span class="fc" id="L460">		catch (TypeMismatchException ex) {</span>
+<span class="fc" id="L461">			throw ex;</span>
+		}
+<span class="fc" id="L463">		catch (InvocationTargetException ex) {</span>
+<span class="fc" id="L464">			PropertyChangeEvent propertyChangeEvent = new PropertyChangeEvent(</span>
+<span class="fc" id="L465">					getRootInstance(), this.nestedPath + tokens.canonicalName, oldValue, pv.getValue());</span>
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">			if (ex.getTargetException() instanceof ClassCastException) {</span>
+<span class="nc" id="L467">				throw new TypeMismatchException(propertyChangeEvent, ph.getPropertyType(), ex.getTargetException());</span>
+			}
+			else {
+<span class="fc" id="L470">				Throwable cause = ex.getTargetException();</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">				if (cause instanceof UndeclaredThrowableException) {</span>
+					// May happen e.g. with Groovy-generated methods
+<span class="nc" id="L473">					cause = cause.getCause();</span>
+				}
+<span class="fc" id="L475">				throw new MethodInvocationException(propertyChangeEvent, cause);</span>
+			}
+		}
+<span class="nc" id="L478">		catch (Exception ex) {</span>
+<span class="nc" id="L479">			PropertyChangeEvent pce = new PropertyChangeEvent(</span>
+<span class="nc" id="L480">					getRootInstance(), this.nestedPath + tokens.canonicalName, oldValue, pv.getValue());</span>
+<span class="nc" id="L481">			throw new MethodInvocationException(pce, ex);</span>
+<span class="fc" id="L482">		}</span>
+<span class="fc" id="L483">	}</span>
+
+	@Override
+	@Nullable
+	public Class&lt;?&gt; getPropertyType(String propertyName) throws BeansException {
+		try {
+<span class="fc" id="L489">			PropertyHandler ph = getPropertyHandler(propertyName);</span>
+<span class="fc bfc" id="L490" title="All 2 branches covered.">			if (ph != null) {</span>
+<span class="fc" id="L491">				return ph.getPropertyType();</span>
+			}
+			else {
+				// Maybe an indexed/mapped property...
+<span class="fc" id="L495">				Object value = getPropertyValue(propertyName);</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">				if (value != null) {</span>
+<span class="fc" id="L497">					return value.getClass();</span>
+				}
+				// Check to see if there is a custom editor,
+				// which might give an indication on the desired target type.
+<span class="fc" id="L501">				Class&lt;?&gt; editorType = guessPropertyTypeFromEditors(propertyName);</span>
+<span class="pc bpc" id="L502" title="1 of 2 branches missed.">				if (editorType != null) {</span>
+<span class="nc" id="L503">					return editorType;</span>
+				}
+			}
+		}
+<span class="fc" id="L507">		catch (InvalidPropertyException ex) {</span>
+			// Consider as not determinable.
+<span class="fc" id="L509">		}</span>
+<span class="fc" id="L510">		return null;</span>
+	}
+
+	@Override
+	@Nullable
+	public TypeDescriptor getPropertyTypeDescriptor(String propertyName) throws BeansException {
+		try {
+<span class="fc" id="L517">			AbstractNestablePropertyAccessor nestedPa = getPropertyAccessorForPropertyPath(propertyName);</span>
+<span class="fc" id="L518">			String finalPath = getFinalPath(nestedPa, propertyName);</span>
+<span class="fc" id="L519">			PropertyTokenHolder tokens = getPropertyNameTokens(finalPath);</span>
+<span class="fc" id="L520">			PropertyHandler ph = nestedPa.getLocalPropertyHandler(tokens.actualName);</span>
+<span class="fc bfc" id="L521" title="All 2 branches covered.">			if (ph != null) {</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">				if (tokens.keys != null) {</span>
+<span class="pc bpc" id="L523" title="3 of 4 branches missed.">					if (ph.isReadable() || ph.isWritable()) {</span>
+<span class="fc" id="L524">						return ph.nested(tokens.keys.length);</span>
+					}
+				}
+				else {
+<span class="pc bpc" id="L528" title="3 of 4 branches missed.">					if (ph.isReadable() || ph.isWritable()) {</span>
+<span class="fc" id="L529">						return ph.toTypeDescriptor();</span>
+					}
+				}
+			}
+		}
+<span class="nc" id="L534">		catch (InvalidPropertyException ex) {</span>
+			// Consider as not determinable.
+<span class="fc" id="L536">		}</span>
+<span class="fc" id="L537">		return null;</span>
+	}
+
+	@Override
+	public boolean isReadableProperty(String propertyName) {
+		try {
+<span class="fc" id="L543">			PropertyHandler ph = getPropertyHandler(propertyName);</span>
+<span class="fc bfc" id="L544" title="All 2 branches covered.">			if (ph != null) {</span>
+<span class="fc" id="L545">				return ph.isReadable();</span>
+			}
+			else {
+				// Maybe an indexed/mapped property...
+<span class="fc" id="L549">				getPropertyValue(propertyName);</span>
+<span class="fc" id="L550">				return true;</span>
+			}
+		}
+<span class="fc" id="L553">		catch (InvalidPropertyException ex) {</span>
+			// Cannot be evaluated, so can't be readable.
+		}
+<span class="fc" id="L556">		return false;</span>
+	}
+
+	@Override
+	public boolean isWritableProperty(String propertyName) {
+		try {
+<span class="fc" id="L562">			PropertyHandler ph = getPropertyHandler(propertyName);</span>
+<span class="fc bfc" id="L563" title="All 2 branches covered.">			if (ph != null) {</span>
+<span class="fc" id="L564">				return ph.isWritable();</span>
+			}
+			else {
+				// Maybe an indexed/mapped property...
+<span class="fc" id="L568">				getPropertyValue(propertyName);</span>
+<span class="fc" id="L569">				return true;</span>
+			}
+		}
+<span class="fc" id="L572">		catch (InvalidPropertyException ex) {</span>
+			// Cannot be evaluated, so can't be writable.
+		}
+<span class="fc" id="L575">		return false;</span>
+	}
+
+	@Nullable
+	private Object convertIfNecessary(@Nullable String propertyName, @Nullable Object oldValue,
+			@Nullable Object newValue, @Nullable Class&lt;?&gt; requiredType, @Nullable TypeDescriptor td)
+			throws TypeMismatchException {
+
+<span class="pc bpc" id="L583" title="1 of 2 branches missed.">		Assert.state(this.typeConverterDelegate != null, &quot;No TypeConverterDelegate&quot;);</span>
+		try {
+<span class="fc" id="L585">			return this.typeConverterDelegate.convertIfNecessary(propertyName, oldValue, newValue, requiredType, td);</span>
+		}
+<span class="fc" id="L587">		catch (ConverterNotFoundException | IllegalStateException ex) {</span>
+<span class="fc" id="L588">			PropertyChangeEvent pce =</span>
+<span class="fc" id="L589">					new PropertyChangeEvent(getRootInstance(), this.nestedPath + propertyName, oldValue, newValue);</span>
+<span class="fc" id="L590">			throw new ConversionNotSupportedException(pce, requiredType, ex);</span>
+		}
+<span class="fc" id="L592">		catch (ConversionException | IllegalArgumentException ex) {</span>
+<span class="fc" id="L593">			PropertyChangeEvent pce =</span>
+<span class="fc" id="L594">					new PropertyChangeEvent(getRootInstance(), this.nestedPath + propertyName, oldValue, newValue);</span>
+<span class="fc" id="L595">			throw new TypeMismatchException(pce, requiredType, ex);</span>
+		}
+	}
+
+	@Nullable
+	protected Object convertForProperty(
+			String propertyName, @Nullable Object oldValue, @Nullable Object newValue, TypeDescriptor td)
+			throws TypeMismatchException {
+
+<span class="fc" id="L604">		return convertIfNecessary(propertyName, oldValue, newValue, td.getType(), td);</span>
+	}
+
+	@Override
+	@Nullable
+	public Object getPropertyValue(String propertyName) throws BeansException {
+<span class="fc" id="L610">		AbstractNestablePropertyAccessor nestedPa = getPropertyAccessorForPropertyPath(propertyName);</span>
+<span class="fc" id="L611">		PropertyTokenHolder tokens = getPropertyNameTokens(getFinalPath(nestedPa, propertyName));</span>
+<span class="fc" id="L612">		return nestedPa.getPropertyValue(tokens);</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Nullable
+	protected Object getPropertyValue(PropertyTokenHolder tokens) throws BeansException {
+<span class="fc" id="L618">		String propertyName = tokens.canonicalName;</span>
+<span class="fc" id="L619">		String actualName = tokens.actualName;</span>
+<span class="fc" id="L620">		PropertyHandler ph = getLocalPropertyHandler(actualName);</span>
+<span class="pc bpc" id="L621" title="1 of 4 branches missed.">		if (ph == null || !ph.isReadable()) {</span>
+<span class="fc" id="L622">			throw new NotReadablePropertyException(getRootClass(), this.nestedPath + propertyName);</span>
+		}
+		try {
+<span class="fc" id="L625">			Object value = ph.getValue();</span>
+<span class="fc bfc" id="L626" title="All 2 branches covered.">			if (tokens.keys != null) {</span>
+<span class="fc bfc" id="L627" title="All 2 branches covered.">				if (value == null) {</span>
+<span class="fc bfc" id="L628" title="All 2 branches covered.">					if (isAutoGrowNestedPaths()) {</span>
+<span class="fc" id="L629">						value = setDefaultValue(new PropertyTokenHolder(tokens.actualName));</span>
+					}
+					else {
+<span class="fc" id="L632">						throw new NullValueInNestedPathException(getRootClass(), this.nestedPath + propertyName,</span>
+								&quot;Cannot access indexed value of property referenced in indexed &quot; +
+										&quot;property path '&quot; + propertyName + &quot;': returned null&quot;);
+					}
+				}
+<span class="fc" id="L637">				StringBuilder indexedPropertyName = new StringBuilder(tokens.actualName);</span>
+				// apply indexes and map keys
+<span class="fc bfc" id="L639" title="All 2 branches covered.">				for (int i = 0; i &lt; tokens.keys.length; i++) {</span>
+<span class="fc" id="L640">					String key = tokens.keys[i];</span>
+<span class="pc bpc" id="L641" title="1 of 2 branches missed.">					if (value == null) {</span>
+<span class="nc" id="L642">						throw new NullValueInNestedPathException(getRootClass(), this.nestedPath + propertyName,</span>
+								&quot;Cannot access indexed value of property referenced in indexed &quot; +
+										&quot;property path '&quot; + propertyName + &quot;': returned null&quot;);
+					}
+<span class="fc bfc" id="L646" title="All 2 branches covered.">					else if (value.getClass().isArray()) {</span>
+<span class="fc" id="L647">						int index = Integer.parseInt(key);</span>
+<span class="fc" id="L648">						value = growArrayIfNecessary(value, index, indexedPropertyName.toString());</span>
+<span class="fc" id="L649">						value = Array.get(value, index);</span>
+<span class="fc" id="L650">					}</span>
+<span class="fc bfc" id="L651" title="All 2 branches covered.">					else if (value instanceof List) {</span>
+<span class="fc" id="L652">						int index = Integer.parseInt(key);</span>
+<span class="fc" id="L653">						List&lt;Object&gt; list = (List&lt;Object&gt;) value;</span>
+<span class="fc" id="L654">						growCollectionIfNecessary(list, index, indexedPropertyName.toString(), ph, i + 1);</span>
+<span class="fc" id="L655">						value = list.get(index);</span>
+<span class="fc" id="L656">					}</span>
+<span class="fc bfc" id="L657" title="All 2 branches covered.">					else if (value instanceof Set) {</span>
+						// Apply index to Iterator in case of a Set.
+<span class="fc" id="L659">						Set&lt;Object&gt; set = (Set&lt;Object&gt;) value;</span>
+<span class="fc" id="L660">						int index = Integer.parseInt(key);</span>
+<span class="pc bpc" id="L661" title="2 of 4 branches missed.">						if (index &lt; 0 || index &gt;= set.size()) {</span>
+<span class="nc" id="L662">							throw new InvalidPropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+									&quot;Cannot get element with index &quot; + index + &quot; from Set of size &quot; +
+<span class="nc" id="L664">											set.size() + &quot;, accessed using property path '&quot; + propertyName + &quot;'&quot;);</span>
+						}
+<span class="fc" id="L666">						Iterator&lt;Object&gt; it = set.iterator();</span>
+<span class="pc bpc" id="L667" title="1 of 2 branches missed.">						for (int j = 0; it.hasNext(); j++) {</span>
+<span class="fc" id="L668">							Object elem = it.next();</span>
+<span class="fc bfc" id="L669" title="All 2 branches covered.">							if (j == index) {</span>
+<span class="fc" id="L670">								value = elem;</span>
+<span class="fc" id="L671">								break;</span>
+							}
+						}
+<span class="fc" id="L674">					}</span>
+<span class="pc bpc" id="L675" title="1 of 2 branches missed.">					else if (value instanceof Map) {</span>
+<span class="fc" id="L676">						Map&lt;Object, Object&gt; map = (Map&lt;Object, Object&gt;) value;</span>
+<span class="fc" id="L677">						Class&lt;?&gt; mapKeyType = ph.getResolvableType().getNested(i + 1).asMap().resolveGeneric(0);</span>
+						// IMPORTANT: Do not pass full property name in here - property editors
+						// must not kick in for map keys but rather only for map values.
+<span class="fc" id="L680">						TypeDescriptor typeDescriptor = TypeDescriptor.valueOf(mapKeyType);</span>
+<span class="fc" id="L681">						Object convertedMapKey = convertIfNecessary(null, null, key, mapKeyType, typeDescriptor);</span>
+<span class="fc" id="L682">						value = map.get(convertedMapKey);</span>
+<span class="fc" id="L683">					}</span>
+					else {
+<span class="nc" id="L685">						throw new InvalidPropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+								&quot;Property referenced in indexed property path '&quot; + propertyName +
+										&quot;' is neither an array nor a List nor a Set nor a Map; returned value was [&quot; + value + &quot;]&quot;);
+					}
+<span class="fc" id="L689">					indexedPropertyName.append(PROPERTY_KEY_PREFIX).append(key).append(PROPERTY_KEY_SUFFIX);</span>
+				}
+			}
+<span class="fc" id="L692">			return value;</span>
+		}
+<span class="fc" id="L694">		catch (IndexOutOfBoundsException ex) {</span>
+<span class="fc" id="L695">			throw new InvalidPropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+					&quot;Index of out of bounds in property path '&quot; + propertyName + &quot;'&quot;, ex);
+		}
+<span class="fc" id="L698">		catch (NumberFormatException | TypeMismatchException ex) {</span>
+<span class="fc" id="L699">			throw new InvalidPropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+					&quot;Invalid index in property path '&quot; + propertyName + &quot;'&quot;, ex);
+		}
+<span class="nc" id="L702">		catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L703">			throw new InvalidPropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+					&quot;Getter for property '&quot; + actualName + &quot;' threw exception&quot;, ex);
+		}
+<span class="fc" id="L706">		catch (Exception ex) {</span>
+<span class="fc" id="L707">			throw new InvalidPropertyException(getRootClass(), this.nestedPath + propertyName,</span>
+					&quot;Illegal attempt to get property '&quot; + actualName + &quot;' threw exception&quot;, ex);
+		}
+	}
+
+
+	/**
+	 * Return the {@link PropertyHandler} for the specified {@code propertyName}, navigating
+	 * if necessary. Return {@code null} if not found rather than throwing an exception.
+	 * @param propertyName the property to obtain the descriptor for
+	 * @return the property descriptor for the specified property,
+	 * or {@code null} if not found
+	 * @throws BeansException in case of introspection failure
+	 */
+	@Nullable
+	protected PropertyHandler getPropertyHandler(String propertyName) throws BeansException {
+<span class="fc" id="L723">		Assert.notNull(propertyName, &quot;Property name must not be null&quot;);</span>
+<span class="fc" id="L724">		AbstractNestablePropertyAccessor nestedPa = getPropertyAccessorForPropertyPath(propertyName);</span>
+<span class="fc" id="L725">		return nestedPa.getLocalPropertyHandler(getFinalPath(nestedPa, propertyName));</span>
+	}
+
+	/**
+	 * Return a {@link PropertyHandler} for the specified local {@code propertyName}.
+	 * Only used to reach a property available in the current context.
+	 * @param propertyName the name of a local property
+	 * @return the handler for that property, or {@code null} if it has not been found
+	 */
+	@Nullable
+	protected abstract PropertyHandler getLocalPropertyHandler(String propertyName);
+
+	/**
+	 * Create a new nested property accessor instance.
+	 * Can be overridden in subclasses to create a PropertyAccessor subclass.
+	 * @param object object wrapped by this PropertyAccessor
+	 * @param nestedPath the nested path of the object
+	 * @return the nested PropertyAccessor instance
+	 */
+	protected abstract AbstractNestablePropertyAccessor newNestedPropertyAccessor(Object object, String nestedPath);
+
+	/**
+	 * Create a {@link NotWritablePropertyException} for the specified property.
+	 */
+	protected abstract NotWritablePropertyException createNotWritablePropertyException(String propertyName);
+
+
+	private Object growArrayIfNecessary(Object array, int index, String name) {
+<span class="fc bfc" id="L753" title="All 2 branches covered.">		if (!isAutoGrowNestedPaths()) {</span>
+<span class="fc" id="L754">			return array;</span>
+		}
+<span class="fc" id="L756">		int length = Array.getLength(array);</span>
+<span class="pc bpc" id="L757" title="1 of 4 branches missed.">		if (index &gt;= length &amp;&amp; index &lt; this.autoGrowCollectionLimit) {</span>
+<span class="fc" id="L758">			Class&lt;?&gt; componentType = array.getClass().getComponentType();</span>
+<span class="fc" id="L759">			Object newArray = Array.newInstance(componentType, index + 1);</span>
+<span class="fc" id="L760">			System.arraycopy(array, 0, newArray, 0, length);</span>
+<span class="fc bfc" id="L761" title="All 2 branches covered.">			for (int i = length; i &lt; Array.getLength(newArray); i++) {</span>
+<span class="fc" id="L762">				Array.set(newArray, i, newValue(componentType, null, name));</span>
+			}
+<span class="fc" id="L764">			setPropertyValue(name, newArray);</span>
+<span class="fc" id="L765">			Object defaultValue = getPropertyValue(name);</span>
+<span class="pc bpc" id="L766" title="1 of 2 branches missed.">			Assert.state(defaultValue != null, &quot;Default value must not be null&quot;);</span>
+<span class="fc" id="L767">			return defaultValue;</span>
+		}
+		else {
+<span class="fc" id="L770">			return array;</span>
+		}
+	}
+
+	private void growCollectionIfNecessary(Collection&lt;Object&gt; collection, int index, String name,
+			PropertyHandler ph, int nestingLevel) {
+
+<span class="fc bfc" id="L777" title="All 2 branches covered.">		if (!isAutoGrowNestedPaths()) {</span>
+<span class="fc" id="L778">			return;</span>
+		}
+<span class="fc" id="L780">		int size = collection.size();</span>
+<span class="fc bfc" id="L781" title="All 4 branches covered.">		if (index &gt;= size &amp;&amp; index &lt; this.autoGrowCollectionLimit) {</span>
+<span class="fc" id="L782">			Class&lt;?&gt; elementType = ph.getResolvableType().getNested(nestingLevel).asCollection().resolveGeneric();</span>
+<span class="fc bfc" id="L783" title="All 2 branches covered.">			if (elementType != null) {</span>
+<span class="fc bfc" id="L784" title="All 2 branches covered.">				for (int i = collection.size(); i &lt; index + 1; i++) {</span>
+<span class="fc" id="L785">					collection.add(newValue(elementType, null, name));</span>
+				}
+			}
+		}
+<span class="fc" id="L789">	}</span>
+
+	/**
+	 * Get the last component of the path. Also works if not nested.
+	 * @param pa property accessor to work on
+	 * @param nestedPath property path we know is nested
+	 * @return last component of the path (the property on the target bean)
+	 */
+	protected String getFinalPath(AbstractNestablePropertyAccessor pa, String nestedPath) {
+<span class="fc bfc" id="L798" title="All 2 branches covered.">		if (pa == this) {</span>
+<span class="fc" id="L799">			return nestedPath;</span>
+		}
+<span class="fc" id="L801">		return nestedPath.substring(PropertyAccessorUtils.getLastNestedPropertySeparatorIndex(nestedPath) + 1);</span>
+	}
+
+	/**
+	 * Recursively navigate to return a property accessor for the nested property path.
+	 * @param propertyPath property path, which may be nested
+	 * @return a property accessor for the target bean
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)  // avoid nested generic
+	protected AbstractNestablePropertyAccessor getPropertyAccessorForPropertyPath(String propertyPath) {
+<span class="fc" id="L811">		int pos = PropertyAccessorUtils.getFirstNestedPropertySeparatorIndex(propertyPath);</span>
+		// Handle nested properties recursively.
+<span class="fc bfc" id="L813" title="All 2 branches covered.">		if (pos &gt; -1) {</span>
+<span class="fc" id="L814">			String nestedProperty = propertyPath.substring(0, pos);</span>
+<span class="fc" id="L815">			String nestedPath = propertyPath.substring(pos + 1);</span>
+<span class="fc" id="L816">			AbstractNestablePropertyAccessor nestedPa = getNestedPropertyAccessor(nestedProperty);</span>
+<span class="fc" id="L817">			return nestedPa.getPropertyAccessorForPropertyPath(nestedPath);</span>
+		}
+		else {
+<span class="fc" id="L820">			return this;</span>
+		}
+	}
+
+	/**
+	 * Retrieve a Property accessor for the given nested property.
+	 * Create a new one if not found in the cache.
+	 * &lt;p&gt;Note: Caching nested PropertyAccessors is necessary now,
+	 * to keep registered custom editors for nested properties.
+	 * @param nestedProperty property to create the PropertyAccessor for
+	 * @return the PropertyAccessor instance, either cached or newly created
+	 */
+	private AbstractNestablePropertyAccessor getNestedPropertyAccessor(String nestedProperty) {
+<span class="fc bfc" id="L833" title="All 2 branches covered.">		if (this.nestedPropertyAccessors == null) {</span>
+<span class="fc" id="L834">			this.nestedPropertyAccessors = new HashMap&lt;&gt;();</span>
+		}
+		// Get value of bean property.
+<span class="fc" id="L837">		PropertyTokenHolder tokens = getPropertyNameTokens(nestedProperty);</span>
+<span class="fc" id="L838">		String canonicalName = tokens.canonicalName;</span>
+<span class="fc" id="L839">		Object value = getPropertyValue(tokens);</span>
+<span class="fc bfc" id="L840" title="All 6 branches covered.">		if (value == null || (value instanceof Optional &amp;&amp; !((Optional) value).isPresent())) {</span>
+<span class="fc bfc" id="L841" title="All 2 branches covered.">			if (isAutoGrowNestedPaths()) {</span>
+<span class="fc" id="L842">				value = setDefaultValue(tokens);</span>
+			}
+			else {
+<span class="fc" id="L845">				throw new NullValueInNestedPathException(getRootClass(), this.nestedPath + canonicalName);</span>
+			}
+		}
+
+		// Lookup cached sub-PropertyAccessor, create new one if not found.
+<span class="fc" id="L850">		AbstractNestablePropertyAccessor nestedPa = this.nestedPropertyAccessors.get(canonicalName);</span>
+<span class="pc bpc" id="L851" title="1 of 4 branches missed.">		if (nestedPa == null || nestedPa.getWrappedInstance() != ObjectUtils.unwrapOptional(value)) {</span>
+<span class="pc bpc" id="L852" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L853">				logger.trace(&quot;Creating new nested &quot; + getClass().getSimpleName() + &quot; for property '&quot; + canonicalName + &quot;'&quot;);</span>
+			}
+<span class="fc" id="L855">			nestedPa = newNestedPropertyAccessor(value, this.nestedPath + canonicalName + NESTED_PROPERTY_SEPARATOR);</span>
+			// Inherit all type-specific PropertyEditors.
+<span class="fc" id="L857">			copyDefaultEditorsTo(nestedPa);</span>
+<span class="fc" id="L858">			copyCustomEditorsTo(nestedPa, canonicalName);</span>
+<span class="fc" id="L859">			this.nestedPropertyAccessors.put(canonicalName, nestedPa);</span>
+		}
+		else {
+<span class="pc bpc" id="L862" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L863">				logger.trace(&quot;Using cached nested property accessor for property '&quot; + canonicalName + &quot;'&quot;);</span>
+			}
+		}
+<span class="fc" id="L866">		return nestedPa;</span>
+	}
+
+	private Object setDefaultValue(PropertyTokenHolder tokens) {
+<span class="fc" id="L870">		PropertyValue pv = createDefaultPropertyValue(tokens);</span>
+<span class="fc" id="L871">		setPropertyValue(tokens, pv);</span>
+<span class="fc" id="L872">		Object defaultValue = getPropertyValue(tokens);</span>
+<span class="pc bpc" id="L873" title="1 of 2 branches missed.">		Assert.state(defaultValue != null, &quot;Default value must not be null&quot;);</span>
+<span class="fc" id="L874">		return defaultValue;</span>
+	}
+
+	private PropertyValue createDefaultPropertyValue(PropertyTokenHolder tokens) {
+<span class="fc" id="L878">		TypeDescriptor desc = getPropertyTypeDescriptor(tokens.canonicalName);</span>
+<span class="pc bpc" id="L879" title="1 of 2 branches missed.">		if (desc == null) {</span>
+<span class="nc" id="L880">			throw new NullValueInNestedPathException(getRootClass(), this.nestedPath + tokens.canonicalName,</span>
+					&quot;Could not determine property type for auto-growing a default value&quot;);
+		}
+<span class="fc" id="L883">		Object defaultValue = newValue(desc.getType(), desc, tokens.canonicalName);</span>
+<span class="fc" id="L884">		return new PropertyValue(tokens.canonicalName, defaultValue);</span>
+	}
+
+	private Object newValue(Class&lt;?&gt; type, @Nullable TypeDescriptor desc, String name) {
+		try {
+<span class="fc bfc" id="L889" title="All 2 branches covered.">			if (type.isArray()) {</span>
+<span class="fc" id="L890">				Class&lt;?&gt; componentType = type.getComponentType();</span>
+				// TODO - only handles 2-dimensional arrays
+<span class="fc bfc" id="L892" title="All 2 branches covered.">				if (componentType.isArray()) {</span>
+<span class="fc" id="L893">					Object array = Array.newInstance(componentType, 1);</span>
+<span class="fc" id="L894">					Array.set(array, 0, Array.newInstance(componentType.getComponentType(), 0));</span>
+<span class="fc" id="L895">					return array;</span>
+				}
+				else {
+<span class="fc" id="L898">					return Array.newInstance(componentType, 0);</span>
+				}
+			}
+<span class="fc bfc" id="L901" title="All 2 branches covered.">			else if (Collection.class.isAssignableFrom(type)) {</span>
+<span class="fc bfc" id="L902" title="All 2 branches covered.">				TypeDescriptor elementDesc = (desc != null ? desc.getElementTypeDescriptor() : null);</span>
+<span class="fc bfc" id="L903" title="All 2 branches covered.">				return CollectionFactory.createCollection(type, (elementDesc != null ? elementDesc.getType() : null), 16);</span>
+			}
+<span class="fc bfc" id="L905" title="All 2 branches covered.">			else if (Map.class.isAssignableFrom(type)) {</span>
+<span class="fc bfc" id="L906" title="All 2 branches covered.">				TypeDescriptor keyDesc = (desc != null ? desc.getMapKeyTypeDescriptor() : null);</span>
+<span class="fc bfc" id="L907" title="All 2 branches covered.">				return CollectionFactory.createMap(type, (keyDesc != null ? keyDesc.getType() : null), 16);</span>
+			}
+			else {
+<span class="fc" id="L910">				Constructor&lt;?&gt; ctor = type.getDeclaredConstructor();</span>
+<span class="fc bfc" id="L911" title="All 2 branches covered.">				if (Modifier.isPrivate(ctor.getModifiers())) {</span>
+<span class="fc" id="L912">					throw new IllegalAccessException(&quot;Auto-growing not allowed with private constructor: &quot; + ctor);</span>
+				}
+<span class="fc" id="L914">				return BeanUtils.instantiateClass(ctor);</span>
+			}
+		}
+<span class="fc" id="L917">		catch (Throwable ex) {</span>
+<span class="fc" id="L918">			throw new NullValueInNestedPathException(getRootClass(), this.nestedPath + name,</span>
+<span class="fc" id="L919">					&quot;Could not instantiate property type [&quot; + type.getName() + &quot;] to auto-grow nested property path&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Parse the given property name into the corresponding property name tokens.
+	 * @param propertyName the property name to parse
+	 * @return representation of the parsed property tokens
+	 */
+	private PropertyTokenHolder getPropertyNameTokens(String propertyName) {
+<span class="fc" id="L929">		String actualName = null;</span>
+<span class="fc" id="L930">		List&lt;String&gt; keys = new ArrayList&lt;&gt;(2);</span>
+<span class="fc" id="L931">		int searchIndex = 0;</span>
+<span class="fc bfc" id="L932" title="All 2 branches covered.">		while (searchIndex != -1) {</span>
+<span class="fc" id="L933">			int keyStart = propertyName.indexOf(PROPERTY_KEY_PREFIX, searchIndex);</span>
+<span class="fc" id="L934">			searchIndex = -1;</span>
+<span class="fc bfc" id="L935" title="All 2 branches covered.">			if (keyStart != -1) {</span>
+<span class="fc" id="L936">				int keyEnd = propertyName.indexOf(PROPERTY_KEY_SUFFIX, keyStart + PROPERTY_KEY_PREFIX.length());</span>
+<span class="pc bpc" id="L937" title="1 of 2 branches missed.">				if (keyEnd != -1) {</span>
+<span class="fc bfc" id="L938" title="All 2 branches covered.">					if (actualName == null) {</span>
+<span class="fc" id="L939">						actualName = propertyName.substring(0, keyStart);</span>
+					}
+<span class="fc" id="L941">					String key = propertyName.substring(keyStart + PROPERTY_KEY_PREFIX.length(), keyEnd);</span>
+<span class="pc bpc" id="L942" title="1 of 6 branches missed.">					if (key.length() &gt; 1 &amp;&amp; (key.startsWith(&quot;'&quot;) &amp;&amp; key.endsWith(&quot;'&quot;)) ||</span>
+<span class="pc bpc" id="L943" title="1 of 4 branches missed.">							(key.startsWith(&quot;\&quot;&quot;) &amp;&amp; key.endsWith(&quot;\&quot;&quot;))) {</span>
+<span class="fc" id="L944">						key = key.substring(1, key.length() - 1);</span>
+					}
+<span class="fc" id="L946">					keys.add(key);</span>
+<span class="fc" id="L947">					searchIndex = keyEnd + PROPERTY_KEY_SUFFIX.length();</span>
+				}
+			}
+<span class="fc" id="L950">		}</span>
+<span class="fc bfc" id="L951" title="All 2 branches covered.">		PropertyTokenHolder tokens = new PropertyTokenHolder(actualName != null ? actualName : propertyName);</span>
+<span class="fc bfc" id="L952" title="All 2 branches covered.">		if (!keys.isEmpty()) {</span>
+<span class="fc" id="L953">			tokens.canonicalName += PROPERTY_KEY_PREFIX +</span>
+<span class="fc" id="L954">					StringUtils.collectionToDelimitedString(keys, PROPERTY_KEY_SUFFIX + PROPERTY_KEY_PREFIX) +</span>
+					PROPERTY_KEY_SUFFIX;
+<span class="fc" id="L956">			tokens.keys = StringUtils.toStringArray(keys);</span>
+		}
+<span class="fc" id="L958">		return tokens;</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="nc" id="L963">		StringBuilder sb = new StringBuilder(getClass().getName());</span>
+<span class="nc bnc" id="L964" title="All 2 branches missed.">		if (this.wrappedObject != null) {</span>
+<span class="nc" id="L965">			sb.append(&quot;: wrapping object [&quot;).append(ObjectUtils.identityToString(this.wrappedObject)).append(&quot;]&quot;);</span>
+		}
+		else {
+<span class="nc" id="L968">			sb.append(&quot;: no wrapped object set&quot;);</span>
+		}
+<span class="nc" id="L970">		return sb.toString();</span>
+	}
+
+
+	/**
+	 * A handler for a specific property.
+	 */
+	protected abstract static class PropertyHandler {
+
+		private final Class&lt;?&gt; propertyType;
+
+		private final boolean readable;
+
+		private final boolean writable;
+
+<span class="fc" id="L985">		public PropertyHandler(Class&lt;?&gt; propertyType, boolean readable, boolean writable) {</span>
+<span class="fc" id="L986">			this.propertyType = propertyType;</span>
+<span class="fc" id="L987">			this.readable = readable;</span>
+<span class="fc" id="L988">			this.writable = writable;</span>
+<span class="fc" id="L989">		}</span>
+
+		public Class&lt;?&gt; getPropertyType() {
+<span class="fc" id="L992">			return this.propertyType;</span>
+		}
+
+		public boolean isReadable() {
+<span class="fc" id="L996">			return this.readable;</span>
+		}
+
+		public boolean isWritable() {
+<span class="fc" id="L1000">			return this.writable;</span>
+		}
+
+		public abstract TypeDescriptor toTypeDescriptor();
+
+		public abstract ResolvableType getResolvableType();
+
+		@Nullable
+		public Class&lt;?&gt; getMapKeyType(int nestingLevel) {
+<span class="fc" id="L1009">			return getResolvableType().getNested(nestingLevel).asMap().resolveGeneric(0);</span>
+		}
+
+		@Nullable
+		public Class&lt;?&gt; getMapValueType(int nestingLevel) {
+<span class="fc" id="L1014">			return getResolvableType().getNested(nestingLevel).asMap().resolveGeneric(1);</span>
+		}
+
+		@Nullable
+		public Class&lt;?&gt; getCollectionType(int nestingLevel) {
+<span class="fc" id="L1019">			return getResolvableType().getNested(nestingLevel).asCollection().resolveGeneric();</span>
+		}
+
+		@Nullable
+		public abstract TypeDescriptor nested(int level);
+
+		@Nullable
+		public abstract Object getValue() throws Exception;
+
+		public abstract void setValue(@Nullable Object value) throws Exception;
+	}
+
+
+	/**
+	 * Holder class used to store property tokens.
+	 */
+	protected static class PropertyTokenHolder {
+
+<span class="fc" id="L1037">		public PropertyTokenHolder(String name) {</span>
+<span class="fc" id="L1038">			this.actualName = name;</span>
+<span class="fc" id="L1039">			this.canonicalName = name;</span>
+<span class="fc" id="L1040">		}</span>
+
+		public String actualName;
+
+		public String canonicalName;
+
+		@Nullable
+		public String[] keys;
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

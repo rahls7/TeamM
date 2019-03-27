@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StringDecoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.codec</a> &gt; <span class="el_source">StringDecoder.java</span></div><h1>StringDecoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.codec;
+
+import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
+
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.core.io.buffer.PooledDataBuffer;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
+
+/**
+ * Decode from a data buffer stream to a {@code String} stream. Before decoding, this decoder
+ * realigns the incoming data buffers so that each buffer ends with a newline.
+ * This is to make sure that multibyte characters are decoded properly, and do not cross buffer
+ * boundaries. The default delimiters ({@code \n}, {@code \r\n})can be customized.
+ *
+ * &lt;p&gt;Partially inspired by Netty's {@code DelimiterBasedFrameDecoder}.
+ *
+ * @author Sebastien Deleuze
+ * @author Brian Clozel
+ * @author Arjen Poutsma
+ * @author Mark Paluch
+ * @since 5.0
+ * @see CharSequenceEncoder
+ */
+public final class StringDecoder extends AbstractDataBufferDecoder&lt;String&gt; {
+
+<span class="fc" id="L61">	private static final DataBuffer END_FRAME = new DefaultDataBufferFactory().wrap(new byte[0]);</span>
+
+	/** The default charset to use, i.e. &quot;UTF-8&quot;. */
+<span class="fc" id="L64">	public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;</span>
+
+	/** The default delimiter strings to use, i.e. {@code \r\n} and {@code \n}. */
+<span class="fc" id="L67">	public static final List&lt;String&gt; DEFAULT_DELIMITERS = Arrays.asList(&quot;\r\n&quot;, &quot;\n&quot;);</span>
+
+
+	private final List&lt;String&gt; delimiters;
+
+	private final boolean stripDelimiter;
+
+<span class="fc" id="L74">	private final ConcurrentMap&lt;Charset, List&lt;byte[]&gt;&gt; delimitersCache = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+	private StringDecoder(List&lt;String&gt; delimiters, boolean stripDelimiter, MimeType... mimeTypes) {
+<span class="fc" id="L78">		super(mimeTypes);</span>
+<span class="fc" id="L79">		Assert.notEmpty(delimiters, &quot;'delimiters' must not be empty&quot;);</span>
+<span class="fc" id="L80">		this.delimiters = new ArrayList&lt;&gt;(delimiters);</span>
+<span class="fc" id="L81">		this.stripDelimiter = stripDelimiter;</span>
+<span class="fc" id="L82">	}</span>
+
+
+	@Override
+	public boolean canDecode(ResolvableType elementType, @Nullable MimeType mimeType) {
+<span class="pc bpc" id="L87" title="1 of 4 branches missed.">		return (elementType.resolve() == String.class &amp;&amp; super.canDecode(elementType, mimeType));</span>
+	}
+
+	@Override
+	public Flux&lt;String&gt; decode(Publisher&lt;DataBuffer&gt; inputStream, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L94">		List&lt;byte[]&gt; delimiterBytes = getDelimiterBytes(mimeType);</span>
+
+<span class="fc" id="L96">		Flux&lt;DataBuffer&gt; inputFlux = Flux.from(inputStream)</span>
+<span class="fc" id="L97">				.flatMapIterable(dataBuffer -&gt; splitOnDelimiter(dataBuffer, delimiterBytes))</span>
+<span class="fc" id="L98">				.bufferUntil(StringDecoder::isEndFrame)</span>
+<span class="fc" id="L99">				.map(StringDecoder::joinUntilEndFrame)</span>
+<span class="fc" id="L100">				.doOnDiscard(PooledDataBuffer.class, DataBufferUtils::release);</span>
+
+<span class="fc" id="L102">		return super.decode(inputFlux, elementType, mimeType, hints);</span>
+	}
+
+	private List&lt;byte[]&gt; getDelimiterBytes(@Nullable MimeType mimeType) {
+<span class="fc" id="L106">		return this.delimitersCache.computeIfAbsent(getCharset(mimeType),</span>
+<span class="fc" id="L107">				charset -&gt; this.delimiters.stream()</span>
+<span class="fc" id="L108">						.map(s -&gt; s.getBytes(charset))</span>
+<span class="fc" id="L109">						.collect(Collectors.toList()));</span>
+	}
+
+	/**
+	 * Split the given data buffer on delimiter boundaries.
+	 * The returned Flux contains an {@link #END_FRAME} buffer after each delimiter.
+	 */
+	private List&lt;DataBuffer&gt; splitOnDelimiter(DataBuffer dataBuffer, List&lt;byte[]&gt; delimiterBytes) {
+<span class="fc" id="L117">		List&lt;DataBuffer&gt; frames = new ArrayList&lt;&gt;();</span>
+		do {
+<span class="fc" id="L119">			int length = Integer.MAX_VALUE;</span>
+<span class="fc" id="L120">			byte[] matchingDelimiter = null;</span>
+<span class="fc bfc" id="L121" title="All 2 branches covered.">			for (byte[] delimiter : delimiterBytes) {</span>
+<span class="fc" id="L122">				int index = indexOf(dataBuffer, delimiter);</span>
+<span class="fc bfc" id="L123" title="All 4 branches covered.">				if (index &gt;= 0 &amp;&amp; index &lt; length) {</span>
+<span class="fc" id="L124">					length = index;</span>
+<span class="fc" id="L125">					matchingDelimiter = delimiter;</span>
+				}
+<span class="fc" id="L127">			}</span>
+			DataBuffer frame;
+<span class="fc" id="L129">			int readPosition = dataBuffer.readPosition();</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">			if (matchingDelimiter != null) {</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">				if (this.stripDelimiter) {</span>
+<span class="fc" id="L132">					frame = dataBuffer.slice(readPosition, length);</span>
+				}
+				else {
+<span class="fc" id="L135">					frame = dataBuffer.slice(readPosition, length + matchingDelimiter.length);</span>
+				}
+<span class="fc" id="L137">				dataBuffer.readPosition(readPosition + length + matchingDelimiter.length);</span>
+
+<span class="fc" id="L139">				frames.add(DataBufferUtils.retain(frame));</span>
+<span class="fc" id="L140">				frames.add(END_FRAME);</span>
+			}
+			else {
+<span class="fc" id="L143">				frame = dataBuffer.slice(readPosition, dataBuffer.readableByteCount());</span>
+<span class="fc" id="L144">				dataBuffer.readPosition(readPosition + dataBuffer.readableByteCount());</span>
+<span class="fc" id="L145">				frames.add(DataBufferUtils.retain(frame));</span>
+			}
+		}
+<span class="fc bfc" id="L148" title="All 2 branches covered.">		while (dataBuffer.readableByteCount() &gt; 0);</span>
+
+<span class="fc" id="L150">		DataBufferUtils.release(dataBuffer);</span>
+<span class="fc" id="L151">		return frames;</span>
+	}
+
+	/**
+	 * Find the given delimiter in the given data buffer.
+	 * @return the index of the delimiter, or -1 if not found.
+	 */
+	private static int indexOf(DataBuffer dataBuffer, byte[] delimiter) {
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		for (int i = dataBuffer.readPosition(); i &lt; dataBuffer.writePosition(); i++) {</span>
+<span class="fc" id="L160">			int dataBufferPos = i;</span>
+<span class="fc" id="L161">			int delimiterPos = 0;</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">			while (delimiterPos &lt; delimiter.length) {</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">				if (dataBuffer.getByte(dataBufferPos) != delimiter[delimiterPos]) {</span>
+<span class="fc" id="L164">					break;</span>
+				}
+				else {
+<span class="fc" id="L167">					dataBufferPos++;</span>
+<span class="pc bpc" id="L168" title="1 of 4 branches missed.">					if (dataBufferPos == dataBuffer.writePosition() &amp;&amp;</span>
+							delimiterPos != delimiter.length - 1) {
+<span class="nc" id="L170">						return -1;</span>
+					}
+				}
+<span class="fc" id="L173">				delimiterPos++;</span>
+			}
+<span class="fc bfc" id="L175" title="All 2 branches covered.">			if (delimiterPos == delimiter.length) {</span>
+<span class="fc" id="L176">				return i - dataBuffer.readPosition();</span>
+			}
+		}
+<span class="fc" id="L179">		return -1;</span>
+	}
+
+	/**
+	 * Check whether the given buffer is {@link #END_FRAME}.
+	 */
+	private static boolean isEndFrame(DataBuffer dataBuffer) {
+<span class="fc bfc" id="L186" title="All 2 branches covered.">		return dataBuffer == END_FRAME;</span>
+	}
+
+	/**
+	 * Join the given list of buffers into a single buffer.
+	 */
+	private static DataBuffer joinUntilEndFrame(List&lt;DataBuffer&gt; dataBuffers) {
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">		if (!dataBuffers.isEmpty()) {</span>
+<span class="fc" id="L194">			int lastIdx = dataBuffers.size() - 1;</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">			if (isEndFrame(dataBuffers.get(lastIdx))) {</span>
+<span class="fc" id="L196">				dataBuffers.remove(lastIdx);</span>
+			}
+		}
+<span class="fc" id="L199">		return dataBuffers.get(0).factory().join(dataBuffers);</span>
+	}
+
+	@Override
+	protected String decodeDataBuffer(DataBuffer dataBuffer, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L206">		Charset charset = getCharset(mimeType);</span>
+<span class="fc" id="L207">		CharBuffer charBuffer = charset.decode(dataBuffer.asByteBuffer());</span>
+<span class="fc" id="L208">		DataBufferUtils.release(dataBuffer);</span>
+<span class="fc" id="L209">		String value = charBuffer.toString();</span>
+<span class="fc" id="L210">		LogFormatUtils.traceDebug(logger, traceOn -&gt; {</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">			String formatted = LogFormatUtils.formatValue(value, !traceOn);</span>
+<span class="nc" id="L212">			return Hints.getLogPrefix(hints) + &quot;Decoded &quot; + formatted;</span>
+		});
+<span class="fc" id="L214">		return value;</span>
+	}
+
+	private static Charset getCharset(@Nullable MimeType mimeType) {
+<span class="pc bpc" id="L218" title="1 of 4 branches missed.">		if (mimeType != null &amp;&amp; mimeType.getCharset() != null) {</span>
+<span class="fc" id="L219">			return mimeType.getCharset();</span>
+		}
+		else {
+<span class="fc" id="L222">			return DEFAULT_CHARSET;</span>
+		}
+	}
+
+
+	/**
+	 * Create a {@code StringDecoder} for {@code &quot;text/plain&quot;}.
+	 * @param ignored ignored
+	 * @deprecated as of Spring 5.0.4, in favor of {@link #textPlainOnly()} or
+	 * {@link #textPlainOnly(List, boolean)}
+	 */
+	@Deprecated
+	public static StringDecoder textPlainOnly(boolean ignored) {
+<span class="nc" id="L235">		return textPlainOnly();</span>
+	}
+
+	/**
+	 * Create a {@code StringDecoder} for {@code &quot;text/plain&quot;}.
+	 */
+	public static StringDecoder textPlainOnly() {
+<span class="nc" id="L242">		return textPlainOnly(DEFAULT_DELIMITERS, true);</span>
+	}
+
+	/**
+	 * Create a {@code StringDecoder} for {@code &quot;text/plain&quot;}.
+	 * @param delimiters delimiter strings to use to split the input stream
+	 * @param stripDelimiter whether to remove delimiters from the resulting
+	 * input strings
+	 */
+	public static StringDecoder textPlainOnly(List&lt;String&gt; delimiters, boolean stripDelimiter) {
+<span class="nc" id="L252">		return new StringDecoder(delimiters, stripDelimiter, new MimeType(&quot;text&quot;, &quot;plain&quot;, DEFAULT_CHARSET));</span>
+	}
+
+	/**
+	 * Create a {@code StringDecoder} that supports all MIME types.
+	 * @param ignored ignored
+	 * @deprecated as of Spring 5.0.4, in favor of {@link #allMimeTypes()} or
+	 * {@link #allMimeTypes(List, boolean)}
+	 */
+	@Deprecated
+	public static StringDecoder allMimeTypes(boolean ignored) {
+<span class="nc" id="L263">		return allMimeTypes();</span>
+	}
+
+	/**
+	 * Create a {@code StringDecoder} that supports all MIME types.
+	 */
+	public static StringDecoder allMimeTypes() {
+<span class="fc" id="L270">		return allMimeTypes(DEFAULT_DELIMITERS, true);</span>
+	}
+
+	/**
+	 * Create a {@code StringDecoder} that supports all MIME types.
+	 * @param delimiters delimiter strings to use to split the input stream
+	 * @param stripDelimiter whether to remove delimiters from the resulting
+	 * input strings
+	 */
+	public static StringDecoder allMimeTypes(List&lt;String&gt; delimiters, boolean stripDelimiter) {
+<span class="fc" id="L280">		return new StringDecoder(delimiters, stripDelimiter,</span>
+				new MimeType(&quot;text&quot;, &quot;plain&quot;, DEFAULT_CHARSET), MimeTypeUtils.ALL);
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

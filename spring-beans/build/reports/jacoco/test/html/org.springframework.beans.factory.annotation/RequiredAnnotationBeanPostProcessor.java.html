@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequiredAnnotationBeanPostProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.annotation</a> &gt; <span class="el_source">RequiredAnnotationBeanPostProcessor.java</span></div><h1>RequiredAnnotationBeanPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.annotation;
+
+import java.beans.PropertyDescriptor;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.springframework.beans.PropertyValues;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanInitializationException;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.config.InstantiationAwareBeanPostProcessorAdapter;
+import org.springframework.beans.factory.support.MergedBeanDefinitionPostProcessor;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.core.Conventions;
+import org.springframework.core.Ordered;
+import org.springframework.core.PriorityOrdered;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+
+/**
+ * {@link org.springframework.beans.factory.config.BeanPostProcessor} implementation
+ * that enforces required JavaBean properties to have been configured.
+ * Required bean properties are detected through a Java 5 annotation:
+ * by default, Spring's {@link Required} annotation.
+ *
+ * &lt;p&gt;The motivation for the existence of this BeanPostProcessor is to allow
+ * developers to annotate the setter properties of their own classes with an
+ * arbitrary JDK 1.5 annotation to indicate that the container must check
+ * for the configuration of a dependency injected value. This neatly pushes
+ * responsibility for such checking onto the container (where it arguably belongs),
+ * and obviates the need (&lt;b&gt;in part&lt;/b&gt;) for a developer to code a method that
+ * simply checks that all required properties have actually been set.
+ *
+ * &lt;p&gt;Please note that an 'init' method may still need to be implemented (and may
+ * still be desirable), because all that this class does is enforcing that a
+ * 'required' property has actually been configured with a value. It does
+ * &lt;b&gt;not&lt;/b&gt; check anything else... In particular, it does not check that a
+ * configured value is not {@code null}.
+ *
+ * &lt;p&gt;Note: A default RequiredAnnotationBeanPostProcessor will be registered
+ * by the &quot;context:annotation-config&quot; and &quot;context:component-scan&quot; XML tags.
+ * Remove or turn off the default annotation configuration there if you intend
+ * to specify a custom RequiredAnnotationBeanPostProcessor bean definition.
+ *
+ * @author Rob Harrop
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see #setRequiredAnnotationType
+ * @see Required
+ * @deprecated as of 5.1, in favor of using constructor injection for required settings
+ * (or a custom {@link org.springframework.beans.factory.InitializingBean} implementation)
+ */
+@Deprecated
+<span class="fc" id="L78">public class RequiredAnnotationBeanPostProcessor extends InstantiationAwareBeanPostProcessorAdapter</span>
+		implements MergedBeanDefinitionPostProcessor, PriorityOrdered, BeanFactoryAware {
+
+	/**
+	 * Bean definition attribute that may indicate whether a given bean is supposed
+	 * to be skipped when performing this post-processor's required property check.
+	 * @see #shouldSkip
+	 */
+<span class="fc" id="L86">	public static final String SKIP_REQUIRED_CHECK_ATTRIBUTE =</span>
+<span class="fc" id="L87">			Conventions.getQualifiedAttributeName(RequiredAnnotationBeanPostProcessor.class, &quot;skipRequiredCheck&quot;);</span>
+
+
+<span class="fc" id="L90">	private Class&lt;? extends Annotation&gt; requiredAnnotationType = Required.class;</span>
+
+<span class="fc" id="L92">	private int order = Ordered.LOWEST_PRECEDENCE - 1;</span>
+
+	@Nullable
+	private ConfigurableListableBeanFactory beanFactory;
+
+	/**
+	 * Cache for validated bean names, skipping re-validation for the same bean.
+	 */
+<span class="fc" id="L100">	private final Set&lt;String&gt; validatedBeanNames = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(64));</span>
+
+
+	/**
+	 * Set the 'required' annotation type, to be used on bean property
+	 * setter methods.
+	 * &lt;p&gt;The default required annotation type is the Spring-provided
+	 * {@link Required} annotation.
+	 * &lt;p&gt;This setter property exists so that developers can provide their own
+	 * (non-Spring-specific) annotation type to indicate that a property value
+	 * is required.
+	 */
+	public void setRequiredAnnotationType(Class&lt;? extends Annotation&gt; requiredAnnotationType) {
+<span class="fc" id="L113">		Assert.notNull(requiredAnnotationType, &quot;'requiredAnnotationType' must not be null&quot;);</span>
+<span class="fc" id="L114">		this.requiredAnnotationType = requiredAnnotationType;</span>
+<span class="fc" id="L115">	}</span>
+
+	/**
+	 * Return the 'required' annotation type.
+	 */
+	protected Class&lt;? extends Annotation&gt; getRequiredAnnotationType() {
+<span class="fc" id="L121">		return this.requiredAnnotationType;</span>
+	}
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">		if (beanFactory instanceof ConfigurableListableBeanFactory) {</span>
+<span class="fc" id="L127">			this.beanFactory = (ConfigurableListableBeanFactory) beanFactory;</span>
+		}
+<span class="fc" id="L129">	}</span>
+
+	public void setOrder(int order) {
+<span class="nc" id="L132">		this.order = order;</span>
+<span class="nc" id="L133">	}</span>
+
+	@Override
+	public int getOrder() {
+<span class="nc" id="L137">		return this.order;</span>
+	}
+
+
+	@Override
+	public void postProcessMergedBeanDefinition(RootBeanDefinition beanDefinition, Class&lt;?&gt; beanType, String beanName) {
+<span class="fc" id="L143">	}</span>
+
+	@Override
+	public PropertyValues postProcessPropertyValues(
+			PropertyValues pvs, PropertyDescriptor[] pds, Object bean, String beanName) {
+
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">		if (!this.validatedBeanNames.contains(beanName)) {</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">			if (!shouldSkip(this.beanFactory, beanName)) {</span>
+<span class="fc" id="L151">				List&lt;String&gt; invalidProperties = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">				for (PropertyDescriptor pd : pds) {</span>
+<span class="fc bfc" id="L153" title="All 4 branches covered.">					if (isRequiredProperty(pd) &amp;&amp; !pvs.contains(pd.getName())) {</span>
+<span class="fc" id="L154">						invalidProperties.add(pd.getName());</span>
+					}
+				}
+<span class="fc bfc" id="L157" title="All 2 branches covered.">				if (!invalidProperties.isEmpty()) {</span>
+<span class="fc" id="L158">					throw new BeanInitializationException(buildExceptionMessage(invalidProperties, beanName));</span>
+				}
+			}
+<span class="fc" id="L161">			this.validatedBeanNames.add(beanName);</span>
+		}
+<span class="fc" id="L163">		return pvs;</span>
+	}
+
+	/**
+	 * Check whether the given bean definition is not subject to the annotation-based
+	 * required property check as performed by this post-processor.
+	 * &lt;p&gt;The default implementations check for the presence of the
+	 * {@link #SKIP_REQUIRED_CHECK_ATTRIBUTE} attribute in the bean definition, if any.
+	 * It also suggests skipping in case of a bean definition with a &quot;factory-bean&quot;
+	 * reference set, assuming that instance-based factories pre-populate the bean.
+	 * @param beanFactory the BeanFactory to check against
+	 * @param beanName the name of the bean to check against
+	 * @return {@code true} to skip the bean; {@code false} to process it
+	 */
+	protected boolean shouldSkip(@Nullable ConfigurableListableBeanFactory beanFactory, String beanName) {
+<span class="pc bpc" id="L178" title="1 of 4 branches missed.">		if (beanFactory == null || !beanFactory.containsBeanDefinition(beanName)) {</span>
+<span class="fc" id="L179">			return false;</span>
+		}
+<span class="fc" id="L181">		BeanDefinition beanDefinition = beanFactory.getBeanDefinition(beanName);</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">		if (beanDefinition.getFactoryBeanName() != null) {</span>
+<span class="fc" id="L183">			return true;</span>
+		}
+<span class="fc" id="L185">		Object value = beanDefinition.getAttribute(SKIP_REQUIRED_CHECK_ATTRIBUTE);</span>
+<span class="pc bpc" id="L186" title="5 of 6 branches missed.">		return (value != null &amp;&amp; (Boolean.TRUE.equals(value) || Boolean.valueOf(value.toString())));</span>
+	}
+
+	/**
+	 * Is the supplied property required to have a value (that is, to be dependency-injected)?
+	 * &lt;p&gt;This implementation looks for the existence of a
+	 * {@link #setRequiredAnnotationType &quot;required&quot; annotation}
+	 * on the supplied {@link PropertyDescriptor property}.
+	 * @param propertyDescriptor the target PropertyDescriptor (never {@code null})
+	 * @return {@code true} if the supplied property has been marked as being required;
+	 * {@code false} if not, or if the supplied property does not have a setter method
+	 */
+	protected boolean isRequiredProperty(PropertyDescriptor propertyDescriptor) {
+<span class="fc" id="L199">		Method setter = propertyDescriptor.getWriteMethod();</span>
+<span class="fc bfc" id="L200" title="All 4 branches covered.">		return (setter != null &amp;&amp; AnnotationUtils.getAnnotation(setter, getRequiredAnnotationType()) != null);</span>
+	}
+
+	/**
+	 * Build an exception message for the given list of invalid properties.
+	 * @param invalidProperties the list of names of invalid properties
+	 * @param beanName the name of the bean
+	 * @return the exception message
+	 */
+	private String buildExceptionMessage(List&lt;String&gt; invalidProperties, String beanName) {
+<span class="fc" id="L210">		int size = invalidProperties.size();</span>
+<span class="fc" id="L211">		StringBuilder sb = new StringBuilder();</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">		sb.append(size == 1 ? &quot;Property&quot; : &quot;Properties&quot;);</span>
+<span class="fc bfc" id="L213" title="All 2 branches covered.">		for (int i = 0; i &lt; size; i++) {</span>
+<span class="fc" id="L214">			String propertyName = invalidProperties.get(i);</span>
+<span class="fc bfc" id="L215" title="All 2 branches covered.">			if (i &gt; 0) {</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">				if (i == (size - 1)) {</span>
+<span class="fc" id="L217">					sb.append(&quot; and&quot;);</span>
+				}
+				else {
+<span class="fc" id="L220">					sb.append(&quot;,&quot;);</span>
+				}
+			}
+<span class="fc" id="L223">			sb.append(&quot; '&quot;).append(propertyName).append(&quot;'&quot;);</span>
+		}
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		sb.append(size == 1 ? &quot; is&quot; : &quot; are&quot;);</span>
+<span class="fc" id="L226">		sb.append(&quot; required for bean '&quot;).append(beanName).append(&quot;'&quot;);</span>
+<span class="fc" id="L227">		return sb.toString();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

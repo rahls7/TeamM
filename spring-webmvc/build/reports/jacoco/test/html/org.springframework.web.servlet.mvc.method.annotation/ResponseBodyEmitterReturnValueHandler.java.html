@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResponseBodyEmitterReturnValueHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.mvc.method.annotation</a> &gt; <span class="el_source">ResponseBodyEmitterReturnValueHandler.java</span></div><h1>ResponseBodyEmitterReturnValueHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.mvc.method.annotation;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.util.List;
+import java.util.function.Consumer;
+import javax.servlet.ServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.http.server.ServletServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.web.accept.ContentNegotiationManager;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.context.request.async.DeferredResult;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+import org.springframework.web.filter.ShallowEtagHeaderFilter;
+import org.springframework.web.method.support.HandlerMethodReturnValueHandler;
+import org.springframework.web.method.support.ModelAndViewContainer;
+
+/**
+ * Handler for return values of type {@link ResponseBodyEmitter} and sub-classes
+ * such as {@link SseEmitter} including the same types wrapped with
+ * {@link ResponseEntity}.
+ *
+ * &lt;p&gt;As of 5.0 also supports reactive return value types for any reactive
+ * library with registered adapters in {@link ReactiveAdapterRegistry}.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.2
+ */
+public class ResponseBodyEmitterReturnValueHandler implements HandlerMethodReturnValueHandler {
+
+	private final List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters;
+
+	private final ReactiveTypeHandler reactiveHandler;
+
+
+	/**
+	 * Simple constructor with reactive type support based on a default instance of
+	 * {@link ReactiveAdapterRegistry},
+	 * {@link org.springframework.core.task.SyncTaskExecutor}, and
+	 * {@link ContentNegotiationManager} with an Accept header strategy.
+	 */
+<span class="fc" id="L71">	public ResponseBodyEmitterReturnValueHandler(List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters) {</span>
+<span class="fc" id="L72">		Assert.notEmpty(messageConverters, &quot;HttpMessageConverter List must not be empty&quot;);</span>
+<span class="fc" id="L73">		this.messageConverters = messageConverters;</span>
+<span class="fc" id="L74">		this.reactiveHandler = new ReactiveTypeHandler();</span>
+<span class="fc" id="L75">	}</span>
+
+	/**
+	 * Complete constructor with pluggable &quot;reactive&quot; type support.
+	 * @param messageConverters converters to write emitted objects with
+	 * @param reactiveRegistry for reactive return value type support
+	 * @param executor for blocking I/O writes of items emitted from reactive types
+	 * @param manager for detecting streaming media types
+	 * @since 5.0
+	 */
+	public ResponseBodyEmitterReturnValueHandler(List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters,
+<span class="fc" id="L86">			ReactiveAdapterRegistry reactiveRegistry, TaskExecutor executor, ContentNegotiationManager manager) {</span>
+
+<span class="fc" id="L88">		Assert.notEmpty(messageConverters, &quot;HttpMessageConverter List must not be empty&quot;);</span>
+<span class="fc" id="L89">		this.messageConverters = messageConverters;</span>
+<span class="fc" id="L90">		this.reactiveHandler = new ReactiveTypeHandler(reactiveRegistry, executor, manager);</span>
+<span class="fc" id="L91">	}</span>
+
+
+	@Override
+	public boolean supportsReturnType(MethodParameter returnType) {
+<span class="fc bfc" id="L96" title="All 2 branches covered.">		Class&lt;?&gt; bodyType = ResponseEntity.class.isAssignableFrom(returnType.getParameterType()) ?</span>
+<span class="fc" id="L97">				ResolvableType.forMethodParameter(returnType).getGeneric().resolve() :</span>
+<span class="fc" id="L98">				returnType.getParameterType();</span>
+
+<span class="fc bfc" id="L100" title="All 4 branches covered.">		return (bodyType != null &amp;&amp; (ResponseBodyEmitter.class.isAssignableFrom(bodyType) ||</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">				this.reactiveHandler.isReactiveType(bodyType)));</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;resource&quot;)
+	public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+			ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception {
+
+<span class="fc bfc" id="L109" title="All 2 branches covered.">		if (returnValue == null) {</span>
+<span class="fc" id="L110">			mavContainer.setRequestHandled(true);</span>
+<span class="fc" id="L111">			return;</span>
+		}
+
+<span class="fc" id="L114">		HttpServletResponse response = webRequest.getNativeResponse(HttpServletResponse.class);</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">		Assert.state(response != null, &quot;No HttpServletResponse&quot;);</span>
+<span class="fc" id="L116">		ServerHttpResponse outputMessage = new ServletServerHttpResponse(response);</span>
+
+<span class="fc bfc" id="L118" title="All 2 branches covered.">		if (returnValue instanceof ResponseEntity) {</span>
+<span class="fc" id="L119">			ResponseEntity&lt;?&gt; responseEntity = (ResponseEntity&lt;?&gt;) returnValue;</span>
+<span class="fc" id="L120">			response.setStatus(responseEntity.getStatusCodeValue());</span>
+<span class="fc" id="L121">			outputMessage.getHeaders().putAll(responseEntity.getHeaders());</span>
+<span class="fc" id="L122">			returnValue = responseEntity.getBody();</span>
+<span class="fc" id="L123">			returnType = returnType.nested();</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">			if (returnValue == null) {</span>
+<span class="fc" id="L125">				mavContainer.setRequestHandled(true);</span>
+<span class="fc" id="L126">				outputMessage.flush();</span>
+<span class="fc" id="L127">				return;</span>
+			}
+		}
+
+<span class="fc" id="L131">		ServletRequest request = webRequest.getNativeRequest(ServletRequest.class);</span>
+<span class="pc bpc" id="L132" title="1 of 2 branches missed.">		Assert.state(request != null, &quot;No ServletRequest&quot;);</span>
+
+		ResponseBodyEmitter emitter;
+<span class="fc bfc" id="L135" title="All 2 branches covered.">		if (returnValue instanceof ResponseBodyEmitter) {</span>
+<span class="fc" id="L136">			emitter = (ResponseBodyEmitter) returnValue;</span>
+		}
+		else {
+<span class="fc" id="L139">			emitter = this.reactiveHandler.handleValue(returnValue, returnType, mavContainer, webRequest);</span>
+<span class="fc bfc" id="L140" title="All 2 branches covered.">			if (emitter == null) {</span>
+				// Not streaming: write headers without committing response..
+<span class="fc" id="L142">				outputMessage.getHeaders().forEach((headerName, headerValues) -&gt; {</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">					for (String headerValue : headerValues) {</span>
+<span class="fc" id="L144">						response.addHeader(headerName, headerValue);</span>
+<span class="fc" id="L145">					}</span>
+<span class="fc" id="L146">				});</span>
+<span class="fc" id="L147">				return;</span>
+			}
+		}
+<span class="fc" id="L150">		emitter.extendResponse(outputMessage);</span>
+
+		// At this point we know we're streaming..
+<span class="fc" id="L153">		ShallowEtagHeaderFilter.disableContentCaching(request);</span>
+
+		// Commit the response and wrap to ignore further header changes
+<span class="fc" id="L156">		outputMessage.getBody();</span>
+<span class="fc" id="L157">		outputMessage.flush();</span>
+<span class="fc" id="L158">		outputMessage = new StreamingServletServerHttpResponse(outputMessage);</span>
+
+<span class="fc" id="L160">		DeferredResult&lt;?&gt; deferredResult = new DeferredResult&lt;&gt;(emitter.getTimeout());</span>
+<span class="fc" id="L161">		WebAsyncUtils.getAsyncManager(webRequest).startDeferredResultProcessing(deferredResult, mavContainer);</span>
+
+<span class="fc" id="L163">		HttpMessageConvertingHandler handler = new HttpMessageConvertingHandler(outputMessage, deferredResult);</span>
+<span class="fc" id="L164">		emitter.initialize(handler);</span>
+<span class="fc" id="L165">	}</span>
+
+
+	/**
+	 * ResponseBodyEmitter.Handler that writes with HttpMessageConverter's.
+	 */
+	private class HttpMessageConvertingHandler implements ResponseBodyEmitter.Handler {
+
+		private final ServerHttpResponse outputMessage;
+
+		private final DeferredResult&lt;?&gt; deferredResult;
+
+<span class="fc" id="L177">		public HttpMessageConvertingHandler(ServerHttpResponse outputMessage, DeferredResult&lt;?&gt; deferredResult) {</span>
+<span class="fc" id="L178">			this.outputMessage = outputMessage;</span>
+<span class="fc" id="L179">			this.deferredResult = deferredResult;</span>
+<span class="fc" id="L180">		}</span>
+
+		@Override
+		public void send(Object data, @Nullable MediaType mediaType) throws IOException {
+<span class="fc" id="L184">			sendInternal(data, mediaType);</span>
+<span class="fc" id="L185">		}</span>
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		private &lt;T&gt; void sendInternal(T data, @Nullable MediaType mediaType) throws IOException {
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">			for (HttpMessageConverter&lt;?&gt; converter : ResponseBodyEmitterReturnValueHandler.this.messageConverters) {</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">				if (converter.canWrite(data.getClass(), mediaType)) {</span>
+<span class="fc" id="L191">					((HttpMessageConverter&lt;T&gt;) converter).write(data, mediaType, this.outputMessage);</span>
+<span class="fc" id="L192">					this.outputMessage.flush();</span>
+<span class="fc" id="L193">					return;</span>
+				}
+<span class="fc" id="L195">			}</span>
+<span class="nc" id="L196">			throw new IllegalArgumentException(&quot;No suitable converter for &quot; + data.getClass());</span>
+		}
+
+		@Override
+		public void complete() {
+<span class="fc" id="L201">			this.deferredResult.setResult(null);</span>
+<span class="fc" id="L202">		}</span>
+
+		@Override
+		public void completeWithError(Throwable failure) {
+<span class="nc" id="L206">			this.deferredResult.setErrorResult(failure);</span>
+<span class="nc" id="L207">		}</span>
+
+		@Override
+		public void onTimeout(Runnable callback) {
+<span class="fc" id="L211">			this.deferredResult.onTimeout(callback);</span>
+<span class="fc" id="L212">		}</span>
+
+		@Override
+		public void onError(Consumer&lt;Throwable&gt; callback) {
+<span class="fc" id="L216">			this.deferredResult.onError(callback);</span>
+<span class="fc" id="L217">		}</span>
+
+		@Override
+		public void onCompletion(Runnable callback) {
+<span class="fc" id="L221">			this.deferredResult.onCompletion(callback);</span>
+<span class="fc" id="L222">		}</span>
+	}
+
+
+	/**
+	 * Wrap to silently ignore header changes HttpMessageConverter's that would
+	 * otherwise cause HttpHeaders to raise exceptions.
+	 */
+	private static class StreamingServletServerHttpResponse implements ServerHttpResponse {
+
+		private final ServerHttpResponse delegate;
+
+<span class="fc" id="L234">		private final HttpHeaders mutableHeaders = new HttpHeaders();</span>
+
+<span class="fc" id="L236">		public StreamingServletServerHttpResponse(ServerHttpResponse delegate) {</span>
+<span class="fc" id="L237">			this.delegate = delegate;</span>
+<span class="fc" id="L238">			this.mutableHeaders.putAll(delegate.getHeaders());</span>
+<span class="fc" id="L239">		}</span>
+
+		@Override
+		public void setStatusCode(HttpStatus status) {
+<span class="nc" id="L243">			this.delegate.setStatusCode(status);</span>
+<span class="nc" id="L244">		}</span>
+
+		@Override
+		public HttpHeaders getHeaders() {
+<span class="fc" id="L248">			return this.mutableHeaders;</span>
+		}
+
+		@Override
+		public OutputStream getBody() throws IOException {
+<span class="fc" id="L253">			return this.delegate.getBody();</span>
+		}
+
+		@Override
+		public void flush() throws IOException {
+<span class="fc" id="L258">			this.delegate.flush();</span>
+<span class="fc" id="L259">		}</span>
+
+		@Override
+		public void close() {
+<span class="nc" id="L263">			this.delegate.close();</span>
+<span class="nc" id="L264">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

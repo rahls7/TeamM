@@ -1,0 +1,379 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SockJsClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-websocket</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.sockjs.client</a> &gt; <span class="el_source">SockJsClient.java</span></div><h1>SockJsClient.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.sockjs.client;
+
+import java.net.URI;
+import java.security.Principal;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.context.Lifecycle;
+import org.springframework.http.HttpHeaders;
+import org.springframework.lang.Nullable;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.concurrent.ListenableFuture;
+import org.springframework.util.concurrent.SettableListenableFuture;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.WebSocketHttpHeaders;
+import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.client.WebSocketClient;
+import org.springframework.web.socket.sockjs.frame.Jackson2SockJsMessageCodec;
+import org.springframework.web.socket.sockjs.frame.SockJsMessageCodec;
+import org.springframework.web.socket.sockjs.transport.TransportType;
+import org.springframework.web.util.UriComponentsBuilder;
+
+/**
+ * A SockJS implementation of
+ * {@link org.springframework.web.socket.client.WebSocketClient WebSocketClient}
+ * with fallback alternatives that simulate a WebSocket interaction through plain
+ * HTTP streaming and long polling techniques..
+ *
+ * &lt;p&gt;Implements {@link Lifecycle} in order to propagate lifecycle events to
+ * the transports it is configured with.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.1
+ * @see &lt;a href=&quot;https://github.com/sockjs/sockjs-client&quot;&gt;https://github.com/sockjs/sockjs-client&lt;/a&gt;
+ * @see org.springframework.web.socket.sockjs.client.Transport
+ */
+public class SockJsClient implements WebSocketClient, Lifecycle {
+
+<span class="fc" id="L65">	private static final boolean jackson2Present = ClassUtils.isPresent(</span>
+<span class="fc" id="L66">			&quot;com.fasterxml.jackson.databind.ObjectMapper&quot;, SockJsClient.class.getClassLoader());</span>
+
+<span class="fc" id="L68">	private static final Log logger = LogFactory.getLog(SockJsClient.class);</span>
+
+<span class="fc" id="L70">	private static final Set&lt;String&gt; supportedProtocols = new HashSet&lt;&gt;(4);</span>
+
+	static {
+<span class="fc" id="L73">		supportedProtocols.add(&quot;ws&quot;);</span>
+<span class="fc" id="L74">		supportedProtocols.add(&quot;wss&quot;);</span>
+<span class="fc" id="L75">		supportedProtocols.add(&quot;http&quot;);</span>
+<span class="fc" id="L76">		supportedProtocols.add(&quot;https&quot;);</span>
+<span class="fc" id="L77">	}</span>
+
+
+	private final List&lt;Transport&gt; transports;
+
+	@Nullable
+	private String[] httpHeaderNames;
+
+	private InfoReceiver infoReceiver;
+
+	@Nullable
+	private SockJsMessageCodec messageCodec;
+
+	@Nullable
+	private TaskScheduler connectTimeoutScheduler;
+
+<span class="fc" id="L93">	private volatile boolean running = false;</span>
+
+<span class="fc" id="L95">	private final Map&lt;URI, ServerInfo&gt; serverInfoCache = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Create a {@code SockJsClient} with the given transports.
+	 * &lt;p&gt;If the list includes an {@link XhrTransport} (or more specifically an
+	 * implementation of {@link InfoReceiver}) the instance is used to initialize
+	 * the {@link #setInfoReceiver(InfoReceiver) infoReceiver} property, or
+	 * otherwise is defaulted to {@link RestTemplateXhrTransport}.
+	 * @param transports the (non-empty) list of transports to use
+	 */
+<span class="fc" id="L106">	public SockJsClient(List&lt;Transport&gt; transports) {</span>
+<span class="fc" id="L107">		Assert.notEmpty(transports, &quot;No transports provided&quot;);</span>
+<span class="fc" id="L108">		this.transports = new ArrayList&lt;&gt;(transports);</span>
+<span class="fc" id="L109">		this.infoReceiver = initInfoReceiver(transports);</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">		if (jackson2Present) {</span>
+<span class="fc" id="L111">			this.messageCodec = new Jackson2SockJsMessageCodec();</span>
+		}
+<span class="fc" id="L113">	}</span>
+
+	private static InfoReceiver initInfoReceiver(List&lt;Transport&gt; transports) {
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">		for (Transport transport : transports) {</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">			if (transport instanceof InfoReceiver) {</span>
+<span class="fc" id="L118">				return ((InfoReceiver) transport);</span>
+			}
+<span class="fc" id="L120">		}</span>
+<span class="nc" id="L121">		return new RestTemplateXhrTransport();</span>
+	}
+
+
+	/**
+	 * The names of HTTP headers that should be copied from the handshake headers
+	 * of each call to {@link SockJsClient#doHandshake(WebSocketHandler, WebSocketHttpHeaders, URI)}
+	 * and also used with other HTTP requests issued as part of that SockJS
+	 * connection, e.g. the initial info request, XHR send or receive requests.
+	 * &lt;p&gt;By default if this property is not set, all handshake headers are also
+	 * used for other HTTP requests. Set it if you want only a subset of handshake
+	 * headers (e.g. auth headers) to be used for other HTTP requests.
+	 * @param httpHeaderNames the HTTP header names
+	 */
+	public void setHttpHeaderNames(@Nullable String... httpHeaderNames) {
+<span class="fc" id="L136">		this.httpHeaderNames = httpHeaderNames;</span>
+<span class="fc" id="L137">	}</span>
+
+	/**
+	 * The configured HTTP header names to be copied from the handshake
+	 * headers and also included in other HTTP requests.
+	 */
+	@Nullable
+	public String[] getHttpHeaderNames() {
+<span class="fc" id="L145">		return this.httpHeaderNames;</span>
+	}
+
+	/**
+	 * Configure the {@code InfoReceiver} to use to perform the SockJS &quot;Info&quot;
+	 * request before the SockJS session starts.
+	 * &lt;p&gt;If the list of transports provided to the constructor contained an
+	 * {@link XhrTransport} or an implementation of {@link InfoReceiver} that
+	 * instance would have been used to initialize this property, or otherwise
+	 * it defaults to {@link RestTemplateXhrTransport}.
+	 * @param infoReceiver the transport to use for the SockJS &quot;Info&quot; request
+	 */
+	public void setInfoReceiver(InfoReceiver infoReceiver) {
+<span class="fc" id="L158">		Assert.notNull(infoReceiver, &quot;InfoReceiver is required&quot;);</span>
+<span class="fc" id="L159">		this.infoReceiver = infoReceiver;</span>
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Return the configured {@code InfoReceiver} (never {@code null}).
+	 */
+	public InfoReceiver getInfoReceiver() {
+<span class="nc" id="L166">		return this.infoReceiver;</span>
+	}
+
+	/**
+	 * Set the SockJsMessageCodec to use.
+	 * &lt;p&gt;By default {@link org.springframework.web.socket.sockjs.frame.Jackson2SockJsMessageCodec
+	 * Jackson2SockJsMessageCodec} is used if Jackson is on the classpath.
+	 */
+	public void setMessageCodec(SockJsMessageCodec messageCodec) {
+<span class="nc" id="L175">		Assert.notNull(messageCodec, &quot;SockJsMessageCodec is required&quot;);</span>
+<span class="nc" id="L176">		this.messageCodec = messageCodec;</span>
+<span class="nc" id="L177">	}</span>
+
+	/**
+	 * Return the SockJsMessageCodec to use.
+	 */
+	public SockJsMessageCodec getMessageCodec() {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">		Assert.state(this.messageCodec != null, &quot;No SockJsMessageCodec set&quot;);</span>
+<span class="fc" id="L184">		return this.messageCodec;</span>
+	}
+
+	/**
+	 * Configure a {@code TaskScheduler} for scheduling a connect timeout task
+	 * where the timeout value is calculated based on the duration of the initial
+	 * SockJS &quot;Info&quot; request. The connect timeout task ensures a more timely
+	 * fallback but is otherwise entirely optional.
+	 * &lt;p&gt;By default this is not configured in which case a fallback may take longer.
+	 * @param connectTimeoutScheduler the task scheduler to use
+	 */
+	public void setConnectTimeoutScheduler(TaskScheduler connectTimeoutScheduler) {
+<span class="nc" id="L196">		this.connectTimeoutScheduler = connectTimeoutScheduler;</span>
+<span class="nc" id="L197">	}</span>
+
+
+	@Override
+	public void start() {
+<span class="nc bnc" id="L202" title="All 2 branches missed.">		if (!isRunning()) {</span>
+<span class="nc" id="L203">			this.running = true;</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">			for (Transport transport : this.transports) {</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">				if (transport instanceof Lifecycle) {</span>
+<span class="nc" id="L206">					Lifecycle lifecycle = (Lifecycle) transport;</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">					if (!lifecycle.isRunning()) {</span>
+<span class="nc" id="L208">						lifecycle.start();</span>
+					}
+				}
+<span class="nc" id="L211">			}</span>
+		}
+<span class="nc" id="L213">	}</span>
+
+	@Override
+	public void stop() {
+<span class="nc bnc" id="L217" title="All 2 branches missed.">		if (isRunning()) {</span>
+<span class="nc" id="L218">			this.running = false;</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">			for (Transport transport : this.transports) {</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">				if (transport instanceof Lifecycle) {</span>
+<span class="nc" id="L221">					Lifecycle lifecycle = (Lifecycle) transport;</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">					if (lifecycle.isRunning()) {</span>
+<span class="nc" id="L223">						lifecycle.stop();</span>
+					}
+				}
+<span class="nc" id="L226">			}</span>
+		}
+<span class="nc" id="L228">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="nc" id="L232">		return this.running;</span>
+	}
+
+
+	@Override
+	public ListenableFuture&lt;WebSocketSession&gt; doHandshake(
+			WebSocketHandler handler, String uriTemplate, Object... uriVars) {
+
+<span class="fc" id="L240">		Assert.notNull(uriTemplate, &quot;uriTemplate must not be null&quot;);</span>
+<span class="fc" id="L241">		URI uri = UriComponentsBuilder.fromUriString(uriTemplate).buildAndExpand(uriVars).encode().toUri();</span>
+<span class="fc" id="L242">		return doHandshake(handler, null, uri);</span>
+	}
+
+	@Override
+	public final ListenableFuture&lt;WebSocketSession&gt; doHandshake(
+			WebSocketHandler handler, @Nullable WebSocketHttpHeaders headers, URI url) {
+
+<span class="fc" id="L249">		Assert.notNull(handler, &quot;WebSocketHandler is required&quot;);</span>
+<span class="fc" id="L250">		Assert.notNull(url, &quot;URL is required&quot;);</span>
+
+<span class="fc" id="L252">		String scheme = url.getScheme();</span>
+<span class="pc bpc" id="L253" title="1 of 2 branches missed.">		if (!supportedProtocols.contains(scheme)) {</span>
+<span class="nc" id="L254">			throw new IllegalArgumentException(&quot;Invalid scheme: '&quot; + scheme + &quot;'&quot;);</span>
+		}
+
+<span class="fc" id="L257">		SettableListenableFuture&lt;WebSocketSession&gt; connectFuture = new SettableListenableFuture&lt;&gt;();</span>
+		try {
+<span class="fc" id="L259">			SockJsUrlInfo sockJsUrlInfo = new SockJsUrlInfo(url);</span>
+<span class="fc" id="L260">			ServerInfo serverInfo = getServerInfo(sockJsUrlInfo, getHttpRequestHeaders(headers));</span>
+<span class="fc" id="L261">			createRequest(sockJsUrlInfo, headers, serverInfo).connect(handler, connectFuture);</span>
+		}
+<span class="fc" id="L263">		catch (Throwable exception) {</span>
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">			if (logger.isErrorEnabled()) {</span>
+<span class="fc" id="L265">				logger.error(&quot;Initial SockJS \&quot;Info\&quot; request to server failed, url=&quot; + url, exception);</span>
+			}
+<span class="fc" id="L267">			connectFuture.setException(exception);</span>
+<span class="fc" id="L268">		}</span>
+<span class="fc" id="L269">		return connectFuture;</span>
+	}
+
+	@Nullable
+	private HttpHeaders getHttpRequestHeaders(@Nullable HttpHeaders webSocketHttpHeaders) {
+<span class="pc bpc" id="L274" title="1 of 4 branches missed.">		if (getHttpHeaderNames() == null || webSocketHttpHeaders == null) {</span>
+<span class="fc" id="L275">			return webSocketHttpHeaders;</span>
+		}
+		else {
+<span class="fc" id="L278">			HttpHeaders httpHeaders = new HttpHeaders();</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">			for (String name : getHttpHeaderNames()) {</span>
+<span class="fc" id="L280">				List&lt;String&gt; values = webSocketHttpHeaders.get(name);</span>
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">				if (values != null) {</span>
+<span class="fc" id="L282">					httpHeaders.put(name, values);</span>
+				}
+			}
+<span class="fc" id="L285">			return httpHeaders;</span>
+		}
+	}
+
+	private ServerInfo getServerInfo(SockJsUrlInfo sockJsUrlInfo, @Nullable HttpHeaders headers) {
+<span class="fc" id="L290">		URI infoUrl = sockJsUrlInfo.getInfoUrl();</span>
+<span class="fc" id="L291">		ServerInfo info = this.serverInfoCache.get(infoUrl);</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">		if (info == null) {</span>
+<span class="fc" id="L293">			long start = System.currentTimeMillis();</span>
+<span class="fc" id="L294">			String response = this.infoReceiver.executeInfoRequest(infoUrl, headers);</span>
+<span class="fc" id="L295">			long infoRequestTime = System.currentTimeMillis() - start;</span>
+<span class="fc" id="L296">			info = new ServerInfo(response, infoRequestTime);</span>
+<span class="fc" id="L297">			this.serverInfoCache.put(infoUrl, info);</span>
+		}
+<span class="fc" id="L299">		return info;</span>
+	}
+
+	private DefaultTransportRequest createRequest(
+			SockJsUrlInfo urlInfo, @Nullable HttpHeaders headers, ServerInfo serverInfo) {
+
+<span class="fc" id="L305">		List&lt;DefaultTransportRequest&gt; requests = new ArrayList&lt;&gt;(this.transports.size());</span>
+<span class="fc bfc" id="L306" title="All 2 branches covered.">		for (Transport transport : this.transports) {</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">			for (TransportType type : transport.getTransportTypes()) {</span>
+<span class="fc bfc" id="L308" title="All 4 branches covered.">				if (serverInfo.isWebSocketEnabled() || !TransportType.WEBSOCKET.equals(type)) {</span>
+<span class="fc" id="L309">					requests.add(new DefaultTransportRequest(urlInfo, headers, getHttpRequestHeaders(headers),</span>
+<span class="fc" id="L310">							transport, type, getMessageCodec()));</span>
+				}
+<span class="fc" id="L312">			}</span>
+<span class="fc" id="L313">		}</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">		if (CollectionUtils.isEmpty(requests)) {</span>
+<span class="nc" id="L315">			throw new IllegalStateException(</span>
+<span class="nc" id="L316">					&quot;No transports: &quot; + urlInfo + &quot;, webSocketEnabled=&quot; + serverInfo.isWebSocketEnabled());</span>
+		}
+<span class="fc bfc" id="L318" title="All 2 branches covered.">		for (int i = 0; i &lt; requests.size() - 1; i++) {</span>
+<span class="fc" id="L319">			DefaultTransportRequest request = requests.get(i);</span>
+<span class="fc" id="L320">			Principal user = getUser();</span>
+<span class="pc bpc" id="L321" title="1 of 2 branches missed.">			if (user != null) {</span>
+<span class="nc" id="L322">				request.setUser(user);</span>
+			}
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">			if (this.connectTimeoutScheduler != null) {</span>
+<span class="nc" id="L325">				request.setTimeoutValue(serverInfo.getRetransmissionTimeout());</span>
+<span class="nc" id="L326">				request.setTimeoutScheduler(this.connectTimeoutScheduler);</span>
+			}
+<span class="fc" id="L328">			request.setFallbackRequest(requests.get(i + 1));</span>
+		}
+<span class="fc" id="L330">		return requests.get(0);</span>
+	}
+
+	/**
+	 * Return the user to associate with the SockJS session and make available via
+	 * {@link org.springframework.web.socket.WebSocketSession#getPrincipal()}.
+	 * &lt;p&gt;By default this method returns {@code null}.
+	 * @return the user to associate with the session (possibly {@code null})
+	 */
+	@Nullable
+	protected Principal getUser() {
+<span class="fc" id="L341">		return null;</span>
+	}
+
+	/**
+	 * By default the result of a SockJS &quot;Info&quot; request, including whether the
+	 * server has WebSocket disabled and how long the request took (used for
+	 * calculating transport timeout time) is cached. This method can be used to
+	 * clear that cache hence causing it to re-populate.
+	 */
+	public void clearServerInfoCache() {
+<span class="nc" id="L351">		this.serverInfoCache.clear();</span>
+<span class="nc" id="L352">	}</span>
+
+
+	/**
+	 * A simple value object holding the result from a SockJS &quot;Info&quot; request.
+	 */
+	private static class ServerInfo {
+
+		private final boolean webSocketEnabled;
+
+		private final long responseTime;
+
+<span class="fc" id="L364">		public ServerInfo(String response, long responseTime) {</span>
+<span class="fc" id="L365">			this.responseTime = responseTime;</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">			this.webSocketEnabled = !response.matches(&quot;.*[\&quot;']websocket[\&quot;']\\s*:\\s*false.*&quot;);</span>
+<span class="fc" id="L367">		}</span>
+
+		public boolean isWebSocketEnabled() {
+<span class="fc" id="L370">			return this.webSocketEnabled;</span>
+		}
+
+		public long getRetransmissionTimeout() {
+<span class="nc bnc" id="L374" title="All 2 branches missed.">			return (this.responseTime &gt; 100 ? 4 * this.responseTime : this.responseTime + 300);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,737 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractMethodMessageHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.handler.invocation</a> &gt; <span class="el_source">AbstractMethodMessageHandler.java</span></div><h1>AbstractMethodMessageHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.handler.invocation;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.MethodParameter;
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageHandler;
+import org.springframework.messaging.MessageHandlingException;
+import org.springframework.messaging.MessagingException;
+import org.springframework.messaging.handler.DestinationPatternsMessageCondition;
+import org.springframework.messaging.handler.HandlerMethod;
+import org.springframework.messaging.handler.MessagingAdviceBean;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.concurrent.ListenableFuture;
+import org.springframework.util.concurrent.ListenableFutureCallback;
+
+/**
+ * Abstract base class for HandlerMethod-based message handling. Provides most of
+ * the logic required to discover handler methods at startup, find a matching handler
+ * method at runtime for a given message and invoke it.
+ *
+ * &lt;p&gt;Also supports discovering and invoking exception handling methods to process
+ * exceptions raised during message handling.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 4.0
+ * @param &lt;T&gt; the type of the Object that contains information mapping a
+ * {@link org.springframework.messaging.handler.HandlerMethod} to incoming messages
+ */
+<span class="fc" id="L73">public abstract class AbstractMethodMessageHandler&lt;T&gt;</span>
+		implements MessageHandler, ApplicationContextAware, InitializingBean {
+
+	/**
+	 * Bean name prefix for target beans behind scoped proxies. Used to exclude those
+	 * targets from handler method detection, in favor of the corresponding proxies.
+	 * &lt;p&gt;We're not checking the autowire-candidate status here, which is how the
+	 * proxy target filtering problem is being handled at the autowiring level,
+	 * since autowire-candidate may have been turned to {@code false} for other
+	 * reasons, while still expecting the bean to be eligible for handler methods.
+	 * &lt;p&gt;Originally defined in {@link org.springframework.aop.scope.ScopedProxyUtils}
+	 * but duplicated here to avoid a hard dependency on the spring-aop module.
+	 */
+	private static final String SCOPED_TARGET_NAME_PREFIX = &quot;scopedTarget.&quot;;
+
+
+<span class="fc" id="L89">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private Log handlerMethodLogger;
+
+
+<span class="fc" id="L95">	private final List&lt;String&gt; destinationPrefixes = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L97">	private final List&lt;HandlerMethodArgumentResolver&gt; customArgumentResolvers = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L99">	private final List&lt;HandlerMethodReturnValueHandler&gt; customReturnValueHandlers = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L101">	private final HandlerMethodArgumentResolverComposite argumentResolvers =</span>
+			new HandlerMethodArgumentResolverComposite();
+
+<span class="fc" id="L104">	private final HandlerMethodReturnValueHandlerComposite returnValueHandlers =</span>
+			new HandlerMethodReturnValueHandlerComposite();
+
+	@Nullable
+	private ApplicationContext applicationContext;
+
+<span class="fc" id="L110">	private final Map&lt;T, HandlerMethod&gt; handlerMethods = new LinkedHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L112">	private final MultiValueMap&lt;String, T&gt; destinationLookup = new LinkedMultiValueMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L114">	private final Map&lt;Class&lt;?&gt;, AbstractExceptionHandlerMethodResolver&gt; exceptionHandlerCache =</span>
+			new ConcurrentHashMap&lt;&gt;(64);
+
+<span class="fc" id="L117">	private final Map&lt;MessagingAdviceBean, AbstractExceptionHandlerMethodResolver&gt; exceptionHandlerAdviceCache =</span>
+			new LinkedHashMap&lt;&gt;(64);
+
+
+	/**
+	 * When this property is configured only messages to destinations matching
+	 * one of the configured prefixes are eligible for handling. When there is a
+	 * match the prefix is removed and only the remaining part of the destination
+	 * is used for method-mapping purposes.
+	 * &lt;p&gt;By default, no prefixes are configured in which case all messages are
+	 * eligible for handling.
+	 */
+	public void setDestinationPrefixes(@Nullable Collection&lt;String&gt; prefixes) {
+<span class="fc" id="L130">		this.destinationPrefixes.clear();</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">		if (prefixes != null) {</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">			for (String prefix : prefixes) {</span>
+<span class="fc" id="L133">				prefix = prefix.trim();</span>
+<span class="fc" id="L134">				this.destinationPrefixes.add(prefix);</span>
+<span class="fc" id="L135">			}</span>
+		}
+<span class="fc" id="L137">	}</span>
+
+	/**
+	 * Return the configured destination prefixes, if any.
+	 */
+	public Collection&lt;String&gt; getDestinationPrefixes() {
+<span class="fc" id="L143">		return this.destinationPrefixes;</span>
+	}
+
+	/**
+	 * Sets the list of custom {@code HandlerMethodArgumentResolver}s that will be used
+	 * after resolvers for supported argument type.
+	 */
+	public void setCustomArgumentResolvers(@Nullable List&lt;HandlerMethodArgumentResolver&gt; customArgumentResolvers) {
+<span class="fc" id="L151">		this.customArgumentResolvers.clear();</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">		if (customArgumentResolvers != null) {</span>
+<span class="fc" id="L153">			this.customArgumentResolvers.addAll(customArgumentResolvers);</span>
+		}
+<span class="fc" id="L155">	}</span>
+
+	/**
+	 * Return the configured custom argument resolvers, if any.
+	 */
+	public List&lt;HandlerMethodArgumentResolver&gt; getCustomArgumentResolvers() {
+<span class="fc" id="L161">		return this.customArgumentResolvers;</span>
+	}
+
+	/**
+	 * Set the list of custom {@code HandlerMethodReturnValueHandler}s that will be used
+	 * after return value handlers for known types.
+	 */
+	public void setCustomReturnValueHandlers(@Nullable List&lt;HandlerMethodReturnValueHandler&gt; customReturnValueHandlers) {
+<span class="fc" id="L169">		this.customReturnValueHandlers.clear();</span>
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">		if (customReturnValueHandlers != null) {</span>
+<span class="fc" id="L171">			this.customReturnValueHandlers.addAll(customReturnValueHandlers);</span>
+		}
+<span class="fc" id="L173">	}</span>
+
+	/**
+	 * Return the configured custom return value handlers, if any.
+	 */
+	public List&lt;HandlerMethodReturnValueHandler&gt; getCustomReturnValueHandlers() {
+<span class="fc" id="L179">		return this.customReturnValueHandlers;</span>
+	}
+
+	/**
+	 * Configure the complete list of supported argument types, effectively overriding
+	 * the ones configured by default. This is an advanced option; for most use cases
+	 * it should be sufficient to use {@link #setCustomArgumentResolvers}.
+	 */
+	public void setArgumentResolvers(@Nullable List&lt;HandlerMethodArgumentResolver&gt; argumentResolvers) {
+<span class="nc bnc" id="L188" title="All 2 branches missed.">		if (argumentResolvers == null) {</span>
+<span class="nc" id="L189">			this.argumentResolvers.clear();</span>
+<span class="nc" id="L190">			return;</span>
+		}
+<span class="nc" id="L192">		this.argumentResolvers.addResolvers(argumentResolvers);</span>
+<span class="nc" id="L193">	}</span>
+
+	/**
+	 * Return the complete list of argument resolvers.
+	 */
+	public List&lt;HandlerMethodArgumentResolver&gt; getArgumentResolvers() {
+<span class="fc" id="L199">		return this.argumentResolvers.getResolvers();</span>
+	}
+
+	/**
+	 * Configure the complete list of supported return value types, effectively overriding
+	 * the ones configured by default. This is an advanced option; for most use cases
+	 * it should be sufficient to use {@link #setCustomReturnValueHandlers}.
+	 */
+	public void setReturnValueHandlers(@Nullable List&lt;HandlerMethodReturnValueHandler&gt; returnValueHandlers) {
+<span class="nc bnc" id="L208" title="All 2 branches missed.">		if (returnValueHandlers == null) {</span>
+<span class="nc" id="L209">			this.returnValueHandlers.clear();</span>
+<span class="nc" id="L210">			return;</span>
+		}
+<span class="nc" id="L212">		this.returnValueHandlers.addHandlers(returnValueHandlers);</span>
+<span class="nc" id="L213">	}</span>
+
+	/**
+	 * Return the complete list of return value handlers.
+	 */
+	public List&lt;HandlerMethodReturnValueHandler&gt; getReturnValueHandlers() {
+<span class="fc" id="L219">		return this.returnValueHandlers.getReturnValueHandlers();</span>
+	}
+
+	@Override
+	public void setApplicationContext(@Nullable ApplicationContext applicationContext) {
+<span class="fc" id="L224">		this.applicationContext = applicationContext;</span>
+<span class="fc" id="L225">	}</span>
+
+	@Nullable
+	public ApplicationContext getApplicationContext() {
+<span class="fc" id="L229">		return this.applicationContext;</span>
+	}
+
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		if (this.argumentResolvers.getResolvers().isEmpty()) {</span>
+<span class="fc" id="L236">			this.argumentResolvers.addResolvers(initArgumentResolvers());</span>
+		}
+
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		if (this.returnValueHandlers.getReturnValueHandlers().isEmpty()) {</span>
+<span class="fc" id="L240">			this.returnValueHandlers.addHandlers(initReturnValueHandlers());</span>
+		}
+<span class="fc" id="L242">		Log returnValueLogger = getReturnValueHandlerLogger();</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">		if (returnValueLogger != null) {</span>
+<span class="fc" id="L244">			this.returnValueHandlers.setLogger(returnValueLogger);</span>
+		}
+
+<span class="fc" id="L247">		this.handlerMethodLogger = getHandlerMethodLogger();</span>
+
+<span class="fc" id="L249">		ApplicationContext context = getApplicationContext();</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">		if (context == null) {</span>
+<span class="nc" id="L251">			return;</span>
+		}
+<span class="fc bfc" id="L253" title="All 2 branches covered.">		for (String beanName : context.getBeanNamesForType(Object.class)) {</span>
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">			if (!beanName.startsWith(SCOPED_TARGET_NAME_PREFIX)) {</span>
+<span class="fc" id="L255">				Class&lt;?&gt; beanType = null;</span>
+				try {
+<span class="fc" id="L257">					beanType = context.getType(beanName);</span>
+				}
+<span class="nc" id="L259">				catch (Throwable ex) {</span>
+					// An unresolvable bean type, probably from a lazy bean - let's ignore it.
+<span class="nc bnc" id="L261" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L262">						logger.debug(&quot;Could not resolve target class for bean with name '&quot; + beanName + &quot;'&quot;, ex);</span>
+					}
+<span class="fc" id="L264">				}</span>
+<span class="pc bpc" id="L265" title="1 of 4 branches missed.">				if (beanType != null &amp;&amp; isHandler(beanType)) {</span>
+<span class="fc" id="L266">					detectHandlerMethods(beanName);</span>
+				}
+			}
+		}
+<span class="fc" id="L270">	}</span>
+
+	/**
+	 * Return the list of argument resolvers to use. Invoked only if the resolvers
+	 * have not already been set via {@link #setArgumentResolvers}.
+	 * &lt;p&gt;Subclasses should also take into account custom argument types configured via
+	 * {@link #setCustomArgumentResolvers}.
+	 */
+	protected abstract List&lt;? extends HandlerMethodArgumentResolver&gt; initArgumentResolvers();
+
+	/**
+	 * Return the list of return value handlers to use. Invoked only if the return
+	 * value handlers have not already been set via {@link #setReturnValueHandlers}.
+	 * &lt;p&gt;Subclasses should also take into account custom return value types configured
+	 * via {@link #setCustomReturnValueHandlers}.
+	 */
+	protected abstract List&lt;? extends HandlerMethodReturnValueHandler&gt; initReturnValueHandlers();
+
+
+	/**
+	 * Whether the given bean type should be introspected for messaging handling methods.
+	 */
+	protected abstract boolean isHandler(Class&lt;?&gt; beanType);
+
+	/**
+	 * Detect if the given handler has any methods that can handle messages and if
+	 * so register it with the extracted mapping information.
+	 * @param handler the handler to check, either an instance of a Spring bean name
+	 */
+	protected final void detectHandlerMethods(final Object handler) {
+		Class&lt;?&gt; handlerType;
+<span class="fc bfc" id="L301" title="All 2 branches covered.">		if (handler instanceof String) {</span>
+<span class="fc" id="L302">			ApplicationContext context = getApplicationContext();</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">			Assert.state(context != null, &quot;ApplicationContext is required for resolving handler bean names&quot;);</span>
+<span class="fc" id="L304">			handlerType = context.getType((String) handler);</span>
+<span class="fc" id="L305">		}</span>
+		else {
+<span class="fc" id="L307">			handlerType = handler.getClass();</span>
+		}
+
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">		if (handlerType != null) {</span>
+<span class="fc" id="L311">			final Class&lt;?&gt; userType = ClassUtils.getUserClass(handlerType);</span>
+<span class="fc" id="L312">			Map&lt;Method, T&gt; methods = MethodIntrospector.selectMethods(userType,</span>
+<span class="fc" id="L313">					(MethodIntrospector.MetadataLookup&lt;T&gt;) method -&gt; getMappingForMethod(method, userType));</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L315">				logger.debug(formatMappings(userType, methods));</span>
+			}
+<span class="fc" id="L317">			methods.forEach((key, value) -&gt; registerHandlerMethod(handler, key, value));</span>
+		}
+<span class="fc" id="L319">	}</span>
+
+	private String formatMappings(Class&lt;?&gt; userType, Map&lt;Method, T&gt; methods) {
+<span class="nc" id="L322">		String formattedType = Arrays.stream(ClassUtils.getPackageName(userType).split(&quot;\\.&quot;))</span>
+<span class="nc" id="L323">				.map(p -&gt; p.substring(0, 1))</span>
+<span class="nc" id="L324">				.collect(Collectors.joining(&quot;.&quot;, &quot;&quot;, &quot;.&quot; + userType.getSimpleName()));</span>
+<span class="nc" id="L325">		Function&lt;Method, String&gt; methodFormatter = method -&gt; Arrays.stream(method.getParameterTypes())</span>
+<span class="nc" id="L326">				.map(Class::getSimpleName)</span>
+<span class="nc" id="L327">				.collect(Collectors.joining(&quot;,&quot;, &quot;(&quot;, &quot;)&quot;));</span>
+<span class="nc" id="L328">		return methods.entrySet().stream()</span>
+<span class="nc" id="L329">				.map(e -&gt; {</span>
+<span class="nc" id="L330">					Method method = e.getKey();</span>
+<span class="nc" id="L331">					return e.getValue() + &quot;: &quot; + method.getName() + methodFormatter.apply(method);</span>
+				})
+<span class="nc" id="L333">				.collect(Collectors.joining(&quot;\n\t&quot;, &quot;\n\t&quot; + formattedType + &quot;:&quot; + &quot;\n\t&quot;, &quot;&quot;));</span>
+	}
+
+	/**
+	 * Provide the mapping for a handler method.
+	 * @param method the method to provide a mapping for
+	 * @param handlerType the handler type, possibly a sub-type of the method's declaring class
+	 * @return the mapping, or {@code null} if the method is not mapped
+	 */
+	@Nullable
+	protected abstract T getMappingForMethod(Method method, Class&lt;?&gt; handlerType);
+
+	/**
+	 * Register a handler method and its unique mapping.
+	 * @param handler the bean name of the handler or the handler instance
+	 * @param method the method to register
+	 * @param mapping the mapping conditions associated with the handler method
+	 * @throws IllegalStateException if another method was already registered
+	 * under the same mapping
+	 */
+	protected void registerHandlerMethod(Object handler, Method method, T mapping) {
+<span class="fc" id="L354">		Assert.notNull(mapping, &quot;Mapping must not be null&quot;);</span>
+<span class="fc" id="L355">		HandlerMethod newHandlerMethod = createHandlerMethod(handler, method);</span>
+<span class="fc" id="L356">		HandlerMethod oldHandlerMethod = this.handlerMethods.get(mapping);</span>
+
+<span class="pc bpc" id="L358" title="1 of 4 branches missed.">		if (oldHandlerMethod != null &amp;&amp; !oldHandlerMethod.equals(newHandlerMethod)) {</span>
+<span class="fc" id="L359">			throw new IllegalStateException(&quot;Ambiguous mapping found. Cannot map '&quot; + newHandlerMethod.getBean() +</span>
+					&quot;' bean method \n&quot; + newHandlerMethod + &quot;\nto &quot; + mapping + &quot;: There is already '&quot; +
+<span class="fc" id="L361">					oldHandlerMethod.getBean() + &quot;' bean method\n&quot; + oldHandlerMethod + &quot; mapped.&quot;);</span>
+		}
+
+<span class="fc" id="L364">		this.handlerMethods.put(mapping, newHandlerMethod);</span>
+
+<span class="fc bfc" id="L366" title="All 2 branches covered.">		for (String pattern : getDirectLookupDestinations(mapping)) {</span>
+<span class="fc" id="L367">			this.destinationLookup.add(pattern, mapping);</span>
+<span class="fc" id="L368">		}</span>
+<span class="fc" id="L369">	}</span>
+
+	/**
+	 * Create a HandlerMethod instance from an Object handler that is either a handler
+	 * instance or a String-based bean name.
+	 */
+	protected HandlerMethod createHandlerMethod(Object handler, Method method) {
+		HandlerMethod handlerMethod;
+<span class="fc bfc" id="L377" title="All 2 branches covered.">		if (handler instanceof String) {</span>
+<span class="fc" id="L378">			ApplicationContext context = getApplicationContext();</span>
+<span class="pc bpc" id="L379" title="1 of 2 branches missed.">			Assert.state(context != null, &quot;ApplicationContext is required for resolving handler bean names&quot;);</span>
+<span class="fc" id="L380">			String beanName = (String) handler;</span>
+<span class="fc" id="L381">			handlerMethod = new HandlerMethod(beanName, context.getAutowireCapableBeanFactory(), method);</span>
+<span class="fc" id="L382">		}</span>
+		else {
+<span class="fc" id="L384">			handlerMethod = new HandlerMethod(handler, method);</span>
+		}
+<span class="fc" id="L386">		return handlerMethod;</span>
+	}
+
+	/**
+	 * Return destinations contained in the mapping that are not patterns and are
+	 * therefore suitable for direct lookups.
+	 */
+	protected abstract Set&lt;String&gt; getDirectLookupDestinations(T mapping);
+
+	/**
+	 * Return a logger to set on {@link HandlerMethodReturnValueHandlerComposite}.
+	 * @since 5.1
+	 */
+	@Nullable
+	protected Log getReturnValueHandlerLogger() {
+<span class="fc" id="L401">		return null;</span>
+	}
+
+	/**
+	 * Return a logger to set on {@link InvocableHandlerMethod}.
+	 * @since 5.1
+	 */
+	@Nullable
+	protected Log getHandlerMethodLogger() {
+<span class="fc" id="L410">		return null;</span>
+	}
+
+	/**
+	 * Subclasses can invoke this method to populate the MessagingAdviceBean cache
+	 * (e.g. to support &quot;global&quot; {@code @MessageExceptionHandler}).
+	 * @since 4.2
+	 */
+	protected void registerExceptionHandlerAdvice(
+			MessagingAdviceBean bean, AbstractExceptionHandlerMethodResolver resolver) {
+
+<span class="nc" id="L421">		this.exceptionHandlerAdviceCache.put(bean, resolver);</span>
+<span class="nc" id="L422">	}</span>
+
+	/**
+	 * Return a map with all handler methods and their mappings.
+	 */
+	public Map&lt;T, HandlerMethod&gt; getHandlerMethods() {
+<span class="fc" id="L428">		return Collections.unmodifiableMap(this.handlerMethods);</span>
+	}
+
+
+	@Override
+	public void handleMessage(Message&lt;?&gt; message) throws MessagingException {
+<span class="fc" id="L434">		String destination = getDestination(message);</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">		if (destination == null) {</span>
+<span class="fc" id="L436">			return;</span>
+		}
+<span class="fc" id="L438">		String lookupDestination = getLookupDestination(destination);</span>
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">		if (lookupDestination == null) {</span>
+<span class="nc" id="L440">			return;</span>
+		}
+
+<span class="fc" id="L443">		MessageHeaderAccessor headerAccessor = MessageHeaderAccessor.getMutableAccessor(message);</span>
+<span class="fc" id="L444">		headerAccessor.setHeader(DestinationPatternsMessageCondition.LOOKUP_DESTINATION_HEADER, lookupDestination);</span>
+<span class="fc" id="L445">		headerAccessor.setLeaveMutable(true);</span>
+<span class="fc" id="L446">		message = MessageBuilder.createMessage(message.getPayload(), headerAccessor.getMessageHeaders());</span>
+
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L449">			logger.debug(&quot;Searching methods to handle &quot; +</span>
+<span class="nc" id="L450">					headerAccessor.getShortLogMessage(message.getPayload()) +</span>
+					&quot;, lookupDestination='&quot; + lookupDestination + &quot;'&quot;);
+		}
+
+<span class="fc" id="L454">		handleMessageInternal(message, lookupDestination);</span>
+<span class="fc" id="L455">		headerAccessor.setImmutable();</span>
+<span class="fc" id="L456">	}</span>
+
+	@Nullable
+	protected abstract String getDestination(Message&lt;?&gt; message);
+
+	/**
+	 * Check whether the given destination (of an incoming message) matches to
+	 * one of the configured destination prefixes and if so return the remaining
+	 * portion of the destination after the matched prefix.
+	 * &lt;p&gt;If there are no matching prefixes, return {@code null}.
+	 * &lt;p&gt;If there are no destination prefixes, return the destination as is.
+	 */
+	@SuppressWarnings(&quot;ForLoopReplaceableByForEach&quot;)
+	@Nullable
+	protected String getLookupDestination(@Nullable String destination) {
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">		if (destination == null) {</span>
+<span class="nc" id="L472">			return null;</span>
+		}
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">		if (CollectionUtils.isEmpty(this.destinationPrefixes)) {</span>
+<span class="nc" id="L475">			return destination;</span>
+		}
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">		for (int i = 0; i &lt; this.destinationPrefixes.size(); i++) {</span>
+<span class="fc" id="L478">			String prefix = this.destinationPrefixes.get(i);</span>
+<span class="pc bpc" id="L479" title="1 of 2 branches missed.">			if (destination.startsWith(prefix)) {</span>
+<span class="fc" id="L480">				return destination.substring(prefix.length());</span>
+			}
+		}
+<span class="nc" id="L483">		return null;</span>
+	}
+
+	protected void handleMessageInternal(Message&lt;?&gt; message, String lookupDestination) {
+<span class="fc" id="L487">		List&lt;Match&gt; matches = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L489">		List&lt;T&gt; mappingsByUrl = this.destinationLookup.get(lookupDestination);</span>
+<span class="fc bfc" id="L490" title="All 2 branches covered.">		if (mappingsByUrl != null) {</span>
+<span class="fc" id="L491">			addMatchesToCollection(mappingsByUrl, message, matches);</span>
+		}
+<span class="fc bfc" id="L493" title="All 2 branches covered.">		if (matches.isEmpty()) {</span>
+			// No direct hits, go through all mappings
+<span class="fc" id="L495">			Set&lt;T&gt; allMappings = this.handlerMethods.keySet();</span>
+<span class="fc" id="L496">			addMatchesToCollection(allMappings, message, matches);</span>
+		}
+<span class="fc bfc" id="L498" title="All 2 branches covered.">		if (matches.isEmpty()) {</span>
+<span class="fc" id="L499">			handleNoMatch(this.handlerMethods.keySet(), lookupDestination, message);</span>
+<span class="fc" id="L500">			return;</span>
+		}
+
+<span class="fc" id="L503">		Comparator&lt;Match&gt; comparator = new MatchComparator(getMappingComparator(message));</span>
+<span class="fc" id="L504">		matches.sort(comparator);</span>
+<span class="pc bpc" id="L505" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L506">			logger.trace(&quot;Found &quot; + matches.size() + &quot; handler methods: &quot; + matches);</span>
+		}
+
+<span class="fc" id="L509">		Match bestMatch = matches.get(0);</span>
+<span class="fc bfc" id="L510" title="All 2 branches covered.">		if (matches.size() &gt; 1) {</span>
+<span class="fc" id="L511">			Match secondBestMatch = matches.get(1);</span>
+<span class="pc bpc" id="L512" title="1 of 2 branches missed.">			if (comparator.compare(bestMatch, secondBestMatch) == 0) {</span>
+<span class="nc" id="L513">				Method m1 = bestMatch.handlerMethod.getMethod();</span>
+<span class="nc" id="L514">				Method m2 = secondBestMatch.handlerMethod.getMethod();</span>
+<span class="nc" id="L515">				throw new IllegalStateException(&quot;Ambiguous handler methods mapped for destination '&quot; +</span>
+						lookupDestination + &quot;': {&quot; + m1 + &quot;, &quot; + m2 + &quot;}&quot;);
+			}
+		}
+
+<span class="fc" id="L520">		handleMatch(bestMatch.mapping, bestMatch.handlerMethod, lookupDestination, message);</span>
+<span class="fc" id="L521">	}</span>
+
+	private void addMatchesToCollection(Collection&lt;T&gt; mappingsToCheck, Message&lt;?&gt; message, List&lt;Match&gt; matches) {
+<span class="fc bfc" id="L524" title="All 2 branches covered.">		for (T mapping : mappingsToCheck) {</span>
+<span class="fc" id="L525">			T match = getMatchingMapping(mapping, message);</span>
+<span class="fc bfc" id="L526" title="All 2 branches covered.">			if (match != null) {</span>
+<span class="fc" id="L527">				matches.add(new Match(match, this.handlerMethods.get(mapping)));</span>
+			}
+<span class="fc" id="L529">		}</span>
+<span class="fc" id="L530">	}</span>
+
+	/**
+	 * Check if a mapping matches the current message and return a possibly
+	 * new mapping with conditions relevant to the current request.
+	 * @param mapping the mapping to get a match for
+	 * @param message the message being handled
+	 * @return the match or {@code null} if there is no match
+	 */
+	@Nullable
+	protected abstract T getMatchingMapping(T mapping, Message&lt;?&gt; message);
+
+	protected void handleNoMatch(Set&lt;T&gt; ts, String lookupDestination, Message&lt;?&gt; message) {
+<span class="fc" id="L543">		logger.debug(&quot;No matching message handler methods.&quot;);</span>
+<span class="fc" id="L544">	}</span>
+
+	/**
+	 * Return a comparator for sorting matching mappings.
+	 * The returned comparator should sort 'better' matches higher.
+	 * @param message the current Message
+	 * @return the comparator, never {@code null}
+	 */
+	protected abstract Comparator&lt;T&gt; getMappingComparator(Message&lt;?&gt; message);
+
+	protected void handleMatch(T mapping, HandlerMethod handlerMethod, String lookupDestination, Message&lt;?&gt; message) {
+<span class="pc bpc" id="L555" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L556">			logger.debug(&quot;Invoking &quot; + handlerMethod.getShortLogMessage());</span>
+		}
+<span class="fc" id="L558">		handlerMethod = handlerMethod.createWithResolvedBean();</span>
+<span class="fc" id="L559">		InvocableHandlerMethod invocable = new InvocableHandlerMethod(handlerMethod);</span>
+<span class="fc bfc" id="L560" title="All 2 branches covered.">		if (this.handlerMethodLogger != null) {</span>
+<span class="fc" id="L561">			invocable.setLogger(this.handlerMethodLogger);</span>
+		}
+<span class="fc" id="L563">		invocable.setMessageMethodArgumentResolvers(this.argumentResolvers);</span>
+		try {
+<span class="fc" id="L565">			Object returnValue = invocable.invoke(message);</span>
+<span class="fc" id="L566">			MethodParameter returnType = handlerMethod.getReturnType();</span>
+<span class="fc bfc" id="L567" title="All 2 branches covered.">			if (void.class == returnType.getParameterType()) {</span>
+<span class="fc" id="L568">				return;</span>
+			}
+<span class="pc bpc" id="L570" title="1 of 4 branches missed.">			if (returnValue != null &amp;&amp; this.returnValueHandlers.isAsyncReturnValue(returnValue, returnType)) {</span>
+<span class="fc" id="L571">				ListenableFuture&lt;?&gt; future = this.returnValueHandlers.toListenableFuture(returnValue, returnType);</span>
+<span class="pc bpc" id="L572" title="1 of 2 branches missed.">				if (future != null) {</span>
+<span class="fc" id="L573">					future.addCallback(new ReturnValueListenableFutureCallback(invocable, message));</span>
+				}
+<span class="fc" id="L575">			}</span>
+			else {
+<span class="fc" id="L577">				this.returnValueHandlers.handleReturnValue(returnValue, returnType, message);</span>
+			}
+		}
+<span class="fc" id="L580">		catch (Exception ex) {</span>
+<span class="fc" id="L581">			processHandlerMethodException(handlerMethod, ex, message);</span>
+		}
+<span class="fc" id="L583">		catch (Throwable ex) {</span>
+<span class="fc" id="L584">			Exception handlingException =</span>
+					new MessageHandlingException(message, &quot;Unexpected handler method invocation error&quot;, ex);
+<span class="fc" id="L586">			processHandlerMethodException(handlerMethod, handlingException, message);</span>
+<span class="fc" id="L587">		}</span>
+<span class="fc" id="L588">	}</span>
+
+	protected void processHandlerMethodException(HandlerMethod handlerMethod, Exception exception, Message&lt;?&gt; message) {
+<span class="fc" id="L591">		InvocableHandlerMethod invocable = getExceptionHandlerMethod(handlerMethod, exception);</span>
+<span class="pc bpc" id="L592" title="1 of 2 branches missed.">		if (invocable == null) {</span>
+<span class="nc" id="L593">			logger.error(&quot;Unhandled exception from message handler method&quot;, exception);</span>
+<span class="nc" id="L594">			return;</span>
+		}
+<span class="fc" id="L596">		invocable.setMessageMethodArgumentResolvers(this.argumentResolvers);</span>
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L598">			logger.debug(&quot;Invoking &quot; + invocable.getShortLogMessage());</span>
+		}
+		try {
+<span class="fc" id="L601">			Throwable cause = exception.getCause();</span>
+<span class="fc bfc" id="L602" title="All 2 branches covered.">			Object returnValue = (cause != null ?</span>
+<span class="fc" id="L603">					invocable.invoke(message, exception, cause, handlerMethod) :</span>
+<span class="fc" id="L604">					invocable.invoke(message, exception, handlerMethod));</span>
+<span class="fc" id="L605">			MethodParameter returnType = invocable.getReturnType();</span>
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">			if (void.class == returnType.getParameterType()) {</span>
+<span class="fc" id="L607">				return;</span>
+			}
+<span class="nc" id="L609">			this.returnValueHandlers.handleReturnValue(returnValue, returnType, message);</span>
+		}
+<span class="nc" id="L611">		catch (Throwable ex2) {</span>
+<span class="nc" id="L612">			logger.error(&quot;Error while processing handler method exception&quot;, ex2);</span>
+<span class="nc" id="L613">		}</span>
+<span class="nc" id="L614">	}</span>
+
+	/**
+	 * Find an {@code @MessageExceptionHandler} method for the given exception.
+	 * The default implementation searches methods in the class hierarchy of the
+	 * HandlerMethod first and if not found, it continues searching for additional
+	 * {@code @MessageExceptionHandler} methods among the configured
+	 * {@linkplain org.springframework.messaging.handler.MessagingAdviceBean
+	 * MessagingAdviceBean}, if any.
+	 * @param handlerMethod the method where the exception was raised
+	 * @param exception the raised exception
+	 * @return a method to handle the exception, or {@code null}
+	 * @since 4.2
+	 */
+	@Nullable
+	protected InvocableHandlerMethod getExceptionHandlerMethod(HandlerMethod handlerMethod, Exception exception) {
+<span class="pc bpc" id="L630" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L631">			logger.debug(&quot;Searching methods to handle &quot; + exception.getClass().getSimpleName());</span>
+		}
+<span class="fc" id="L633">		Class&lt;?&gt; beanType = handlerMethod.getBeanType();</span>
+<span class="fc" id="L634">		AbstractExceptionHandlerMethodResolver resolver = this.exceptionHandlerCache.get(beanType);</span>
+<span class="pc bpc" id="L635" title="1 of 2 branches missed.">		if (resolver == null) {</span>
+<span class="fc" id="L636">			resolver = createExceptionHandlerMethodResolverFor(beanType);</span>
+<span class="fc" id="L637">			this.exceptionHandlerCache.put(beanType, resolver);</span>
+		}
+<span class="fc" id="L639">		Method method = resolver.resolveMethod(exception);</span>
+<span class="pc bpc" id="L640" title="1 of 2 branches missed.">		if (method != null) {</span>
+<span class="fc" id="L641">			return new InvocableHandlerMethod(handlerMethod.getBean(), method);</span>
+		}
+<span class="nc bnc" id="L643" title="All 2 branches missed.">		for (MessagingAdviceBean advice : this.exceptionHandlerAdviceCache.keySet()) {</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">			if (advice.isApplicableToBeanType(beanType)) {</span>
+<span class="nc" id="L645">				resolver = this.exceptionHandlerAdviceCache.get(advice);</span>
+<span class="nc" id="L646">				method = resolver.resolveMethod(exception);</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">				if (method != null) {</span>
+<span class="nc" id="L648">					return new InvocableHandlerMethod(advice.resolveBean(), method);</span>
+				}
+			}
+<span class="nc" id="L651">		}</span>
+<span class="nc" id="L652">		return null;</span>
+	}
+
+	protected abstract AbstractExceptionHandlerMethodResolver createExceptionHandlerMethodResolverFor(
+			Class&lt;?&gt; beanType);
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L661">		return getClass().getSimpleName() + &quot;[prefixes=&quot; + getDestinationPrefixes() + &quot;]&quot;;</span>
+	}
+
+
+	/**
+	 * A thin wrapper around a matched HandlerMethod and its matched mapping for
+	 * the purpose of comparing the best match with a comparator in the context
+	 * of a message.
+	 */
+	private class Match {
+
+		private final T mapping;
+
+		private final HandlerMethod handlerMethod;
+
+<span class="fc" id="L676">		public Match(T mapping, HandlerMethod handlerMethod) {</span>
+<span class="fc" id="L677">			this.mapping = mapping;</span>
+<span class="fc" id="L678">			this.handlerMethod = handlerMethod;</span>
+<span class="fc" id="L679">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L683">			return this.mapping.toString();</span>
+		}
+	}
+
+
+	private class MatchComparator implements Comparator&lt;Match&gt; {
+
+		private final Comparator&lt;T&gt; comparator;
+
+<span class="fc" id="L692">		public MatchComparator(Comparator&lt;T&gt; comparator) {</span>
+<span class="fc" id="L693">			this.comparator = comparator;</span>
+<span class="fc" id="L694">		}</span>
+
+		@Override
+		public int compare(Match match1, Match match2) {
+<span class="fc" id="L698">			return this.comparator.compare(match1.mapping, match2.mapping);</span>
+		}
+	}
+
+
+	private class ReturnValueListenableFutureCallback implements ListenableFutureCallback&lt;Object&gt; {
+
+		private final InvocableHandlerMethod handlerMethod;
+
+		private final Message&lt;?&gt; message;
+
+<span class="fc" id="L709">		public ReturnValueListenableFutureCallback(InvocableHandlerMethod handlerMethod, Message&lt;?&gt; message) {</span>
+<span class="fc" id="L710">			this.handlerMethod = handlerMethod;</span>
+<span class="fc" id="L711">			this.message = message;</span>
+<span class="fc" id="L712">		}</span>
+
+		@Override
+		public void onSuccess(@Nullable Object result) {
+			try {
+<span class="fc" id="L717">				MethodParameter returnType = this.handlerMethod.getAsyncReturnValueType(result);</span>
+<span class="fc" id="L718">				returnValueHandlers.handleReturnValue(result, returnType, this.message);</span>
+			}
+<span class="nc" id="L720">			catch (Throwable ex) {</span>
+<span class="nc" id="L721">				handleFailure(ex);</span>
+<span class="fc" id="L722">			}</span>
+<span class="fc" id="L723">		}</span>
+
+		@Override
+		public void onFailure(Throwable ex) {
+<span class="fc" id="L727">			handleFailure(ex);</span>
+<span class="fc" id="L728">		}</span>
+
+		private void handleFailure(Throwable ex) {
+<span class="pc bpc" id="L731" title="1 of 2 branches missed.">			Exception cause = (ex instanceof Exception ? (Exception) ex : new IllegalStateException(ex));</span>
+<span class="fc" id="L732">			processHandlerMethodException(this.handlerMethod, cause, this.message);</span>
+<span class="fc" id="L733">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

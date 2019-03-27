@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionAwareConnectionFactoryProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jca.cci.connection</a> &gt; <span class="el_source">TransactionAwareConnectionFactoryProxy.java</span></div><h1>TransactionAwareConnectionFactoryProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jca.cci.connection;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import javax.resource.ResourceException;
+import javax.resource.cci.Connection;
+import javax.resource.cci.ConnectionFactory;
+
+import org.springframework.lang.Nullable;
+
+/**
+ * Proxy for a target CCI {@link javax.resource.cci.ConnectionFactory}, adding
+ * awareness of Spring-managed transactions. Similar to a transactional JNDI
+ * ConnectionFactory as provided by a Java EE server.
+ *
+ * &lt;p&gt;Data access code that should remain unaware of Spring's data access support
+ * can work with this proxy to seamlessly participate in Spring-managed transactions.
+ * Note that the transaction manager, for example the {@link CciLocalTransactionManager},
+ * still needs to work with underlying ConnectionFactory, &lt;i&gt;not&lt;/i&gt; with this proxy.
+ *
+ * &lt;p&gt;&lt;b&gt;Make sure that TransactionAwareConnectionFactoryProxy is the outermost
+ * ConnectionFactory of a chain of ConnectionFactory proxies/adapters.&lt;/b&gt;
+ * TransactionAwareConnectionFactoryProxy can delegate either directly to the
+ * target connection pool or to some intermediate proxy/adapter like
+ * {@link ConnectionSpecConnectionFactoryAdapter}.
+ *
+ * &lt;p&gt;Delegates to {@link ConnectionFactoryUtils} for automatically participating in
+ * thread-bound transactions, for example managed by {@link CciLocalTransactionManager}.
+ * {@code getConnection} calls and {@code close} calls on returned Connections
+ * will behave properly within a transaction, i.e. always operate on the transactional
+ * Connection. If not within a transaction, normal ConnectionFactory behavior applies.
+ *
+ * &lt;p&gt;This proxy allows data access code to work with the plain JCA CCI API and still
+ * participate in Spring-managed transactions, similar to CCI code in a Java EE/JTA
+ * environment. However, if possible, use Spring's ConnectionFactoryUtils, CciTemplate or
+ * CCI operation objects to get transaction participation even without a proxy for
+ * the target ConnectionFactory, avoiding the need to define such a proxy in the first place.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; This ConnectionFactory proxy needs to return wrapped Connections
+ * in order to handle close calls properly. Therefore, the returned Connections cannot
+ * be cast to a native CCI Connection type or to a connection pool implementation type.
+ *
+ * @author Juergen Hoeller
+ * @since 1.2
+ * @see javax.resource.cci.ConnectionFactory#getConnection
+ * @see javax.resource.cci.Connection#close
+ * @see ConnectionFactoryUtils#doGetConnection
+ * @see ConnectionFactoryUtils#doReleaseConnection
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class TransactionAwareConnectionFactoryProxy extends DelegatingConnectionFactory {
+
+	/**
+	 * Create a new TransactionAwareConnectionFactoryProxy.
+	 * @see #setTargetConnectionFactory
+	 */
+<span class="nc" id="L75">	public TransactionAwareConnectionFactoryProxy() {</span>
+<span class="nc" id="L76">	}</span>
+
+	/**
+	 * Create a new TransactionAwareConnectionFactoryProxy.
+	 * @param targetConnectionFactory the target ConnectionFactory
+	 */
+<span class="nc" id="L82">	public TransactionAwareConnectionFactoryProxy(ConnectionFactory targetConnectionFactory) {</span>
+<span class="nc" id="L83">		setTargetConnectionFactory(targetConnectionFactory);</span>
+<span class="nc" id="L84">		afterPropertiesSet();</span>
+<span class="nc" id="L85">	}</span>
+
+
+	/**
+	 * Delegate to ConnectionFactoryUtils for automatically participating in Spring-managed
+	 * transactions. Throws the original ResourceException, if any.
+	 * @return a transactional Connection if any, a new one else
+	 * @see org.springframework.jca.cci.connection.ConnectionFactoryUtils#doGetConnection
+	 */
+	@Override
+	public Connection getConnection() throws ResourceException {
+<span class="nc" id="L96">		ConnectionFactory targetConnectionFactory = obtainTargetConnectionFactory();</span>
+<span class="nc" id="L97">		Connection con = ConnectionFactoryUtils.doGetConnection(targetConnectionFactory);</span>
+<span class="nc" id="L98">		return getTransactionAwareConnectionProxy(con, targetConnectionFactory);</span>
+	}
+
+	/**
+	 * Wrap the given Connection with a proxy that delegates every method call to it
+	 * but delegates {@code close} calls to ConnectionFactoryUtils.
+	 * @param target the original Connection to wrap
+	 * @param cf the ConnectionFactory that the Connection came from
+	 * @return the wrapped Connection
+	 * @see javax.resource.cci.Connection#close()
+	 * @see ConnectionFactoryUtils#doReleaseConnection
+	 */
+	protected Connection getTransactionAwareConnectionProxy(Connection target, ConnectionFactory cf) {
+<span class="nc" id="L111">		return (Connection) Proxy.newProxyInstance(</span>
+<span class="nc" id="L112">				Connection.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {Connection.class},
+				new TransactionAwareInvocationHandler(target, cf));
+	}
+
+
+	/**
+	 * Invocation handler that delegates close calls on CCI Connections
+	 * to ConnectionFactoryUtils for being aware of thread-bound transactions.
+	 */
+	private static class TransactionAwareInvocationHandler implements InvocationHandler {
+
+		private final Connection target;
+
+		private final ConnectionFactory connectionFactory;
+
+<span class="nc" id="L128">		public TransactionAwareInvocationHandler(Connection target, ConnectionFactory cf) {</span>
+<span class="nc" id="L129">			this.target = target;</span>
+<span class="nc" id="L130">			this.connectionFactory = cf;</span>
+<span class="nc" id="L131">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on Connection interface coming in...
+
+<span class="nc bnc" id="L138" title="All 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L140" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="nc bnc" id="L142" title="All 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L144">				return System.identityHashCode(proxy);</span>
+			}
+<span class="nc bnc" id="L146" title="All 2 branches missed.">			else if (method.getName().equals(&quot;getLocalTransaction&quot;)) {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">				if (ConnectionFactoryUtils.isConnectionTransactional(this.target, this.connectionFactory)) {</span>
+<span class="nc" id="L148">					throw new javax.resource.spi.IllegalStateException(</span>
+							&quot;Local transaction handling not allowed within a managed transaction&quot;);
+				}
+			}
+<span class="nc bnc" id="L152" title="All 2 branches missed.">			else if (method.getName().equals(&quot;close&quot;)) {</span>
+				// Handle close method: only close if not within a transaction.
+<span class="nc" id="L154">				ConnectionFactoryUtils.doReleaseConnection(this.target, this.connectionFactory);</span>
+<span class="nc" id="L155">				return null;</span>
+			}
+
+			// Invoke method on target Connection.
+			try {
+<span class="nc" id="L160">				return method.invoke(this.target, args);</span>
+			}
+<span class="nc" id="L162">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L163">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

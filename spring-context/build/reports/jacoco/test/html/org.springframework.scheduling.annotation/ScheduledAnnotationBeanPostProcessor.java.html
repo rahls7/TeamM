@@ -1,0 +1,583 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ScheduledAnnotationBeanPostProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.annotation</a> &gt; <span class="el_source">ScheduledAnnotationBeanPostProcessor.java</span></div><h1>ScheduledAnnotationBeanPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.annotation;
+
+import java.lang.reflect.Method;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aop.framework.AopInfrastructureBean;
+import org.springframework.aop.framework.AopProxyUtils;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanNameAware;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
+import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.DestructionAwareBeanPostProcessor;
+import org.springframework.beans.factory.config.NamedBeanHolder;
+import org.springframework.beans.factory.support.MergedBeanDefinitionPostProcessor;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.EmbeddedValueResolverAware;
+import org.springframework.context.event.ContextRefreshedEvent;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.Trigger;
+import org.springframework.scheduling.config.CronTask;
+import org.springframework.scheduling.config.FixedDelayTask;
+import org.springframework.scheduling.config.FixedRateTask;
+import org.springframework.scheduling.config.ScheduledTask;
+import org.springframework.scheduling.config.ScheduledTaskHolder;
+import org.springframework.scheduling.config.ScheduledTaskRegistrar;
+import org.springframework.scheduling.support.CronTrigger;
+import org.springframework.scheduling.support.ScheduledMethodRunnable;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+
+/**
+ * Bean post-processor that registers methods annotated with @{@link Scheduled}
+ * to be invoked by a {@link org.springframework.scheduling.TaskScheduler} according
+ * to the &quot;fixedRate&quot;, &quot;fixedDelay&quot;, or &quot;cron&quot; expression provided via the annotation.
+ *
+ * &lt;p&gt;This post-processor is automatically registered by Spring's
+ * {@code &lt;task:annotation-driven&gt;} XML element, and also by the
+ * {@link EnableScheduling @EnableScheduling} annotation.
+ *
+ * &lt;p&gt;Autodetects any {@link SchedulingConfigurer} instances in the container,
+ * allowing for customization of the scheduler to be used or for fine-grained
+ * control over task registration (e.g. registration of {@link Trigger} tasks.
+ * See the @{@link EnableScheduling} javadocs for complete usage details.
+ *
+ * @author Mark Fisher
+ * @author Juergen Hoeller
+ * @author Chris Beams
+ * @author Elizabeth Chatman
+ * @since 3.0
+ * @see Scheduled
+ * @see EnableScheduling
+ * @see SchedulingConfigurer
+ * @see org.springframework.scheduling.TaskScheduler
+ * @see org.springframework.scheduling.config.ScheduledTaskRegistrar
+ * @see AsyncAnnotationBeanPostProcessor
+ */
+public class ScheduledAnnotationBeanPostProcessor
+		implements ScheduledTaskHolder, MergedBeanDefinitionPostProcessor, DestructionAwareBeanPostProcessor,
+		Ordered, EmbeddedValueResolverAware, BeanNameAware, BeanFactoryAware, ApplicationContextAware,
+		SmartInitializingSingleton, ApplicationListener&lt;ContextRefreshedEvent&gt;, DisposableBean {
+
+	/**
+	 * The default name of the {@link TaskScheduler} bean to pick up: {@value}.
+	 * &lt;p&gt;Note that the initial lookup happens by type; this is just the fallback
+	 * in case of multiple scheduler beans found in the context.
+	 * @since 4.2
+	 */
+	public static final String DEFAULT_TASK_SCHEDULER_BEAN_NAME = &quot;taskScheduler&quot;;
+
+
+<span class="pc" id="L119">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	private final ScheduledTaskRegistrar registrar;
+
+	@Nullable
+	private Object scheduler;
+
+	@Nullable
+	private StringValueResolver embeddedValueResolver;
+
+	@Nullable
+	private String beanName;
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+	@Nullable
+	private ApplicationContext applicationContext;
+
+<span class="pc" id="L138">	private final Set&lt;Class&lt;?&gt;&gt; nonAnnotatedClasses = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(64));</span>
+
+<span class="pc" id="L140">	private final Map&lt;Object, Set&lt;ScheduledTask&gt;&gt; scheduledTasks = new IdentityHashMap&lt;&gt;(16);</span>
+
+
+	/**
+	 * Create a default {@code ScheduledAnnotationBeanPostProcessor}.
+	 */
+<span class="fc" id="L146">	public ScheduledAnnotationBeanPostProcessor() {</span>
+<span class="fc" id="L147">		this.registrar = new ScheduledTaskRegistrar();</span>
+<span class="fc" id="L148">	}</span>
+
+	/**
+	 * Create a {@code ScheduledAnnotationBeanPostProcessor} delegating to the
+	 * specified {@link ScheduledTaskRegistrar}.
+	 * @param registrar the ScheduledTaskRegistrar to register @Scheduled tasks on
+	 * @since 5.1
+	 */
+<span class="nc" id="L156">	public ScheduledAnnotationBeanPostProcessor(ScheduledTaskRegistrar registrar) {</span>
+<span class="nc" id="L157">		Assert.notNull(registrar, &quot;ScheduledTaskRegistrar is required&quot;);</span>
+<span class="nc" id="L158">		this.registrar = registrar;</span>
+<span class="nc" id="L159">	}</span>
+
+
+	@Override
+	public int getOrder() {
+<span class="fc" id="L164">		return LOWEST_PRECEDENCE;</span>
+	}
+
+	/**
+	 * Set the {@link org.springframework.scheduling.TaskScheduler} that will invoke
+	 * the scheduled methods, or a {@link java.util.concurrent.ScheduledExecutorService}
+	 * to be wrapped as a TaskScheduler.
+	 * &lt;p&gt;If not specified, default scheduler resolution will apply: searching for a
+	 * unique {@link TaskScheduler} bean in the context, or for a {@link TaskScheduler}
+	 * bean named &quot;taskScheduler&quot; otherwise; the same lookup will also be performed for
+	 * a {@link ScheduledExecutorService} bean. If neither of the two is resolvable,
+	 * a local single-threaded default scheduler will be created within the registrar.
+	 * @see #DEFAULT_TASK_SCHEDULER_BEAN_NAME
+	 */
+	public void setScheduler(Object scheduler) {
+<span class="fc" id="L179">		this.scheduler = scheduler;</span>
+<span class="fc" id="L180">	}</span>
+
+	@Override
+	public void setEmbeddedValueResolver(StringValueResolver resolver) {
+<span class="fc" id="L184">		this.embeddedValueResolver = resolver;</span>
+<span class="fc" id="L185">	}</span>
+
+	@Override
+	public void setBeanName(String beanName) {
+<span class="fc" id="L189">		this.beanName = beanName;</span>
+<span class="fc" id="L190">	}</span>
+
+	/**
+	 * Making a {@link BeanFactory} available is optional; if not set,
+	 * {@link SchedulingConfigurer} beans won't get autodetected and
+	 * a {@link #setScheduler scheduler} has to be explicitly configured.
+	 */
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="fc" id="L199">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L200">	}</span>
+
+	/**
+	 * Setting an {@link ApplicationContext} is optional: If set, registered
+	 * tasks will be activated in the {@link ContextRefreshedEvent} phase;
+	 * if not set, it will happen at {@link #afterSingletonsInstantiated} time.
+	 */
+	@Override
+	public void setApplicationContext(ApplicationContext applicationContext) {
+<span class="fc" id="L209">		this.applicationContext = applicationContext;</span>
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">		if (this.beanFactory == null) {</span>
+<span class="nc" id="L211">			this.beanFactory = applicationContext;</span>
+		}
+<span class="fc" id="L213">	}</span>
+
+
+	@Override
+	public void afterSingletonsInstantiated() {
+		// Remove resolved singleton classes from cache
+<span class="fc" id="L219">		this.nonAnnotatedClasses.clear();</span>
+
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">		if (this.applicationContext == null) {</span>
+			// Not running in an ApplicationContext -&gt; register tasks early...
+<span class="nc" id="L223">			finishRegistration();</span>
+		}
+<span class="fc" id="L225">	}</span>
+
+	@Override
+	public void onApplicationEvent(ContextRefreshedEvent event) {
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">		if (event.getApplicationContext() == this.applicationContext) {</span>
+			// Running in an ApplicationContext -&gt; register tasks this late...
+			// giving other ContextRefreshedEvent listeners a chance to perform
+			// their work at the same time (e.g. Spring Batch's job registration).
+<span class="fc" id="L233">			finishRegistration();</span>
+		}
+<span class="fc" id="L235">	}</span>
+
+	private void finishRegistration() {
+<span class="fc bfc" id="L238" title="All 2 branches covered.">		if (this.scheduler != null) {</span>
+<span class="fc" id="L239">			this.registrar.setScheduler(this.scheduler);</span>
+		}
+
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">		if (this.beanFactory instanceof ListableBeanFactory) {</span>
+<span class="fc" id="L243">			Map&lt;String, SchedulingConfigurer&gt; beans =</span>
+<span class="fc" id="L244">					((ListableBeanFactory) this.beanFactory).getBeansOfType(SchedulingConfigurer.class);</span>
+<span class="fc" id="L245">			List&lt;SchedulingConfigurer&gt; configurers = new ArrayList&lt;&gt;(beans.values());</span>
+<span class="fc" id="L246">			AnnotationAwareOrderComparator.sort(configurers);</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">			for (SchedulingConfigurer configurer : configurers) {</span>
+<span class="nc" id="L248">				configurer.configureTasks(this.registrar);</span>
+<span class="nc" id="L249">			}</span>
+		}
+
+<span class="pc bpc" id="L252" title="1 of 4 branches missed.">		if (this.registrar.hasTasks() &amp;&amp; this.registrar.getScheduler() == null) {</span>
+<span class="pc bpc" id="L253" title="1 of 2 branches missed.">			Assert.state(this.beanFactory != null, &quot;BeanFactory must be set to find scheduler by type&quot;);</span>
+			try {
+				// Search for TaskScheduler bean...
+<span class="nc" id="L256">				this.registrar.setTaskScheduler(resolveSchedulerBean(this.beanFactory, TaskScheduler.class, false));</span>
+			}
+<span class="fc" id="L258">			catch (NoUniqueBeanDefinitionException ex) {</span>
+<span class="fc" id="L259">				logger.trace(&quot;Could not find unique TaskScheduler bean&quot;, ex);</span>
+				try {
+<span class="nc" id="L261">					this.registrar.setTaskScheduler(resolveSchedulerBean(this.beanFactory, TaskScheduler.class, true));</span>
+				}
+<span class="fc" id="L263">				catch (NoSuchBeanDefinitionException ex2) {</span>
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">					if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L265">						logger.info(&quot;More than one TaskScheduler bean exists within the context, and &quot; +</span>
+								&quot;none is named 'taskScheduler'. Mark one of them as primary or name it 'taskScheduler' &quot; +
+								&quot;(possibly as an alias); or implement the SchedulingConfigurer interface and call &quot; +
+								&quot;ScheduledTaskRegistrar#setScheduler explicitly within the configureTasks() callback: &quot; +
+<span class="nc" id="L269">								ex.getBeanNamesFound());</span>
+					}
+<span class="nc" id="L271">				}</span>
+			}
+<span class="fc" id="L273">			catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="fc" id="L274">				logger.trace(&quot;Could not find default TaskScheduler bean&quot;, ex);</span>
+				// Search for ScheduledExecutorService bean next...
+				try {
+<span class="nc" id="L277">					this.registrar.setScheduler(resolveSchedulerBean(this.beanFactory, ScheduledExecutorService.class, false));</span>
+				}
+<span class="nc" id="L279">				catch (NoUniqueBeanDefinitionException ex2) {</span>
+<span class="nc" id="L280">					logger.trace(&quot;Could not find unique ScheduledExecutorService bean&quot;, ex2);</span>
+					try {
+<span class="nc" id="L282">						this.registrar.setScheduler(resolveSchedulerBean(this.beanFactory, ScheduledExecutorService.class, true));</span>
+					}
+<span class="nc" id="L284">					catch (NoSuchBeanDefinitionException ex3) {</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">						if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L286">							logger.info(&quot;More than one ScheduledExecutorService bean exists within the context, and &quot; +</span>
+									&quot;none is named 'taskScheduler'. Mark one of them as primary or name it 'taskScheduler' &quot; +
+									&quot;(possibly as an alias); or implement the SchedulingConfigurer interface and call &quot; +
+									&quot;ScheduledTaskRegistrar#setScheduler explicitly within the configureTasks() callback: &quot; +
+<span class="nc" id="L290">									ex2.getBeanNamesFound());</span>
+						}
+<span class="nc" id="L292">					}</span>
+				}
+<span class="fc" id="L294">				catch (NoSuchBeanDefinitionException ex2) {</span>
+<span class="fc" id="L295">					logger.trace(&quot;Could not find default ScheduledExecutorService bean&quot;, ex2);</span>
+					// Giving up -&gt; falling back to default scheduler within the registrar...
+<span class="fc" id="L297">					logger.info(&quot;No TaskScheduler/ScheduledExecutorService bean found for scheduled processing&quot;);</span>
+<span class="nc" id="L298">				}</span>
+<span class="pc" id="L299">			}</span>
+		}
+
+<span class="fc" id="L302">		this.registrar.afterPropertiesSet();</span>
+<span class="fc" id="L303">	}</span>
+
+	private &lt;T&gt; T resolveSchedulerBean(BeanFactory beanFactory, Class&lt;T&gt; schedulerType, boolean byName) {
+<span class="fc bfc" id="L306" title="All 2 branches covered.">		if (byName) {</span>
+<span class="nc" id="L307">			T scheduler = beanFactory.getBean(DEFAULT_TASK_SCHEDULER_BEAN_NAME, schedulerType);</span>
+<span class="nc bnc" id="L308" title="All 4 branches missed.">			if (this.beanName != null &amp;&amp; this.beanFactory instanceof ConfigurableBeanFactory) {</span>
+<span class="nc" id="L309">				((ConfigurableBeanFactory) this.beanFactory).registerDependentBean(</span>
+						DEFAULT_TASK_SCHEDULER_BEAN_NAME, this.beanName);
+			}
+<span class="nc" id="L312">			return scheduler;</span>
+		}
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">		else if (beanFactory instanceof AutowireCapableBeanFactory) {</span>
+<span class="nc" id="L315">			NamedBeanHolder&lt;T&gt; holder = ((AutowireCapableBeanFactory) beanFactory).resolveNamedBean(schedulerType);</span>
+<span class="nc bnc" id="L316" title="All 4 branches missed.">			if (this.beanName != null &amp;&amp; beanFactory instanceof ConfigurableBeanFactory) {</span>
+<span class="nc" id="L317">				((ConfigurableBeanFactory) beanFactory).registerDependentBean(holder.getBeanName(), this.beanName);</span>
+			}
+<span class="nc" id="L319">			return holder.getBeanInstance();</span>
+		}
+		else {
+<span class="nc" id="L322">			return beanFactory.getBean(schedulerType);</span>
+		}
+	}
+
+
+	@Override
+	public void postProcessMergedBeanDefinition(RootBeanDefinition beanDefinition, Class&lt;?&gt; beanType, String beanName) {
+<span class="fc" id="L329">	}</span>
+
+	@Override
+	public Object postProcessBeforeInitialization(Object bean, String beanName) {
+<span class="fc" id="L333">		return bean;</span>
+	}
+
+	@Override
+	public Object postProcessAfterInitialization(Object bean, String beanName) {
+<span class="pc bpc" id="L338" title="1 of 6 branches missed.">		if (bean instanceof AopInfrastructureBean || bean instanceof TaskScheduler ||</span>
+				bean instanceof ScheduledExecutorService) {
+			// Ignore AOP infrastructure such as scoped proxies.
+<span class="fc" id="L341">			return bean;</span>
+		}
+
+<span class="fc" id="L344">		Class&lt;?&gt; targetClass = AopProxyUtils.ultimateTargetClass(bean);</span>
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">		if (!this.nonAnnotatedClasses.contains(targetClass) &amp;&amp;</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">				AnnotationUtils.isCandidateClass(targetClass, Arrays.asList(Scheduled.class, Schedules.class))) {</span>
+<span class="fc" id="L347">			Map&lt;Method, Set&lt;Scheduled&gt;&gt; annotatedMethods = MethodIntrospector.selectMethods(targetClass,</span>
+					(MethodIntrospector.MetadataLookup&lt;Set&lt;Scheduled&gt;&gt;) method -&gt; {
+<span class="fc" id="L349">						Set&lt;Scheduled&gt; scheduledMethods = AnnotatedElementUtils.getMergedRepeatableAnnotations(</span>
+								method, Scheduled.class, Schedules.class);
+<span class="fc bfc" id="L351" title="All 2 branches covered.">						return (!scheduledMethods.isEmpty() ? scheduledMethods : null);</span>
+					});
+<span class="fc bfc" id="L353" title="All 2 branches covered.">			if (annotatedMethods.isEmpty()) {</span>
+<span class="fc" id="L354">				this.nonAnnotatedClasses.add(targetClass);</span>
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L356">					logger.trace(&quot;No @Scheduled annotations found on bean class: &quot; + targetClass);</span>
+				}
+			}
+			else {
+				// Non-empty set of methods
+<span class="fc" id="L361">				annotatedMethods.forEach((method, scheduledMethods) -&gt;</span>
+<span class="fc" id="L362">						scheduledMethods.forEach(scheduled -&gt; processScheduled(scheduled, method, bean)));</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L364">					logger.trace(annotatedMethods.size() + &quot; @Scheduled methods processed on bean '&quot; + beanName +</span>
+							&quot;': &quot; + annotatedMethods);
+				}
+			}
+		}
+<span class="fc" id="L369">		return bean;</span>
+	}
+
+	/**
+	 * Process the given {@code @Scheduled} method declaration on the given bean.
+	 * @param scheduled the @Scheduled annotation
+	 * @param method the method that the annotation has been declared on
+	 * @param bean the target bean instance
+	 * @see #createRunnable(Object, Method)
+	 */
+	protected void processScheduled(Scheduled scheduled, Method method, Object bean) {
+		try {
+<span class="fc" id="L381">			Runnable runnable = createRunnable(bean, method);</span>
+<span class="fc" id="L382">			boolean processedSchedule = false;</span>
+<span class="fc" id="L383">			String errorMessage =</span>
+					&quot;Exactly one of the 'cron', 'fixedDelay(String)', or 'fixedRate(String)' attributes is required&quot;;
+
+<span class="fc" id="L386">			Set&lt;ScheduledTask&gt; tasks = new LinkedHashSet&lt;&gt;(4);</span>
+
+			// Determine initial delay
+<span class="fc" id="L389">			long initialDelay = scheduled.initialDelay();</span>
+<span class="fc" id="L390">			String initialDelayString = scheduled.initialDelayString();</span>
+<span class="fc bfc" id="L391" title="All 2 branches covered.">			if (StringUtils.hasText(initialDelayString)) {</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">				Assert.isTrue(initialDelay &lt; 0, &quot;Specify 'initialDelay' or 'initialDelayString', not both&quot;);</span>
+<span class="pc bpc" id="L393" title="1 of 2 branches missed.">				if (this.embeddedValueResolver != null) {</span>
+<span class="fc" id="L394">					initialDelayString = this.embeddedValueResolver.resolveStringValue(initialDelayString);</span>
+				}
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">				if (StringUtils.hasLength(initialDelayString)) {</span>
+					try {
+<span class="fc" id="L398">						initialDelay = parseDelayAsLong(initialDelayString);</span>
+					}
+<span class="nc" id="L400">					catch (RuntimeException ex) {</span>
+<span class="nc" id="L401">						throw new IllegalArgumentException(</span>
+								&quot;Invalid initialDelayString value \&quot;&quot; + initialDelayString + &quot;\&quot; - cannot parse into long&quot;);
+<span class="fc" id="L403">					}</span>
+				}
+			}
+
+			// Check cron expression
+<span class="fc" id="L408">			String cron = scheduled.cron();</span>
+<span class="fc bfc" id="L409" title="All 2 branches covered.">			if (StringUtils.hasText(cron)) {</span>
+<span class="fc" id="L410">				String zone = scheduled.zone();</span>
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">				if (this.embeddedValueResolver != null) {</span>
+<span class="fc" id="L412">					cron = this.embeddedValueResolver.resolveStringValue(cron);</span>
+<span class="fc" id="L413">					zone = this.embeddedValueResolver.resolveStringValue(zone);</span>
+				}
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">				if (StringUtils.hasLength(cron)) {</span>
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">					Assert.isTrue(initialDelay == -1, &quot;'initialDelay' not supported for cron triggers&quot;);</span>
+<span class="fc" id="L417">					processedSchedule = true;</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">					if (!Scheduled.CRON_DISABLED.equals(cron)) {</span>
+						TimeZone timeZone;
+<span class="fc bfc" id="L420" title="All 2 branches covered.">						if (StringUtils.hasText(zone)) {</span>
+<span class="fc" id="L421">							timeZone = StringUtils.parseTimeZoneString(zone);</span>
+						}
+						else {
+<span class="fc" id="L424">							timeZone = TimeZone.getDefault();</span>
+						}
+<span class="fc" id="L426">						tasks.add(this.registrar.scheduleCronTask(new CronTask(runnable, new CronTrigger(cron, timeZone))));</span>
+					}
+				}
+			}
+
+			// At this point we don't need to differentiate between initial delay set or not anymore
+<span class="fc bfc" id="L432" title="All 2 branches covered.">			if (initialDelay &lt; 0) {</span>
+<span class="fc" id="L433">				initialDelay = 0;</span>
+			}
+
+			// Check fixed delay
+<span class="fc" id="L437">			long fixedDelay = scheduled.fixedDelay();</span>
+<span class="fc bfc" id="L438" title="All 2 branches covered.">			if (fixedDelay &gt;= 0) {</span>
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">				Assert.isTrue(!processedSchedule, errorMessage);</span>
+<span class="fc" id="L440">				processedSchedule = true;</span>
+<span class="fc" id="L441">				tasks.add(this.registrar.scheduleFixedDelayTask(new FixedDelayTask(runnable, fixedDelay, initialDelay)));</span>
+			}
+<span class="fc" id="L443">			String fixedDelayString = scheduled.fixedDelayString();</span>
+<span class="fc bfc" id="L444" title="All 2 branches covered.">			if (StringUtils.hasText(fixedDelayString)) {</span>
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">				if (this.embeddedValueResolver != null) {</span>
+<span class="fc" id="L446">					fixedDelayString = this.embeddedValueResolver.resolveStringValue(fixedDelayString);</span>
+				}
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">				if (StringUtils.hasLength(fixedDelayString)) {</span>
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">					Assert.isTrue(!processedSchedule, errorMessage);</span>
+<span class="fc" id="L450">					processedSchedule = true;</span>
+					try {
+<span class="fc" id="L452">						fixedDelay = parseDelayAsLong(fixedDelayString);</span>
+					}
+<span class="nc" id="L454">					catch (RuntimeException ex) {</span>
+<span class="nc" id="L455">						throw new IllegalArgumentException(</span>
+								&quot;Invalid fixedDelayString value \&quot;&quot; + fixedDelayString + &quot;\&quot; - cannot parse into long&quot;);
+<span class="fc" id="L457">					}</span>
+<span class="fc" id="L458">					tasks.add(this.registrar.scheduleFixedDelayTask(new FixedDelayTask(runnable, fixedDelay, initialDelay)));</span>
+				}
+			}
+
+			// Check fixed rate
+<span class="fc" id="L463">			long fixedRate = scheduled.fixedRate();</span>
+<span class="fc bfc" id="L464" title="All 2 branches covered.">			if (fixedRate &gt;= 0) {</span>
+<span class="pc bpc" id="L465" title="1 of 2 branches missed.">				Assert.isTrue(!processedSchedule, errorMessage);</span>
+<span class="fc" id="L466">				processedSchedule = true;</span>
+<span class="fc" id="L467">				tasks.add(this.registrar.scheduleFixedRateTask(new FixedRateTask(runnable, fixedRate, initialDelay)));</span>
+			}
+<span class="fc" id="L469">			String fixedRateString = scheduled.fixedRateString();</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">			if (StringUtils.hasText(fixedRateString)) {</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">				if (this.embeddedValueResolver != null) {</span>
+<span class="fc" id="L472">					fixedRateString = this.embeddedValueResolver.resolveStringValue(fixedRateString);</span>
+				}
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">				if (StringUtils.hasLength(fixedRateString)) {</span>
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">					Assert.isTrue(!processedSchedule, errorMessage);</span>
+<span class="fc" id="L476">					processedSchedule = true;</span>
+					try {
+<span class="fc" id="L478">						fixedRate = parseDelayAsLong(fixedRateString);</span>
+					}
+<span class="nc" id="L480">					catch (RuntimeException ex) {</span>
+<span class="nc" id="L481">						throw new IllegalArgumentException(</span>
+								&quot;Invalid fixedRateString value \&quot;&quot; + fixedRateString + &quot;\&quot; - cannot parse into long&quot;);
+<span class="fc" id="L483">					}</span>
+<span class="fc" id="L484">					tasks.add(this.registrar.scheduleFixedRateTask(new FixedRateTask(runnable, fixedRate, initialDelay)));</span>
+				}
+			}
+
+			// Check whether we had any attribute set
+<span class="fc" id="L489">			Assert.isTrue(processedSchedule, errorMessage);</span>
+
+			// Finally register the scheduled tasks
+<span class="fc" id="L492">			synchronized (this.scheduledTasks) {</span>
+<span class="fc" id="L493">				Set&lt;ScheduledTask&gt; regTasks = this.scheduledTasks.computeIfAbsent(bean, key -&gt; new LinkedHashSet&lt;&gt;(4));</span>
+<span class="fc" id="L494">				regTasks.addAll(tasks);</span>
+<span class="fc" id="L495">			}</span>
+		}
+<span class="fc" id="L497">		catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L498">			throw new IllegalStateException(</span>
+<span class="fc" id="L499">					&quot;Encountered invalid @Scheduled method '&quot; + method.getName() + &quot;': &quot; + ex.getMessage());</span>
+<span class="fc" id="L500">		}</span>
+<span class="fc" id="L501">	}</span>
+
+	/**
+	 * Create a {@link Runnable} for the given bean instance,
+	 * calling the specified scheduled method.
+	 * &lt;p&gt;The default implementation creates a {@link ScheduledMethodRunnable}.
+	 * @param target the target bean instance
+	 * @param method the scheduled method to call
+	 * @since 5.1
+	 * @see ScheduledMethodRunnable#ScheduledMethodRunnable(Object, Method)
+	 */
+	protected Runnable createRunnable(Object target, Method method) {
+<span class="fc bfc" id="L513" title="All 2 branches covered.">		Assert.isTrue(method.getParameterCount() == 0, &quot;Only no-arg methods may be annotated with @Scheduled&quot;);</span>
+<span class="fc" id="L514">		Method invocableMethod = AopUtils.selectInvocableMethod(method, target.getClass());</span>
+<span class="fc" id="L515">		return new ScheduledMethodRunnable(target, invocableMethod);</span>
+	}
+
+	private static long parseDelayAsLong(String value) throws RuntimeException {
+<span class="pc bpc" id="L519" title="2 of 6 branches missed.">		if (value.length() &gt; 1 &amp;&amp; (isP(value.charAt(0)) || isP(value.charAt(1)))) {</span>
+<span class="fc" id="L520">			return Duration.parse(value).toMillis();</span>
+		}
+<span class="fc" id="L522">		return Long.parseLong(value);</span>
+	}
+
+	private static boolean isP(char ch) {
+<span class="pc bpc" id="L526" title="1 of 4 branches missed.">		return (ch == 'P' || ch == 'p');</span>
+	}
+
+
+	/**
+	 * Return all currently scheduled tasks, from {@link Scheduled} methods
+	 * as well as from programmatic {@link SchedulingConfigurer} interaction.
+	 * @since 5.0.2
+	 */
+	@Override
+	public Set&lt;ScheduledTask&gt; getScheduledTasks() {
+<span class="fc" id="L537">		Set&lt;ScheduledTask&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L538">		synchronized (this.scheduledTasks) {</span>
+<span class="fc" id="L539">			Collection&lt;Set&lt;ScheduledTask&gt;&gt; allTasks = this.scheduledTasks.values();</span>
+<span class="fc bfc" id="L540" title="All 2 branches covered.">			for (Set&lt;ScheduledTask&gt; tasks : allTasks) {</span>
+<span class="fc" id="L541">				result.addAll(tasks);</span>
+<span class="fc" id="L542">			}</span>
+<span class="fc" id="L543">		}</span>
+<span class="fc" id="L544">		result.addAll(this.registrar.getScheduledTasks());</span>
+<span class="fc" id="L545">		return result;</span>
+	}
+
+	@Override
+	public void postProcessBeforeDestruction(Object bean, String beanName) {
+		Set&lt;ScheduledTask&gt; tasks;
+<span class="fc" id="L551">		synchronized (this.scheduledTasks) {</span>
+<span class="fc" id="L552">			tasks = this.scheduledTasks.remove(bean);</span>
+<span class="fc" id="L553">		}</span>
+<span class="pc bpc" id="L554" title="1 of 2 branches missed.">		if (tasks != null) {</span>
+<span class="fc bfc" id="L555" title="All 2 branches covered.">			for (ScheduledTask task : tasks) {</span>
+<span class="fc" id="L556">				task.cancel();</span>
+<span class="fc" id="L557">			}</span>
+		}
+<span class="fc" id="L559">	}</span>
+
+	@Override
+	public boolean requiresDestruction(Object bean) {
+<span class="fc" id="L563">		synchronized (this.scheduledTasks) {</span>
+<span class="fc" id="L564">			return this.scheduledTasks.containsKey(bean);</span>
+		}
+	}
+
+	@Override
+	public void destroy() {
+<span class="fc" id="L570">		synchronized (this.scheduledTasks) {</span>
+<span class="fc" id="L571">			Collection&lt;Set&lt;ScheduledTask&gt;&gt; allTasks = this.scheduledTasks.values();</span>
+<span class="pc bpc" id="L572" title="1 of 2 branches missed.">			for (Set&lt;ScheduledTask&gt; tasks : allTasks) {</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">				for (ScheduledTask task : tasks) {</span>
+<span class="nc" id="L574">					task.cancel();</span>
+<span class="nc" id="L575">				}</span>
+<span class="nc" id="L576">			}</span>
+<span class="fc" id="L577">			this.scheduledTasks.clear();</span>
+<span class="fc" id="L578">		}</span>
+<span class="fc" id="L579">		this.registrar.destroy();</span>
+<span class="fc" id="L580">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

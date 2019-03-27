@@ -1,0 +1,688 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractEntityManagerFactoryBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.jpa</a> &gt; <span class="el_source">AbstractEntityManagerFactoryBean.java</span></div><h1>AbstractEntityManagerFactoryBean.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.jpa;
+
+import java.io.IOException;
+import java.io.NotSerializableException;
+import java.io.ObjectInputStream;
+import java.io.ObjectStreamException;
+import java.io.Serializable;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import javax.persistence.EntityManager;
+import javax.persistence.EntityManagerFactory;
+import javax.persistence.PersistenceException;
+import javax.persistence.Query;
+import javax.persistence.SynchronizationType;
+import javax.persistence.spi.PersistenceProvider;
+import javax.persistence.spi.PersistenceUnitInfo;
+import javax.sql.DataSource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanNameAware;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.support.PersistenceExceptionTranslator;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+
+/**
+ * Abstract {@link org.springframework.beans.factory.FactoryBean} that creates
+ * a local JPA {@link javax.persistence.EntityManagerFactory} instance within
+ * a Spring application context.
+ *
+ * &lt;p&gt;Encapsulates the common functionality between the different JPA bootstrap
+ * contracts (standalone as well as container).
+ *
+ * &lt;p&gt;Implements support for standard JPA configuration conventions as well as
+ * Spring's customizable {@link JpaVendorAdapter} mechanism, and controls the
+ * EntityManagerFactory's lifecycle.
+ *
+ * &lt;p&gt;This class also implements the
+ * {@link org.springframework.dao.support.PersistenceExceptionTranslator}
+ * interface, as autodetected by Spring's
+ * {@link org.springframework.dao.annotation.PersistenceExceptionTranslationPostProcessor},
+ * for AOP-based translation of native exceptions to Spring DataAccessExceptions.
+ * Hence, the presence of e.g. LocalEntityManagerFactoryBean automatically enables
+ * a PersistenceExceptionTranslationPostProcessor to translate JPA exceptions.
+ *
+ * @author Juergen Hoeller
+ * @author Rod Johnson
+ * @since 2.0
+ * @see LocalEntityManagerFactoryBean
+ * @see LocalContainerEntityManagerFactoryBean
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L90">public abstract class AbstractEntityManagerFactoryBean implements</span>
+		FactoryBean&lt;EntityManagerFactory&gt;, BeanClassLoaderAware, BeanFactoryAware, BeanNameAware,
+		InitializingBean, DisposableBean, EntityManagerFactoryInfo, PersistenceExceptionTranslator, Serializable {
+
+	/** Logger available to subclasses. */
+<span class="fc" id="L95">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private PersistenceProvider persistenceProvider;
+
+	@Nullable
+	private String persistenceUnitName;
+
+<span class="fc" id="L103">	private final Map&lt;String, Object&gt; jpaPropertyMap = new HashMap&lt;&gt;();</span>
+
+	@Nullable
+	private Class&lt;? extends EntityManagerFactory&gt; entityManagerFactoryInterface;
+
+	@Nullable
+	private Class&lt;? extends EntityManager&gt; entityManagerInterface;
+
+	@Nullable
+	private JpaDialect jpaDialect;
+
+	@Nullable
+	private JpaVendorAdapter jpaVendorAdapter;
+
+	@Nullable
+	private AsyncTaskExecutor bootstrapExecutor;
+
+<span class="fc" id="L120">	private ClassLoader beanClassLoader = getClass().getClassLoader();</span>
+
+	@Nullable
+	private BeanFactory beanFactory;
+
+	@Nullable
+	private String beanName;
+
+	/** Raw EntityManagerFactory as returned by the PersistenceProvider. */
+	@Nullable
+	private EntityManagerFactory nativeEntityManagerFactory;
+
+	/** Future for lazily initializing raw target EntityManagerFactory. */
+	@Nullable
+	private Future&lt;EntityManagerFactory&gt; nativeEntityManagerFactoryFuture;
+
+	/** Exposed client-level EntityManagerFactory proxy. */
+	@Nullable
+	private EntityManagerFactory entityManagerFactory;
+
+
+	/**
+	 * Set the PersistenceProvider implementation class to use for creating the
+	 * EntityManagerFactory. If not specified, the persistence provider will be
+	 * taken from the JpaVendorAdapter (if any) or retrieved through scanning
+	 * (as far as possible).
+	 * @see JpaVendorAdapter#getPersistenceProvider()
+	 * @see javax.persistence.spi.PersistenceProvider
+	 * @see javax.persistence.Persistence
+	 */
+	public void setPersistenceProviderClass(Class&lt;? extends PersistenceProvider&gt; persistenceProviderClass) {
+<span class="fc" id="L151">		this.persistenceProvider = BeanUtils.instantiateClass(persistenceProviderClass);</span>
+<span class="fc" id="L152">	}</span>
+
+	/**
+	 * Set the PersistenceProvider instance to use for creating the
+	 * EntityManagerFactory. If not specified, the persistence provider
+	 * will be taken from the JpaVendorAdapter (if any) or determined
+	 * by the persistence unit deployment descriptor (as far as possible).
+	 * @see JpaVendorAdapter#getPersistenceProvider()
+	 * @see javax.persistence.spi.PersistenceProvider
+	 * @see javax.persistence.Persistence
+	 */
+	public void setPersistenceProvider(@Nullable PersistenceProvider persistenceProvider) {
+<span class="nc" id="L164">		this.persistenceProvider = persistenceProvider;</span>
+<span class="nc" id="L165">	}</span>
+
+	@Override
+	@Nullable
+	public PersistenceProvider getPersistenceProvider() {
+<span class="fc" id="L170">		return this.persistenceProvider;</span>
+	}
+
+	/**
+	 * Specify the name of the EntityManagerFactory configuration.
+	 * &lt;p&gt;Default is none, indicating the default EntityManagerFactory
+	 * configuration. The persistence provider will throw an exception if
+	 * ambiguous EntityManager configurations are found.
+	 * @see javax.persistence.Persistence#createEntityManagerFactory(String)
+	 */
+	public void setPersistenceUnitName(@Nullable String persistenceUnitName) {
+<span class="fc" id="L181">		this.persistenceUnitName = persistenceUnitName;</span>
+<span class="fc" id="L182">	}</span>
+
+	@Override
+	@Nullable
+	public String getPersistenceUnitName() {
+<span class="fc" id="L187">		return this.persistenceUnitName;</span>
+	}
+
+	/**
+	 * Specify JPA properties, to be passed into
+	 * {@code Persistence.createEntityManagerFactory} (if any).
+	 * &lt;p&gt;Can be populated with a String &quot;value&quot; (parsed via PropertiesEditor) or a
+	 * &quot;props&quot; element in XML bean definitions.
+	 * @see javax.persistence.Persistence#createEntityManagerFactory(String, java.util.Map)
+	 * @see javax.persistence.spi.PersistenceProvider#createContainerEntityManagerFactory(javax.persistence.spi.PersistenceUnitInfo, java.util.Map)
+	 */
+	public void setJpaProperties(Properties jpaProperties) {
+<span class="fc" id="L199">		CollectionUtils.mergePropertiesIntoMap(jpaProperties, this.jpaPropertyMap);</span>
+<span class="fc" id="L200">	}</span>
+
+	/**
+	 * Specify JPA properties as a Map, to be passed into
+	 * {@code Persistence.createEntityManagerFactory} (if any).
+	 * &lt;p&gt;Can be populated with a &quot;map&quot; or &quot;props&quot; element in XML bean definitions.
+	 * @see javax.persistence.Persistence#createEntityManagerFactory(String, java.util.Map)
+	 * @see javax.persistence.spi.PersistenceProvider#createContainerEntityManagerFactory(javax.persistence.spi.PersistenceUnitInfo, java.util.Map)
+	 */
+	public void setJpaPropertyMap(@Nullable Map&lt;String, ?&gt; jpaProperties) {
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">		if (jpaProperties != null) {</span>
+<span class="fc" id="L211">			this.jpaPropertyMap.putAll(jpaProperties);</span>
+		}
+<span class="fc" id="L213">	}</span>
+
+	/**
+	 * Allow Map access to the JPA properties to be passed to the persistence
+	 * provider, with the option to add or override specific entries.
+	 * &lt;p&gt;Useful for specifying entries directly, for example via
+	 * &quot;jpaPropertyMap[myKey]&quot;.
+	 */
+	public Map&lt;String, Object&gt; getJpaPropertyMap() {
+<span class="fc" id="L222">		return this.jpaPropertyMap;</span>
+	}
+
+	/**
+	 * Specify the (potentially vendor-specific) EntityManagerFactory interface
+	 * that this EntityManagerFactory proxy is supposed to implement.
+	 * &lt;p&gt;The default will be taken from the specific JpaVendorAdapter, if any,
+	 * or set to the standard {@code javax.persistence.EntityManagerFactory}
+	 * interface else.
+	 * @see JpaVendorAdapter#getEntityManagerFactoryInterface()
+	 */
+	public void setEntityManagerFactoryInterface(Class&lt;? extends EntityManagerFactory&gt; emfInterface) {
+<span class="nc" id="L234">		this.entityManagerFactoryInterface = emfInterface;</span>
+<span class="nc" id="L235">	}</span>
+
+	/**
+	 * Specify the (potentially vendor-specific) EntityManager interface
+	 * that this factory's EntityManagers are supposed to implement.
+	 * &lt;p&gt;The default will be taken from the specific JpaVendorAdapter, if any,
+	 * or set to the standard {@code javax.persistence.EntityManager}
+	 * interface else.
+	 * @see JpaVendorAdapter#getEntityManagerInterface()
+	 * @see EntityManagerFactoryInfo#getEntityManagerInterface()
+	 */
+	public void setEntityManagerInterface(@Nullable Class&lt;? extends EntityManager&gt; emInterface) {
+<span class="nc" id="L247">		this.entityManagerInterface = emInterface;</span>
+<span class="nc" id="L248">	}</span>
+
+	@Override
+	@Nullable
+	public Class&lt;? extends EntityManager&gt; getEntityManagerInterface() {
+<span class="fc" id="L253">		return this.entityManagerInterface;</span>
+	}
+
+	/**
+	 * Specify the vendor-specific JpaDialect implementation to associate with
+	 * this EntityManagerFactory. This will be exposed through the
+	 * EntityManagerFactoryInfo interface, to be picked up as default dialect by
+	 * accessors that intend to use JpaDialect functionality.
+	 * @see EntityManagerFactoryInfo#getJpaDialect()
+	 */
+	public void setJpaDialect(@Nullable JpaDialect jpaDialect) {
+<span class="nc" id="L264">		this.jpaDialect = jpaDialect;</span>
+<span class="nc" id="L265">	}</span>
+
+	@Override
+	@Nullable
+	public JpaDialect getJpaDialect() {
+<span class="fc" id="L270">		return this.jpaDialect;</span>
+	}
+
+	/**
+	 * Specify the JpaVendorAdapter implementation for the desired JPA provider,
+	 * if any. This will initialize appropriate defaults for the given provider,
+	 * such as persistence provider class and JpaDialect, unless locally
+	 * overridden in this FactoryBean.
+	 */
+	public void setJpaVendorAdapter(@Nullable JpaVendorAdapter jpaVendorAdapter) {
+<span class="fc" id="L280">		this.jpaVendorAdapter = jpaVendorAdapter;</span>
+<span class="fc" id="L281">	}</span>
+
+	/**
+	 * Return the JpaVendorAdapter implementation for this EntityManagerFactory,
+	 * or {@code null} if not known.
+	 */
+	@Nullable
+	public JpaVendorAdapter getJpaVendorAdapter() {
+<span class="fc" id="L289">		return this.jpaVendorAdapter;</span>
+	}
+
+	/**
+	 * Specify an asynchronous executor for background bootstrapping,
+	 * e.g. a {@link org.springframework.core.task.SimpleAsyncTaskExecutor}.
+	 * &lt;p&gt;{@code EntityManagerFactory} initialization will then switch into background
+	 * bootstrap mode, with a {@code EntityManagerFactory} proxy immediately returned for
+	 * injection purposes instead of waiting for the JPA provider's bootstrapping to complete.
+	 * However, note that the first actual call to a {@code EntityManagerFactory} method will
+	 * then block until the JPA provider's bootstrapping completed, if not ready by then.
+	 * For maximum benefit, make sure to avoid early {@code EntityManagerFactory} calls
+	 * in init methods of related beans, even for metadata introspection purposes.
+	 * @since 4.3
+	 */
+	public void setBootstrapExecutor(@Nullable AsyncTaskExecutor bootstrapExecutor) {
+<span class="fc" id="L305">		this.bootstrapExecutor = bootstrapExecutor;</span>
+<span class="fc" id="L306">	}</span>
+
+	/**
+	 * Return the asynchronous executor for background bootstrapping, if any.
+	 * @since 4.3
+	 */
+	@Nullable
+	public AsyncTaskExecutor getBootstrapExecutor() {
+<span class="fc" id="L314">		return this.bootstrapExecutor;</span>
+	}
+
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+<span class="fc" id="L319">		this.beanClassLoader = classLoader;</span>
+<span class="fc" id="L320">	}</span>
+
+	@Override
+	public ClassLoader getBeanClassLoader() {
+<span class="fc" id="L324">		return this.beanClassLoader;</span>
+	}
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="fc" id="L329">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L330">	}</span>
+
+	@Override
+	public void setBeanName(String name) {
+<span class="fc" id="L334">		this.beanName = name;</span>
+<span class="fc" id="L335">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() throws PersistenceException {
+<span class="fc" id="L340">		JpaVendorAdapter jpaVendorAdapter = getJpaVendorAdapter();</span>
+<span class="fc bfc" id="L341" title="All 2 branches covered.">		if (jpaVendorAdapter != null) {</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">			if (this.persistenceProvider == null) {</span>
+<span class="fc" id="L343">				this.persistenceProvider = jpaVendorAdapter.getPersistenceProvider();</span>
+			}
+<span class="fc" id="L345">			PersistenceUnitInfo pui = getPersistenceUnitInfo();</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">			Map&lt;String, ?&gt; vendorPropertyMap = (pui != null ? jpaVendorAdapter.getJpaPropertyMap(pui) :</span>
+<span class="pc" id="L347">					jpaVendorAdapter.getJpaPropertyMap());</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">			if (!CollectionUtils.isEmpty(vendorPropertyMap)) {</span>
+<span class="fc" id="L349">				vendorPropertyMap.forEach((key, value) -&gt; {</span>
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">					if (!this.jpaPropertyMap.containsKey(key)) {</span>
+<span class="fc" id="L351">						this.jpaPropertyMap.put(key, value);</span>
+					}
+<span class="fc" id="L353">				});</span>
+			}
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">			if (this.entityManagerFactoryInterface == null) {</span>
+<span class="fc" id="L356">				this.entityManagerFactoryInterface = jpaVendorAdapter.getEntityManagerFactoryInterface();</span>
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">				if (!ClassUtils.isVisible(this.entityManagerFactoryInterface, this.beanClassLoader)) {</span>
+<span class="nc" id="L358">					this.entityManagerFactoryInterface = EntityManagerFactory.class;</span>
+				}
+			}
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">			if (this.entityManagerInterface == null) {</span>
+<span class="fc" id="L362">				this.entityManagerInterface = jpaVendorAdapter.getEntityManagerInterface();</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">				if (!ClassUtils.isVisible(this.entityManagerInterface, this.beanClassLoader)) {</span>
+<span class="nc" id="L364">					this.entityManagerInterface = EntityManager.class;</span>
+				}
+			}
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">			if (this.jpaDialect == null) {</span>
+<span class="fc" id="L368">				this.jpaDialect = jpaVendorAdapter.getJpaDialect();</span>
+			}
+		}
+
+<span class="fc" id="L372">		AsyncTaskExecutor bootstrapExecutor = getBootstrapExecutor();</span>
+<span class="fc bfc" id="L373" title="All 2 branches covered.">		if (bootstrapExecutor != null) {</span>
+<span class="fc" id="L374">			this.nativeEntityManagerFactoryFuture = bootstrapExecutor.submit(this::buildNativeEntityManagerFactory);</span>
+		}
+		else {
+<span class="fc" id="L377">			this.nativeEntityManagerFactory = buildNativeEntityManagerFactory();</span>
+		}
+
+		// Wrap the EntityManagerFactory in a factory implementing all its interfaces.
+		// This allows interception of createEntityManager methods to return an
+		// application-managed EntityManager proxy that automatically joins
+		// existing transactions.
+<span class="fc" id="L384">		this.entityManagerFactory = createEntityManagerFactoryProxy(this.nativeEntityManagerFactory);</span>
+<span class="fc" id="L385">	}</span>
+
+	private EntityManagerFactory buildNativeEntityManagerFactory() {
+		EntityManagerFactory emf;
+		try {
+<span class="fc" id="L390">			emf = createNativeEntityManagerFactory();</span>
+		}
+<span class="nc" id="L392">		catch (PersistenceException ex) {</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">			if (ex.getClass() == PersistenceException.class) {</span>
+				// Plain PersistenceException wrapper for underlying exception?
+				// Make sure the nested exception message is properly exposed,
+				// along the lines of Spring's NestedRuntimeException.getMessage()
+<span class="nc" id="L397">				Throwable cause = ex.getCause();</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">				if (cause != null) {</span>
+<span class="nc" id="L399">					String message = ex.getMessage();</span>
+<span class="nc" id="L400">					String causeString = cause.toString();</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">					if (!message.endsWith(causeString)) {</span>
+<span class="nc" id="L402">						throw new PersistenceException(message + &quot;; nested exception is &quot; + causeString, cause);</span>
+					}
+				}
+			}
+<span class="nc" id="L406">			throw ex;</span>
+<span class="fc" id="L407">		}</span>
+
+<span class="fc" id="L409">		JpaVendorAdapter jpaVendorAdapter = getJpaVendorAdapter();</span>
+<span class="fc bfc" id="L410" title="All 2 branches covered.">		if (jpaVendorAdapter != null) {</span>
+<span class="fc" id="L411">			jpaVendorAdapter.postProcessEntityManagerFactory(emf);</span>
+		}
+
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">		if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L415">			logger.info(&quot;Initialized JPA EntityManagerFactory for persistence unit '&quot; + getPersistenceUnitName() + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L417">		return emf;</span>
+	}
+
+	/**
+	 * Create a proxy for the given {@link EntityManagerFactory}. We do this to be able to
+	 * return a transaction-aware proxy for an application-managed {@link EntityManager}.
+	 * @param emf the EntityManagerFactory as returned by the persistence provider,
+	 * if initialized already
+	 * @return the EntityManagerFactory proxy
+	 */
+	protected EntityManagerFactory createEntityManagerFactoryProxy(@Nullable EntityManagerFactory emf) {
+<span class="fc" id="L428">		Set&lt;Class&lt;?&gt;&gt; ifcs = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L429">		Class&lt;?&gt; entityManagerFactoryInterface = this.entityManagerFactoryInterface;</span>
+<span class="fc bfc" id="L430" title="All 2 branches covered.">		if (entityManagerFactoryInterface != null) {</span>
+<span class="fc" id="L431">			ifcs.add(entityManagerFactoryInterface);</span>
+		}
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">		else if (emf != null) {</span>
+<span class="fc" id="L434">			ifcs.addAll(ClassUtils.getAllInterfacesForClassAsSet(emf.getClass(), this.beanClassLoader));</span>
+		}
+		else {
+<span class="nc" id="L437">			ifcs.add(EntityManagerFactory.class);</span>
+		}
+<span class="fc" id="L439">		ifcs.add(EntityManagerFactoryInfo.class);</span>
+
+		try {
+<span class="fc" id="L442">			return (EntityManagerFactory) Proxy.newProxyInstance(this.beanClassLoader,</span>
+<span class="fc" id="L443">					ClassUtils.toClassArray(ifcs), new ManagedEntityManagerFactoryInvocationHandler(this));</span>
+		}
+<span class="nc" id="L445">		catch (IllegalArgumentException ex) {</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">			if (entityManagerFactoryInterface != null) {</span>
+<span class="nc" id="L447">				throw new IllegalStateException(&quot;EntityManagerFactory interface [&quot; + entityManagerFactoryInterface +</span>
+						&quot;] seems to conflict with Spring's EntityManagerFactoryInfo mixin - consider resetting the &quot;+
+						&quot;'entityManagerFactoryInterface' property to plain [javax.persistence.EntityManagerFactory]&quot;, ex);
+			}
+			else {
+<span class="nc" id="L452">				throw new IllegalStateException(&quot;Conflicting EntityManagerFactory interfaces - &quot; +</span>
+						&quot;consider specifying the 'jpaVendorAdapter' or 'entityManagerFactoryInterface' property &quot; +
+						&quot;to select a specific EntityManagerFactory interface to proceed with&quot;, ex);
+			}
+		}
+	}
+
+	/**
+	 * Delegate an incoming invocation from the proxy, dispatching to EntityManagerFactoryInfo
+	 * or the native EntityManagerFactory accordingly.
+	 */
+	Object invokeProxyMethod(Method method, @Nullable Object[] args) throws Throwable {
+<span class="fc bfc" id="L464" title="All 2 branches covered.">		if (method.getDeclaringClass().isAssignableFrom(EntityManagerFactoryInfo.class)) {</span>
+<span class="fc" id="L465">			return method.invoke(this, args);</span>
+		}
+<span class="pc bpc" id="L467" title="5 of 8 branches missed.">		else if (method.getName().equals(&quot;createEntityManager&quot;) &amp;&amp; args != null &amp;&amp; args.length &gt; 0 &amp;&amp;</span>
+				args[0] == SynchronizationType.SYNCHRONIZED) {
+			// JPA 2.1's createEntityManager(SynchronizationType, Map)
+			// Redirect to plain createEntityManager and add synchronization semantics through Spring proxy
+<span class="nc bnc" id="L471" title="All 2 branches missed.">			EntityManager rawEntityManager = (args.length &gt; 1 ?</span>
+<span class="nc" id="L472">					getNativeEntityManagerFactory().createEntityManager((Map&lt;?, ?&gt;) args[1]) :</span>
+<span class="nc" id="L473">					getNativeEntityManagerFactory().createEntityManager());</span>
+<span class="nc" id="L474">			return ExtendedEntityManagerCreator.createApplicationManagedEntityManager(rawEntityManager, this, true);</span>
+		}
+
+		// Look for Query arguments, primarily JPA 2.1's addNamedQuery(String, Query)
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">		if (args != null) {</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">			for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="nc" id="L480">				Object arg = args[i];</span>
+<span class="nc bnc" id="L481" title="All 4 branches missed.">				if (arg instanceof Query &amp;&amp; Proxy.isProxyClass(arg.getClass())) {</span>
+					// Assumably a Spring-generated proxy from SharedEntityManagerCreator:
+					// since we're passing it back to the native EntityManagerFactory,
+					// let's unwrap it to the original Query object from the provider.
+					try {
+<span class="nc" id="L486">						args[i] = ((Query) arg).unwrap(null);</span>
+					}
+<span class="nc" id="L488">					catch (RuntimeException ex) {</span>
+						// Ignore - simply proceed with given Query object then
+<span class="nc" id="L490">					}</span>
+				}
+			}
+		}
+
+		// Standard delegation to the native factory, just post-processing EntityManager return values
+<span class="fc" id="L496">		Object retVal = method.invoke(getNativeEntityManagerFactory(), args);</span>
+<span class="fc bfc" id="L497" title="All 2 branches covered.">		if (retVal instanceof EntityManager) {</span>
+			// Any other createEntityManager variant - expecting non-synchronized semantics
+<span class="fc" id="L499">			EntityManager rawEntityManager = (EntityManager) retVal;</span>
+<span class="fc" id="L500">			retVal = ExtendedEntityManagerCreator.createApplicationManagedEntityManager(rawEntityManager, this, false);</span>
+		}
+<span class="fc" id="L502">		return retVal;</span>
+	}
+
+	/**
+	 * Subclasses must implement this method to create the EntityManagerFactory
+	 * that will be returned by the {@code getObject()} method.
+	 * @return the EntityManagerFactory instance returned by this FactoryBean
+	 * @throws PersistenceException if the EntityManager cannot be created
+	 */
+	protected abstract EntityManagerFactory createNativeEntityManagerFactory() throws PersistenceException;
+
+
+	/**
+	 * Implementation of the PersistenceExceptionTranslator interface, as
+	 * autodetected by Spring's PersistenceExceptionTranslationPostProcessor.
+	 * &lt;p&gt;Uses the dialect's conversion if possible; otherwise falls back to
+	 * standard JPA exception conversion.
+	 * @see org.springframework.dao.annotation.PersistenceExceptionTranslationPostProcessor
+	 * @see JpaDialect#translateExceptionIfPossible
+	 * @see EntityManagerFactoryUtils#convertJpaAccessExceptionIfPossible
+	 */
+	@Override
+	@Nullable
+	public DataAccessException translateExceptionIfPossible(RuntimeException ex) {
+<span class="fc" id="L526">		JpaDialect jpaDialect = getJpaDialect();</span>
+<span class="fc bfc" id="L527" title="All 2 branches covered.">		return (jpaDialect != null ? jpaDialect.translateExceptionIfPossible(ex) :</span>
+<span class="fc" id="L528">				EntityManagerFactoryUtils.convertJpaAccessExceptionIfPossible(ex));</span>
+	}
+
+	@Override
+	public EntityManagerFactory getNativeEntityManagerFactory() {
+<span class="fc bfc" id="L533" title="All 2 branches covered.">		if (this.nativeEntityManagerFactory != null) {</span>
+<span class="fc" id="L534">			return this.nativeEntityManagerFactory;</span>
+		}
+		else {
+<span class="pc bpc" id="L537" title="1 of 2 branches missed.">			Assert.state(this.nativeEntityManagerFactoryFuture != null, &quot;No native EntityManagerFactory available&quot;);</span>
+			try {
+<span class="fc" id="L539">				return this.nativeEntityManagerFactoryFuture.get();</span>
+			}
+<span class="nc" id="L541">			catch (InterruptedException ex) {</span>
+<span class="nc" id="L542">				Thread.currentThread().interrupt();</span>
+<span class="nc" id="L543">				throw new IllegalStateException(&quot;Interrupted during initialization of native EntityManagerFactory&quot;, ex);</span>
+			}
+<span class="nc" id="L545">			catch (ExecutionException ex) {</span>
+<span class="nc" id="L546">				Throwable cause = ex.getCause();</span>
+<span class="nc bnc" id="L547" title="All 2 branches missed.">				if (cause instanceof PersistenceException) {</span>
+					// Rethrow a provider configuration exception (possibly with a nested cause) directly
+<span class="nc" id="L549">					throw (PersistenceException) cause;</span>
+				}
+<span class="nc" id="L551">				throw new IllegalStateException(&quot;Failed to asynchronously initialize native EntityManagerFactory: &quot; +</span>
+<span class="nc" id="L552">						ex.getMessage(), cause);</span>
+			}
+		}
+	}
+
+	@Override
+	@Nullable
+	public PersistenceUnitInfo getPersistenceUnitInfo() {
+<span class="nc" id="L560">		return null;</span>
+	}
+
+	@Override
+	@Nullable
+	public DataSource getDataSource() {
+<span class="nc" id="L566">		return null;</span>
+	}
+
+
+	/**
+	 * Return the singleton EntityManagerFactory.
+	 */
+	@Override
+	@Nullable
+	public EntityManagerFactory getObject() {
+<span class="fc" id="L576">		return this.entityManagerFactory;</span>
+	}
+
+	@Override
+	public Class&lt;? extends EntityManagerFactory&gt; getObjectType() {
+<span class="fc bfc" id="L581" title="All 2 branches covered.">		return (this.entityManagerFactory != null ? this.entityManagerFactory.getClass() : EntityManagerFactory.class);</span>
+	}
+
+	@Override
+	public boolean isSingleton() {
+<span class="fc" id="L586">		return true;</span>
+	}
+
+
+	/**
+	 * Close the EntityManagerFactory on bean factory shutdown.
+	 */
+	@Override
+	public void destroy() {
+<span class="pc bpc" id="L595" title="1 of 2 branches missed.">		if (this.entityManagerFactory != null) {</span>
+<span class="pc bpc" id="L596" title="1 of 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L597">				logger.info(&quot;Closing JPA EntityManagerFactory for persistence unit '&quot; + getPersistenceUnitName() + &quot;'&quot;);</span>
+			}
+<span class="fc" id="L599">			this.entityManagerFactory.close();</span>
+		}
+<span class="fc" id="L601">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+<span class="nc" id="L609">		throw new NotSerializableException(&quot;An EntityManagerFactoryBean itself is not deserializable - &quot; +</span>
+				&quot;just a SerializedEntityManagerFactoryBeanReference is&quot;);
+	}
+
+	protected Object writeReplace() throws ObjectStreamException {
+<span class="pc bpc" id="L614" title="2 of 4 branches missed.">		if (this.beanFactory != null &amp;&amp; this.beanName != null) {</span>
+<span class="fc" id="L615">			return new SerializedEntityManagerFactoryBeanReference(this.beanFactory, this.beanName);</span>
+		}
+		else {
+<span class="nc" id="L618">			throw new NotSerializableException(&quot;EntityManagerFactoryBean does not run within a BeanFactory&quot;);</span>
+		}
+	}
+
+
+	/**
+	 * Minimal bean reference to the surrounding AbstractEntityManagerFactoryBean.
+	 * Resolved to the actual AbstractEntityManagerFactoryBean instance on deserialization.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class SerializedEntityManagerFactoryBeanReference implements Serializable {
+
+		private final BeanFactory beanFactory;
+
+		private final String lookupName;
+
+<span class="fc" id="L634">		public SerializedEntityManagerFactoryBeanReference(BeanFactory beanFactory, String beanName) {</span>
+<span class="fc" id="L635">			this.beanFactory = beanFactory;</span>
+<span class="fc" id="L636">			this.lookupName = BeanFactory.FACTORY_BEAN_PREFIX + beanName;</span>
+<span class="fc" id="L637">		}</span>
+
+		private Object readResolve() {
+<span class="fc" id="L640">			return this.beanFactory.getBean(this.lookupName, AbstractEntityManagerFactoryBean.class);</span>
+		}
+	}
+
+
+	/**
+	 * Dynamic proxy invocation handler for an {@link EntityManagerFactory}, returning a
+	 * proxy {@link EntityManager} (if necessary) from {@code createEntityManager} methods.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class ManagedEntityManagerFactoryInvocationHandler implements InvocationHandler, Serializable {
+
+		private final AbstractEntityManagerFactoryBean entityManagerFactoryBean;
+
+<span class="fc" id="L654">		public ManagedEntityManagerFactoryInvocationHandler(AbstractEntityManagerFactoryBean emfb) {</span>
+<span class="fc" id="L655">			this.entityManagerFactoryBean = emfb;</span>
+<span class="fc" id="L656">		}</span>
+
+		@Override
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			try {
+<span class="fc bfc" id="L661" title="All 2 branches covered.">				if (method.getName().equals(&quot;equals&quot;)) {</span>
+					// Only consider equal when proxies are identical.
+<span class="fc bfc" id="L663" title="All 2 branches covered.">					return (proxy == args[0]);</span>
+				}
+<span class="fc bfc" id="L665" title="All 2 branches covered.">				else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+					// Use hashCode of EntityManagerFactory proxy.
+<span class="fc" id="L667">					return System.identityHashCode(proxy);</span>
+				}
+<span class="pc bpc" id="L669" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;unwrap&quot;)) {</span>
+					// Handle JPA 2.1 unwrap method - could be a proxy match.
+<span class="nc" id="L671">					Class&lt;?&gt; targetClass = (Class&lt;?&gt;) args[0];</span>
+<span class="nc bnc" id="L672" title="All 2 branches missed.">					if (targetClass == null) {</span>
+<span class="nc" id="L673">						return this.entityManagerFactoryBean.getNativeEntityManagerFactory();</span>
+					}
+<span class="nc bnc" id="L675" title="All 2 branches missed.">					else if (targetClass.isInstance(proxy)) {</span>
+<span class="nc" id="L676">						return proxy;</span>
+					}
+				}
+<span class="fc" id="L679">				return this.entityManagerFactoryBean.invokeProxyMethod(method, args);</span>
+			}
+<span class="nc" id="L681">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L682">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

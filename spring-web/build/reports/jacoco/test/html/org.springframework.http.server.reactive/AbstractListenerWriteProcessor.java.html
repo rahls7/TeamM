@@ -1,0 +1,435 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractListenerWriteProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">AbstractListenerWriteProcessor.java</span></div><h1>AbstractListenerWriteProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.commons.logging.Log;
+import org.reactivestreams.Processor;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+
+import org.springframework.core.log.LogDelegateFactory;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+
+/**
+ * Abstract base class for {@code Processor} implementations that bridge between
+ * event-listener write APIs and Reactive Streams.
+ *
+ * &lt;p&gt;Specifically a base class for writing to the HTTP response body with
+ * Servlet 3.1 non-blocking I/O and Undertow XNIO as well for writing WebSocket
+ * messages through the Java WebSocket API (JSR-356), Jetty, and Undertow.
+ *
+ * @author Arjen Poutsma
+ * @author Violeta Georgieva
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @param &lt;T&gt; the type of element signaled to the {@link Subscriber}
+ */
+public abstract class AbstractListenerWriteProcessor&lt;T&gt; implements Processor&lt;T, Void&gt; {
+
+	/**
+	 * Special logger for debugging Reactive Streams signals.
+	 * @see LogDelegateFactory#getHiddenLog(Class)
+	 * @see AbstractListenerReadPublisher#rsReadLogger
+	 * @see AbstractListenerWriteFlushProcessor#rsWriteFlushLogger
+	 * @see WriteResultPublisher#rsWriteResultLogger
+	 */
+<span class="fc" id="L54">	protected static final Log rsWriteLogger = LogDelegateFactory.getHiddenLog(AbstractListenerWriteProcessor.class);</span>
+
+
+<span class="fc" id="L57">	private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.UNSUBSCRIBED);</span>
+
+	@Nullable
+	private Subscription subscription;
+
+	@Nullable
+	private volatile T currentData;
+
+	private volatile boolean subscriberCompleted;
+
+	private final WriteResultPublisher resultPublisher;
+
+	private final String logPrefix;
+
+
+	public AbstractListenerWriteProcessor() {
+<span class="fc" id="L73">		this(&quot;&quot;);</span>
+<span class="fc" id="L74">	}</span>
+
+	/**
+	 * Create an instance with the given log prefix.
+	 * @since 5.1
+	 */
+<span class="fc" id="L80">	public AbstractListenerWriteProcessor(String logPrefix) {</span>
+<span class="fc" id="L81">		this.logPrefix = logPrefix;</span>
+<span class="fc" id="L82">		this.resultPublisher = new WriteResultPublisher(logPrefix);</span>
+<span class="fc" id="L83">	}</span>
+
+
+	/**
+	 * Create an instance with the given log prefix.
+	 * @since 5.1
+	 */
+	public String getLogPrefix() {
+<span class="fc" id="L91">		return this.logPrefix;</span>
+	}
+
+
+	// Subscriber methods and async I/O notification methods...
+
+	@Override
+	public final void onSubscribe(Subscription subscription) {
+<span class="fc" id="L99">		this.state.get().onSubscribe(this, subscription);</span>
+<span class="fc" id="L100">	}</span>
+
+	@Override
+	public final void onNext(T data) {
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">		if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L105">			rsWriteLogger.trace(getLogPrefix() + &quot;Item to write&quot;);</span>
+		}
+<span class="fc" id="L107">		this.state.get().onNext(this, data);</span>
+<span class="fc" id="L108">	}</span>
+
+	/**
+	 * Error signal from the upstream, write Publisher. This is also used by
+	 * sub-classes to delegate error notifications from the container.
+	 */
+	@Override
+	public final void onError(Throwable ex) {
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">		if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L117">			rsWriteLogger.trace(getLogPrefix() + &quot;Write source error: &quot; + ex);</span>
+		}
+<span class="fc" id="L119">		this.state.get().onError(this, ex);</span>
+<span class="fc" id="L120">	}</span>
+
+	/**
+	 * Completion signal from the upstream, write Publisher. This is also used
+	 * by sub-classes to delegate completion notifications from the container.
+	 */
+	@Override
+	public final void onComplete() {
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">		if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L129">			rsWriteLogger.trace(getLogPrefix() + &quot;No more items to write&quot;);</span>
+		}
+<span class="fc" id="L131">		this.state.get().onComplete(this);</span>
+<span class="fc" id="L132">	}</span>
+
+	/**
+	 * Invoked when writing is possible, either in the same thread after a check
+	 * via {@link #isWritePossible()}, or as a callback from the underlying
+	 * container.
+	 */
+	public final void onWritePossible() {
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">		if (rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L141">			rsWriteLogger.trace(getLogPrefix() + &quot;onWritePossible&quot;);</span>
+		}
+<span class="fc" id="L143">		this.state.get().onWritePossible(this);</span>
+<span class="fc" id="L144">	}</span>
+
+	/**
+	 * Invoked during an error or completion callback from the underlying
+	 * container to cancel the upstream subscription.
+	 */
+	public void cancel() {
+<span class="fc" id="L151">		rsWriteLogger.trace(getLogPrefix() + &quot;Cancellation&quot;);</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">		if (this.subscription != null) {</span>
+<span class="fc" id="L153">			this.subscription.cancel();</span>
+		}
+<span class="fc" id="L155">	}</span>
+
+	// Publisher implementation for result notifications...
+
+	@Override
+	public final void subscribe(Subscriber&lt;? super Void&gt; subscriber) {
+		// Technically, cancellation from the result subscriber should be propagated
+		// to the upstream subscription. In practice, HttpHandler server adapters
+		// don't have a reason to cancel the result subscription.
+<span class="fc" id="L164">		this.resultPublisher.subscribe(subscriber);</span>
+<span class="fc" id="L165">	}</span>
+
+
+	// Write API methods to be implemented or template methods to override...
+
+	/**
+	 * Whether the given data item has any content to write.
+	 * If false the item is not written.
+	 */
+	protected abstract boolean isDataEmpty(T data);
+
+	/**
+	 * Template method invoked after a data item to write is received via
+	 * {@link Subscriber#onNext(Object)}. The default implementation saves the
+	 * data item for writing once that is possible.
+	 */
+	protected void dataReceived(T data) {
+<span class="fc" id="L182">		T prev = this.currentData;</span>
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">		if (prev != null) {</span>
+			// This shouldn't happen:
+			//   1. dataReceived can only be called from REQUESTED state
+			//   2. currentData is cleared before requesting
+<span class="nc" id="L187">			discardData(data);</span>
+<span class="nc" id="L188">			cancel();</span>
+<span class="nc" id="L189">			onError(new IllegalStateException(&quot;Received new data while current not processed yet.&quot;));</span>
+		}
+<span class="fc" id="L191">		this.currentData = data;</span>
+<span class="fc" id="L192">	}</span>
+
+	/**
+	 * Whether writing is possible.
+	 */
+	protected abstract boolean isWritePossible();
+
+	/**
+	 * Write the given item.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Sub-classes are responsible for releasing any
+	 * data buffer associated with the item, once fully written, if pooled
+	 * buffers apply to the underlying container.
+	 * @param data the item to write
+	 * @return whether the current data item was written and another one
+	 * requested ({@code true}), or or otherwise if more writes are required.
+	 */
+	protected abstract boolean write(T data) throws IOException;
+
+	/**
+	 * Invoked after the current data has been written and before requesting
+	 * the next item from the upstream, write Publisher.
+	 * &lt;p&gt;The default implementation is a no-op.
+	 * @deprecated originally introduced for Undertow to stop write notifications
+	 * when no data is available, but deprecated as of as of 5.0.6 since constant
+	 * switching on every requested item causes a significant slowdown.
+	 */
+	@Deprecated
+	protected void writingPaused() {
+<span class="fc" id="L220">	}</span>
+
+	/**
+	 * Invoked after onComplete or onError notification.
+	 * &lt;p&gt;The default implementation is a no-op.
+	 */
+	protected void writingComplete() {
+<span class="fc" id="L227">	}</span>
+
+	/**
+	 * Invoked when an I/O error occurs during a write. Sub-classes may choose
+	 * to ignore this if they know the underlying API will provide an error
+	 * notification in a container thread.
+	 * &lt;p&gt;Defaults to no-op.
+	 */
+	protected void writingFailed(Throwable ex) {
+<span class="nc" id="L236">	}</span>
+
+	/**
+	 * Invoked after any error (either from the upstream write Publisher, or
+	 * from I/O operations to the underlying server) and cancellation
+	 * to discard in-flight data that was in
+	 * the process of being written when the error took place.
+	 * @param data the data to be released
+	 * @since 5.0.11
+	 */
+	protected abstract void discardData(T data);
+
+
+	// Private methods for use from State's...
+
+	private boolean changeState(State oldState, State newState) {
+<span class="fc" id="L252">		boolean result = this.state.compareAndSet(oldState, newState);</span>
+<span class="pc bpc" id="L253" title="2 of 4 branches missed.">		if (result &amp;&amp; rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L254">			rsWriteLogger.trace(getLogPrefix() + oldState + &quot; -&gt; &quot; + newState);</span>
+		}
+<span class="fc" id="L256">		return result;</span>
+	}
+
+	private void changeStateToReceived(State oldState) {
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">		if (changeState(oldState, State.RECEIVED)) {</span>
+<span class="fc" id="L261">			writeIfPossible();</span>
+		}
+<span class="fc" id="L263">	}</span>
+
+	private void changeStateToComplete(State oldState) {
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">		if (changeState(oldState, State.COMPLETED)) {</span>
+<span class="fc" id="L267">			discardCurrentData();</span>
+<span class="fc" id="L268">			writingComplete();</span>
+<span class="fc" id="L269">			this.resultPublisher.publishComplete();</span>
+		}
+		else {
+<span class="nc" id="L272">			this.state.get().onComplete(this);</span>
+		}
+<span class="fc" id="L274">	}</span>
+
+	private void writeIfPossible() {
+<span class="fc" id="L277">		boolean result = isWritePossible();</span>
+<span class="pc bpc" id="L278" title="1 of 4 branches missed.">		if (!result &amp;&amp; rsWriteLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L279">			rsWriteLogger.trace(getLogPrefix() + &quot;isWritePossible: false&quot;);</span>
+		}
+<span class="fc bfc" id="L281" title="All 2 branches covered.">		if (result) {</span>
+<span class="fc" id="L282">			onWritePossible();</span>
+		}
+<span class="fc" id="L284">	}</span>
+
+	private void discardCurrentData() {
+<span class="fc" id="L287">		T data = this.currentData;</span>
+<span class="fc" id="L288">		this.currentData = null;</span>
+<span class="fc bfc" id="L289" title="All 2 branches covered.">		if (data != null) {</span>
+<span class="fc" id="L290">			discardData(data);</span>
+		}
+<span class="fc" id="L292">	}</span>
+
+
+	/**
+	 * Represents a state for the {@link Processor} to be in.
+	 *
+	 * &lt;p&gt;&lt;pre&gt;
+	 *        UNSUBSCRIBED
+	 *             |
+	 *             v
+	 *   +--- REQUESTED -------------&gt; RECEIVED ---+
+	 *   |        ^                       ^        |
+	 *   |        |                       |        |
+	 *   |        + ------ WRITING &lt;------+        |
+	 *   |                    |                    |
+	 *   |                    v                    |
+	 *   +--------------&gt; COMPLETED &lt;--------------+
+	 * &lt;/pre&gt;
+	 */
+<span class="fc" id="L311">	private enum State {</span>
+
+<span class="fc" id="L313">		UNSUBSCRIBED {</span>
+			@Override
+			public &lt;T&gt; void onSubscribe(AbstractListenerWriteProcessor&lt;T&gt; processor, Subscription subscription) {
+<span class="fc" id="L316">				Assert.notNull(subscription, &quot;Subscription must not be null&quot;);</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">				if (processor.changeState(this, REQUESTED)) {</span>
+<span class="fc" id="L318">					processor.subscription = subscription;</span>
+<span class="fc" id="L319">					subscription.request(1);</span>
+				}
+				else {
+<span class="nc" id="L322">					super.onSubscribe(processor, subscription);</span>
+				}
+<span class="fc" id="L324">			}</span>
+		},
+
+<span class="fc" id="L327">		REQUESTED {</span>
+			@Override
+			public &lt;T&gt; void onNext(AbstractListenerWriteProcessor&lt;T&gt; processor, T data) {
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">				if (processor.isDataEmpty(data)) {</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">					Assert.state(processor.subscription != null, &quot;No subscription&quot;);</span>
+<span class="nc" id="L332">					processor.subscription.request(1);</span>
+				}
+				else {
+<span class="fc" id="L335">					processor.dataReceived(data);</span>
+<span class="fc" id="L336">					processor.changeStateToReceived(this);</span>
+				}
+<span class="fc" id="L338">			}</span>
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteProcessor&lt;T&gt; processor) {
+<span class="fc" id="L341">				processor.changeStateToComplete(this);</span>
+<span class="fc" id="L342">			}</span>
+		},
+
+<span class="fc" id="L345">		RECEIVED {</span>
+			@SuppressWarnings(&quot;deprecation&quot;)
+			@Override
+			public &lt;T&gt; void onWritePossible(AbstractListenerWriteProcessor&lt;T&gt; processor) {
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">				if (processor.changeState(this, WRITING)) {</span>
+<span class="fc" id="L350">					T data = processor.currentData;</span>
+<span class="pc bpc" id="L351" title="1 of 2 branches missed.">					Assert.state(data != null, &quot;No data&quot;);</span>
+					try {
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">						if (processor.write(data)) {</span>
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">							if (processor.changeState(WRITING, REQUESTED)) {</span>
+<span class="fc" id="L355">								processor.currentData = null;</span>
+<span class="fc bfc" id="L356" title="All 2 branches covered.">								if (processor.subscriberCompleted) {</span>
+<span class="fc" id="L357">									processor.changeStateToComplete(REQUESTED);</span>
+								}
+								else {
+<span class="fc" id="L360">									processor.writingPaused();</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">									Assert.state(processor.subscription != null, &quot;No subscription&quot;);</span>
+<span class="fc" id="L362">									processor.subscription.request(1);</span>
+								}
+							}
+						}
+						else {
+<span class="nc" id="L367">							processor.changeStateToReceived(WRITING);</span>
+						}
+					}
+<span class="fc" id="L370">					catch (IOException ex) {</span>
+<span class="fc" id="L371">						processor.writingFailed(ex);</span>
+<span class="fc" id="L372">					}</span>
+				}
+<span class="fc" id="L374">			}</span>
+
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteProcessor&lt;T&gt; processor) {
+<span class="fc" id="L378">				processor.subscriberCompleted = true;</span>
+<span class="fc" id="L379">			}</span>
+		},
+
+<span class="fc" id="L382">		WRITING {</span>
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteProcessor&lt;T&gt; processor) {
+<span class="nc" id="L385">				processor.subscriberCompleted = true;</span>
+<span class="nc" id="L386">			}</span>
+		},
+
+<span class="fc" id="L389">		COMPLETED {</span>
+			@Override
+			public &lt;T&gt; void onNext(AbstractListenerWriteProcessor&lt;T&gt; processor, T data) {
+				// ignore
+<span class="nc" id="L393">			}</span>
+			@Override
+			public &lt;T&gt; void onError(AbstractListenerWriteProcessor&lt;T&gt; processor, Throwable ex) {
+				// ignore
+<span class="nc" id="L397">			}</span>
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteProcessor&lt;T&gt; processor) {
+				// ignore
+<span class="nc" id="L401">			}</span>
+		};
+
+		public &lt;T&gt; void onSubscribe(AbstractListenerWriteProcessor&lt;T&gt; processor, Subscription subscription) {
+<span class="nc" id="L405">			subscription.cancel();</span>
+<span class="nc" id="L406">		}</span>
+
+		public &lt;T&gt; void onNext(AbstractListenerWriteProcessor&lt;T&gt; processor, T data) {
+<span class="fc" id="L409">			processor.discardData(data);</span>
+<span class="fc" id="L410">			processor.cancel();</span>
+<span class="fc" id="L411">			processor.onError(new IllegalStateException(&quot;Illegal onNext without demand&quot;));</span>
+<span class="fc" id="L412">		}</span>
+
+		public &lt;T&gt; void onError(AbstractListenerWriteProcessor&lt;T&gt; processor, Throwable ex) {
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">			if (processor.changeState(this, COMPLETED)) {</span>
+<span class="fc" id="L416">				processor.discardCurrentData();</span>
+<span class="fc" id="L417">				processor.writingComplete();</span>
+<span class="fc" id="L418">				processor.resultPublisher.publishError(ex);</span>
+			}
+			else {
+<span class="nc" id="L421">				processor.state.get().onError(processor, ex);</span>
+			}
+<span class="fc" id="L423">		}</span>
+
+		public &lt;T&gt; void onComplete(AbstractListenerWriteProcessor&lt;T&gt; processor) {
+<span class="nc" id="L426">			throw new IllegalStateException(toString());</span>
+		}
+
+		public &lt;T&gt; void onWritePossible(AbstractListenerWriteProcessor&lt;T&gt; processor) {
+			// ignore
+<span class="nc" id="L431">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,450 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MultipartHttpMessageWriter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.multipart</a> &gt; <span class="el_source">MultipartHttpMessageWriter.java</span></div><h1>MultipartHttpMessageWriter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.multipart;
+
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.CharSequenceEncoder;
+import org.springframework.core.codec.CodecException;
+import org.springframework.core.codec.Hints;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.PooledDataBuffer;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ReactiveHttpOutputMessage;
+import org.springframework.http.client.MultipartBodyBuilder;
+import org.springframework.http.codec.EncoderHttpMessageWriter;
+import org.springframework.http.codec.FormHttpMessageWriter;
+import org.springframework.http.codec.HttpMessageWriter;
+import org.springframework.http.codec.LoggingCodecSupport;
+import org.springframework.http.codec.ResourceHttpMessageWriter;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.MultiValueMap;
+
+/**
+ * {@link HttpMessageWriter} for writing a {@code MultiValueMap&lt;String, ?&gt;}
+ * as multipart form data, i.e. {@code &quot;multipart/form-data&quot;}, to the body
+ * of a request.
+ *
+ * &lt;p&gt;The serialization of individual parts is delegated to other writers.
+ * By default only {@link String} and {@link Resource} parts are supported but
+ * you can configure others through a constructor argument.
+ *
+ * &lt;p&gt;This writer can be configured with a {@link FormHttpMessageWriter} to
+ * delegate to. It is the preferred way of supporting both form data and
+ * multipart data (as opposed to registering each writer separately) so that
+ * when the {@link MediaType} is not specified and generics are not present on
+ * the target element type, we can inspect the values in the actual map and
+ * decide whether to write plain form data (String values only) or otherwise.
+ *
+ * @author Sebastien Deleuze
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @see FormHttpMessageWriter
+ */
+public class MultipartHttpMessageWriter extends LoggingCodecSupport
+		implements HttpMessageWriter&lt;MultiValueMap&lt;String, ?&gt;&gt; {
+
+	/**
+	 * THe default charset used by the writer.
+	 */
+<span class="fc" id="L87">	public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;</span>
+
+	/** Suppress logging from individual part writers (full map logged at this level). */
+<span class="fc" id="L90">	private static final Map&lt;String, Object&gt; DEFAULT_HINTS = Hints.from(Hints.SUPPRESS_LOGGING_HINT, true);</span>
+
+
+	private final List&lt;HttpMessageWriter&lt;?&gt;&gt; partWriters;
+
+	@Nullable
+	private final HttpMessageWriter&lt;MultiValueMap&lt;String, String&gt;&gt; formWriter;
+
+<span class="fc" id="L98">	private Charset charset = DEFAULT_CHARSET;</span>
+
+	private final List&lt;MediaType&gt; supportedMediaTypes;
+
+
+	/**
+	 * Constructor with a default list of part writers (String and Resource).
+	 */
+	public MultipartHttpMessageWriter() {
+<span class="fc" id="L107">		this(Arrays.asList(</span>
+<span class="fc" id="L108">				new EncoderHttpMessageWriter&lt;&gt;(CharSequenceEncoder.textPlainOnly()),</span>
+				new ResourceHttpMessageWriter()
+		));
+<span class="fc" id="L111">	}</span>
+
+	/**
+	 * Constructor with explicit list of writers for serializing parts.
+	 */
+	public MultipartHttpMessageWriter(List&lt;HttpMessageWriter&lt;?&gt;&gt; partWriters) {
+<span class="fc" id="L117">		this(partWriters, new FormHttpMessageWriter());</span>
+<span class="fc" id="L118">	}</span>
+
+	/**
+	 * Constructor with explicit list of writers for serializing parts and a
+	 * writer for plain form data to fall back when no media type is specified
+	 * and the actual map consists of String values only.
+	 * @param partWriters the writers for serializing parts
+	 * @param formWriter the fallback writer for form data, {@code null} by default
+	 */
+	public MultipartHttpMessageWriter(List&lt;HttpMessageWriter&lt;?&gt;&gt; partWriters,
+<span class="fc" id="L128">			@Nullable  HttpMessageWriter&lt;MultiValueMap&lt;String, String&gt;&gt; formWriter) {</span>
+
+<span class="fc" id="L130">		this.partWriters = partWriters;</span>
+<span class="fc" id="L131">		this.formWriter = formWriter;</span>
+<span class="fc" id="L132">		this.supportedMediaTypes = initMediaTypes(formWriter);</span>
+<span class="fc" id="L133">	}</span>
+
+	private static List&lt;MediaType&gt; initMediaTypes(@Nullable HttpMessageWriter&lt;?&gt; formWriter) {
+<span class="fc" id="L136">		List&lt;MediaType&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L137">		result.add(MediaType.MULTIPART_FORM_DATA);</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">		if (formWriter != null) {</span>
+<span class="fc" id="L139">			result.addAll(formWriter.getWritableMediaTypes());</span>
+		}
+<span class="fc" id="L141">		return Collections.unmodifiableList(result);</span>
+	}
+
+
+	/**
+	 * Return the configured part writers.
+	 * @since 5.0.7
+	 */
+	public List&lt;HttpMessageWriter&lt;?&gt;&gt; getPartWriters() {
+<span class="nc" id="L150">		return Collections.unmodifiableList(this.partWriters);</span>
+	}
+
+	/**
+	 * Set the character set to use for part headers such as
+	 * &quot;Content-Disposition&quot; (and its filename parameter).
+	 * &lt;p&gt;By default this is set to &quot;UTF-8&quot;.
+	 */
+	public void setCharset(Charset charset) {
+<span class="nc" id="L159">		Assert.notNull(charset, &quot;Charset must not be null&quot;);</span>
+<span class="nc" id="L160">		this.charset = charset;</span>
+<span class="nc" id="L161">	}</span>
+
+	/**
+	 * Return the configured charset for part headers.
+	 */
+	public Charset getCharset() {
+<span class="fc" id="L167">		return this.charset;</span>
+	}
+
+
+	@Override
+	public List&lt;MediaType&gt; getWritableMediaTypes() {
+<span class="nc" id="L173">		return this.supportedMediaTypes;</span>
+	}
+
+	@Override
+	public boolean canWrite(ResolvableType elementType, @Nullable MediaType mediaType) {
+<span class="pc bpc" id="L178" title="1 of 4 branches missed.">		return (MultiValueMap.class.isAssignableFrom(elementType.toClass()) &amp;&amp;</span>
+				(mediaType == null ||
+<span class="pc bpc" id="L180" title="1 of 2 branches missed.">						this.supportedMediaTypes.stream().anyMatch(element -&gt; element.isCompatibleWith(mediaType))));</span>
+	}
+
+	@Override
+	public Mono&lt;Void&gt; write(Publisher&lt;? extends MultiValueMap&lt;String, ?&gt;&gt; inputStream,
+			ResolvableType elementType, @Nullable MediaType mediaType, ReactiveHttpOutputMessage outputMessage,
+			Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L188">		return Mono.from(inputStream)</span>
+<span class="fc" id="L189">				.flatMap(map -&gt; {</span>
+<span class="pc bpc" id="L190" title="2 of 4 branches missed.">					if (this.formWriter == null || isMultipart(map, mediaType)) {</span>
+<span class="fc" id="L191">						return writeMultipart(map, outputMessage, hints);</span>
+					}
+					else {
+						@SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L195">						Mono&lt;MultiValueMap&lt;String, String&gt;&gt; input = Mono.just((MultiValueMap&lt;String, String&gt;) map);</span>
+<span class="nc" id="L196">						return this.formWriter.write(input, elementType, mediaType, outputMessage, hints);</span>
+					}
+				});
+	}
+
+	private boolean isMultipart(MultiValueMap&lt;String, ?&gt; map, @Nullable MediaType contentType) {
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">		if (contentType != null) {</span>
+<span class="fc" id="L203">			return MediaType.MULTIPART_FORM_DATA.includes(contentType);</span>
+		}
+<span class="nc bnc" id="L205" title="All 2 branches missed.">		for (String name : map.keySet()) {</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">			for (Object value : map.get(name)) {</span>
+<span class="nc bnc" id="L207" title="All 4 branches missed.">				if (value != null &amp;&amp; !(value instanceof String)) {</span>
+<span class="nc" id="L208">					return true;</span>
+				}
+<span class="nc" id="L210">			}</span>
+<span class="nc" id="L211">		}</span>
+<span class="nc" id="L212">		return false;</span>
+	}
+
+	private Mono&lt;Void&gt; writeMultipart(
+			MultiValueMap&lt;String, ?&gt; map, ReactiveHttpOutputMessage outputMessage, Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L218">		byte[] boundary = generateMultipartBoundary();</span>
+
+<span class="fc" id="L220">		Map&lt;String, String&gt; params = new HashMap&lt;&gt;(2);</span>
+<span class="fc" id="L221">		params.put(&quot;boundary&quot;, new String(boundary, StandardCharsets.US_ASCII));</span>
+<span class="fc" id="L222">		params.put(&quot;charset&quot;, getCharset().name());</span>
+
+<span class="fc" id="L224">		outputMessage.getHeaders().setContentType(new MediaType(MediaType.MULTIPART_FORM_DATA, params));</span>
+
+<span class="fc" id="L226">		LogFormatUtils.traceDebug(logger, traceOn -&gt; Hints.getLogPrefix(hints) + &quot;Encoding &quot; +</span>
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">				(isEnableLoggingRequestDetails() ?</span>
+<span class="pc bnc" id="L228" title="All 2 branches missed.">						LogFormatUtils.formatValue(map, !traceOn) :</span>
+<span class="fc" id="L229">						&quot;parts &quot; + map.keySet() + &quot; (content masked)&quot;));</span>
+
+<span class="fc" id="L231">		DataBufferFactory bufferFactory = outputMessage.bufferFactory();</span>
+
+<span class="fc" id="L233">		Flux&lt;DataBuffer&gt; body = Flux.fromIterable(map.entrySet())</span>
+<span class="fc" id="L234">				.concatMap(entry -&gt; encodePartValues(boundary, entry.getKey(), entry.getValue(), bufferFactory))</span>
+<span class="fc" id="L235">				.concatWith(generateLastLine(boundary, bufferFactory))</span>
+<span class="fc" id="L236">				.doOnDiscard(PooledDataBuffer.class, PooledDataBuffer::release);</span>
+
+<span class="fc" id="L238">		return outputMessage.writeWith(body);</span>
+	}
+
+	/**
+	 * Generate a multipart boundary.
+	 * &lt;p&gt;By default delegates to {@link MimeTypeUtils#generateMultipartBoundary()}.
+	 */
+	protected byte[] generateMultipartBoundary() {
+<span class="fc" id="L246">		return MimeTypeUtils.generateMultipartBoundary();</span>
+	}
+
+	private Flux&lt;DataBuffer&gt; encodePartValues(
+			byte[] boundary, String name, List&lt;?&gt; values, DataBufferFactory bufferFactory) {
+
+<span class="fc" id="L252">		return Flux.concat(values.stream().map(v -&gt;</span>
+<span class="fc" id="L253">				encodePart(boundary, name, v, bufferFactory)).collect(Collectors.toList()));</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private &lt;T&gt; Flux&lt;DataBuffer&gt; encodePart(byte[] boundary, String name, T value, DataBufferFactory bufferFactory) {
+<span class="fc" id="L258">		MultipartHttpOutputMessage outputMessage = new MultipartHttpOutputMessage(bufferFactory, getCharset());</span>
+<span class="fc" id="L259">		HttpHeaders outputHeaders = outputMessage.getHeaders();</span>
+
+		T body;
+<span class="fc" id="L262">		ResolvableType resolvableType = null;</span>
+<span class="fc bfc" id="L263" title="All 2 branches covered.">		if (value instanceof HttpEntity) {</span>
+<span class="fc" id="L264">			HttpEntity&lt;T&gt; httpEntity = (HttpEntity&lt;T&gt;) value;</span>
+<span class="fc" id="L265">			outputHeaders.putAll(httpEntity.getHeaders());</span>
+<span class="fc" id="L266">			body = httpEntity.getBody();</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">			Assert.state(body != null, &quot;MultipartHttpMessageWriter only supports HttpEntity with body&quot;);</span>
+
+<span class="fc bfc" id="L269" title="All 2 branches covered.">			if (httpEntity instanceof MultipartBodyBuilder.PublisherEntity&lt;?, ?&gt;) {</span>
+<span class="fc" id="L270">				MultipartBodyBuilder.PublisherEntity&lt;?, ?&gt; publisherEntity =</span>
+						(MultipartBodyBuilder.PublisherEntity&lt;?, ?&gt;) httpEntity;
+<span class="fc" id="L272">				resolvableType = publisherEntity.getResolvableType();</span>
+			}
+<span class="fc" id="L274">		}</span>
+		else {
+<span class="fc" id="L276">			body = value;</span>
+		}
+<span class="fc bfc" id="L278" title="All 2 branches covered.">		if (resolvableType == null) {</span>
+<span class="fc" id="L279">			resolvableType = ResolvableType.forClass(body.getClass());</span>
+		}
+
+<span class="fc bfc" id="L282" title="All 2 branches covered.">		if (!outputHeaders.containsKey(HttpHeaders.CONTENT_DISPOSITION)) {</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">			if (body instanceof Resource) {</span>
+<span class="fc" id="L284">				outputHeaders.setContentDispositionFormData(name, ((Resource) body).getFilename());</span>
+			}
+<span class="fc bfc" id="L286" title="All 2 branches covered.">			else if (resolvableType.resolve() == Resource.class) {</span>
+<span class="fc" id="L287">				body = (T) Mono.from((Publisher&lt;?&gt;) body).doOnNext(o -&gt; outputHeaders</span>
+<span class="fc" id="L288">						.setContentDispositionFormData(name, ((Resource) o).getFilename()));</span>
+			}
+			else {
+<span class="fc" id="L291">				outputHeaders.setContentDispositionFormData(name, null);</span>
+			}
+		}
+
+<span class="fc" id="L295">		MediaType contentType = outputHeaders.getContentType();</span>
+
+<span class="fc" id="L297">		final ResolvableType finalBodyType = resolvableType;</span>
+<span class="fc" id="L298">		Optional&lt;HttpMessageWriter&lt;?&gt;&gt; writer = this.partWriters.stream()</span>
+<span class="fc" id="L299">				.filter(partWriter -&gt; partWriter.canWrite(finalBodyType, contentType))</span>
+<span class="fc" id="L300">				.findFirst();</span>
+
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">		if (!writer.isPresent()) {</span>
+<span class="nc" id="L303">			return Flux.error(new CodecException(&quot;No suitable writer found for part: &quot; + name));</span>
+		}
+
+<span class="fc bfc" id="L306" title="All 2 branches covered.">		Publisher&lt;T&gt; bodyPublisher =</span>
+<span class="fc" id="L307">				body instanceof Publisher ? (Publisher&lt;T&gt;) body : Mono.just(body);</span>
+
+		// The writer will call MultipartHttpOutputMessage#write which doesn't actually write
+		// but only stores the body Flux and returns Mono.empty().
+
+<span class="fc" id="L312">		Mono&lt;Void&gt; partContentReady = ((HttpMessageWriter&lt;T&gt;) writer.get())</span>
+<span class="fc" id="L313">				.write(bodyPublisher, resolvableType, contentType, outputMessage, DEFAULT_HINTS);</span>
+
+		// After partContentReady, we can access the part content from MultipartHttpOutputMessage
+		// and use it for writing to the actual request body
+
+<span class="fc" id="L318">		Flux&lt;DataBuffer&gt; partContent = partContentReady.thenMany(Flux.defer(outputMessage::getBody));</span>
+
+<span class="fc" id="L320">		return Flux.concat(</span>
+<span class="fc" id="L321">				generateBoundaryLine(boundary, bufferFactory),</span>
+				partContent,
+<span class="fc" id="L323">				generateNewLine(bufferFactory));</span>
+	}
+
+
+	private Mono&lt;DataBuffer&gt; generateBoundaryLine(byte[] boundary, DataBufferFactory bufferFactory) {
+<span class="fc" id="L328">		return Mono.fromCallable(() -&gt; {</span>
+<span class="fc" id="L329">			DataBuffer buffer = bufferFactory.allocateBuffer(boundary.length + 4);</span>
+<span class="fc" id="L330">			buffer.write((byte)'-');</span>
+<span class="fc" id="L331">			buffer.write((byte)'-');</span>
+<span class="fc" id="L332">			buffer.write(boundary);</span>
+<span class="fc" id="L333">			buffer.write((byte)'\r');</span>
+<span class="fc" id="L334">			buffer.write((byte)'\n');</span>
+<span class="fc" id="L335">			return buffer;</span>
+		});
+	}
+
+	private Mono&lt;DataBuffer&gt; generateNewLine(DataBufferFactory bufferFactory) {
+<span class="fc" id="L340">		return Mono.fromCallable(() -&gt; {</span>
+<span class="fc" id="L341">			DataBuffer buffer = bufferFactory.allocateBuffer(2);</span>
+<span class="fc" id="L342">			buffer.write((byte)'\r');</span>
+<span class="fc" id="L343">			buffer.write((byte)'\n');</span>
+<span class="fc" id="L344">			return buffer;</span>
+		});
+	}
+
+	private Mono&lt;DataBuffer&gt; generateLastLine(byte[] boundary, DataBufferFactory bufferFactory) {
+<span class="fc" id="L349">		return Mono.fromCallable(() -&gt; {</span>
+<span class="fc" id="L350">			DataBuffer buffer = bufferFactory.allocateBuffer(boundary.length + 6);</span>
+<span class="fc" id="L351">			buffer.write((byte)'-');</span>
+<span class="fc" id="L352">			buffer.write((byte)'-');</span>
+<span class="fc" id="L353">			buffer.write(boundary);</span>
+<span class="fc" id="L354">			buffer.write((byte)'-');</span>
+<span class="fc" id="L355">			buffer.write((byte)'-');</span>
+<span class="fc" id="L356">			buffer.write((byte)'\r');</span>
+<span class="fc" id="L357">			buffer.write((byte)'\n');</span>
+<span class="fc" id="L358">			return buffer;</span>
+		});
+	}
+
+
+	private static class MultipartHttpOutputMessage implements ReactiveHttpOutputMessage {
+
+		private final DataBufferFactory bufferFactory;
+
+		private final Charset charset;
+
+<span class="fc" id="L369">		private final HttpHeaders headers = new HttpHeaders();</span>
+
+<span class="fc" id="L371">		private final AtomicBoolean committed = new AtomicBoolean();</span>
+
+		@Nullable
+		private Flux&lt;DataBuffer&gt; body;
+
+<span class="fc" id="L376">		public MultipartHttpOutputMessage(DataBufferFactory bufferFactory, Charset charset) {</span>
+<span class="fc" id="L377">			this.bufferFactory = bufferFactory;</span>
+<span class="fc" id="L378">			this.charset = charset;</span>
+<span class="fc" id="L379">		}</span>
+
+		@Override
+		public HttpHeaders getHeaders() {
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">			return (this.body != null ? HttpHeaders.readOnlyHttpHeaders(this.headers) : this.headers);</span>
+		}
+
+		@Override
+		public DataBufferFactory bufferFactory() {
+<span class="fc" id="L388">			return this.bufferFactory;</span>
+		}
+
+		@Override
+		public void beforeCommit(Supplier&lt;? extends Mono&lt;Void&gt;&gt; action) {
+<span class="nc" id="L393">			this.committed.set(true);</span>
+<span class="nc" id="L394">		}</span>
+
+		@Override
+		public boolean isCommitted() {
+<span class="nc" id="L398">			return this.committed.get();</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; writeWith(Publisher&lt;? extends DataBuffer&gt; body) {
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">			if (this.body != null) {</span>
+<span class="nc" id="L404">				return Mono.error(new IllegalStateException(&quot;Multiple calls to writeWith() not supported&quot;));</span>
+			}
+<span class="fc" id="L406">			this.body = generateHeaders().concatWith(body);</span>
+
+			// We don't actually want to write (just save the body Flux)
+<span class="fc" id="L409">			return Mono.empty();</span>
+		}
+
+		private Mono&lt;DataBuffer&gt; generateHeaders() {
+<span class="fc" id="L413">			return Mono.fromCallable(() -&gt; {</span>
+<span class="fc" id="L414">				DataBuffer buffer = this.bufferFactory.allocateBuffer();</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">				for (Map.Entry&lt;String, List&lt;String&gt;&gt; entry : this.headers.entrySet()) {</span>
+<span class="fc" id="L416">					byte[] headerName = entry.getKey().getBytes(this.charset);</span>
+<span class="fc bfc" id="L417" title="All 2 branches covered.">					for (String headerValueString : entry.getValue()) {</span>
+<span class="fc" id="L418">						byte[] headerValue = headerValueString.getBytes(this.charset);</span>
+<span class="fc" id="L419">						buffer.write(headerName);</span>
+<span class="fc" id="L420">						buffer.write((byte)':');</span>
+<span class="fc" id="L421">						buffer.write((byte)' ');</span>
+<span class="fc" id="L422">						buffer.write(headerValue);</span>
+<span class="fc" id="L423">						buffer.write((byte)'\r');</span>
+<span class="fc" id="L424">						buffer.write((byte)'\n');</span>
+<span class="fc" id="L425">					}</span>
+<span class="fc" id="L426">				}</span>
+<span class="fc" id="L427">				buffer.write((byte)'\r');</span>
+<span class="fc" id="L428">				buffer.write((byte)'\n');</span>
+<span class="fc" id="L429">				return buffer;</span>
+			});
+		}
+
+		@Override
+		public Mono&lt;Void&gt; writeAndFlushWith(Publisher&lt;? extends Publisher&lt;? extends DataBuffer&gt;&gt; body) {
+<span class="nc" id="L435">			return Mono.error(new UnsupportedOperationException());</span>
+		}
+
+		public Flux&lt;DataBuffer&gt; getBody() {
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">			return (this.body != null ? this.body :</span>
+<span class="nc" id="L440">					Flux.error(new IllegalStateException(&quot;Body has not been written yet&quot;)));</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; setComplete() {
+<span class="nc" id="L445">			return Mono.error(new UnsupportedOperationException());</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

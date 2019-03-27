@@ -1,0 +1,453 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LazyConnectionDataSourceProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.datasource</a> &gt; <span class="el_source">LazyConnectionDataSourceProxy.java</span></div><h1>LazyConnectionDataSourceProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.datasource;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import javax.sql.DataSource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.Constants;
+import org.springframework.lang.Nullable;
+
+/**
+ * Proxy for a target DataSource, fetching actual JDBC Connections lazily,
+ * i.e. not until first creation of a Statement. Connection initialization
+ * properties like auto-commit mode, transaction isolation and read-only mode
+ * will be kept and applied to the actual JDBC Connection as soon as an
+ * actual Connection is fetched (if ever). Consequently, commit and rollback
+ * calls will be ignored if no Statements have been created.
+ *
+ * &lt;p&gt;This DataSource proxy allows to avoid fetching JDBC Connections from
+ * a pool unless actually necessary. JDBC transaction control can happen
+ * without fetching a Connection from the pool or communicating with the
+ * database; this will be done lazily on first creation of a JDBC Statement.
+ *
+ * &lt;p&gt;&lt;b&gt;If you configure both a LazyConnectionDataSourceProxy and a
+ * TransactionAwareDataSourceProxy, make sure that the latter is the outermost
+ * DataSource.&lt;/b&gt; In such a scenario, data access code will talk to the
+ * transaction-aware DataSource, which will in turn work with the
+ * LazyConnectionDataSourceProxy.
+ *
+ * &lt;p&gt;Lazy fetching of physical JDBC Connections is particularly beneficial
+ * in a generic transaction demarcation environment. It allows you to demarcate
+ * transactions on all methods that could potentially perform data access,
+ * without paying a performance penalty if no actual data access happens.
+ *
+ * &lt;p&gt;This DataSource proxy gives you behavior analogous to JTA and a
+ * transactional JNDI DataSource (as provided by the Java EE server), even
+ * with a local transaction strategy like DataSourceTransactionManager or
+ * HibernateTransactionManager. It does not add value with Spring's
+ * JtaTransactionManager as transaction strategy.
+ *
+ * &lt;p&gt;Lazy fetching of JDBC Connections is also recommended for read-only
+ * operations with Hibernate, in particular if the chances of resolving the
+ * result in the second-level cache are high. This avoids the need to
+ * communicate with the database at all for such read-only operations.
+ * You will get the same effect with non-transactional reads, but lazy fetching
+ * of JDBC Connections allows you to still perform reads in transactions.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; This DataSource proxy needs to return wrapped Connections
+ * (which implement the {@link ConnectionProxy} interface) in order to handle
+ * lazy fetching of an actual JDBC Connection. Use {@link Connection#unwrap}
+ * to retrieve the native JDBC Connection.
+ *
+ * @author Juergen Hoeller
+ * @since 1.1.4
+ * @see DataSourceTransactionManager
+ */
+public class LazyConnectionDataSourceProxy extends DelegatingDataSource {
+
+	/** Constants instance for TransactionDefinition. */
+<span class="fc" id="L83">	private static final Constants constants = new Constants(Connection.class);</span>
+
+<span class="fc" id="L85">	private static final Log logger = LogFactory.getLog(LazyConnectionDataSourceProxy.class);</span>
+
+	@Nullable
+	private Boolean defaultAutoCommit;
+
+	@Nullable
+	private Integer defaultTransactionIsolation;
+
+
+	/**
+	 * Create a new LazyConnectionDataSourceProxy.
+	 * @see #setTargetDataSource
+	 */
+<span class="nc" id="L98">	public LazyConnectionDataSourceProxy() {</span>
+<span class="nc" id="L99">	}</span>
+
+	/**
+	 * Create a new LazyConnectionDataSourceProxy.
+	 * @param targetDataSource the target DataSource
+	 */
+<span class="fc" id="L105">	public LazyConnectionDataSourceProxy(DataSource targetDataSource) {</span>
+<span class="fc" id="L106">		setTargetDataSource(targetDataSource);</span>
+<span class="fc" id="L107">		afterPropertiesSet();</span>
+<span class="fc" id="L108">	}</span>
+
+
+	/**
+	 * Set the default auto-commit mode to expose when no target Connection
+	 * has been fetched yet (-&gt; actual JDBC Connection default not known yet).
+	 * &lt;p&gt;If not specified, the default gets determined by checking a target
+	 * Connection on startup. If that check fails, the default will be determined
+	 * lazily on first access of a Connection.
+	 * @see java.sql.Connection#setAutoCommit
+	 */
+	public void setDefaultAutoCommit(boolean defaultAutoCommit) {
+<span class="nc" id="L120">		this.defaultAutoCommit = defaultAutoCommit;</span>
+<span class="nc" id="L121">	}</span>
+
+	/**
+	 * Set the default transaction isolation level to expose when no target Connection
+	 * has been fetched yet (-&gt; actual JDBC Connection default not known yet).
+	 * &lt;p&gt;This property accepts the int constant value (e.g. 8) as defined in the
+	 * {@link java.sql.Connection} interface; it is mainly intended for programmatic
+	 * use. Consider using the &quot;defaultTransactionIsolationName&quot; property for setting
+	 * the value by name (e.g. &quot;TRANSACTION_SERIALIZABLE&quot;).
+	 * &lt;p&gt;If not specified, the default gets determined by checking a target
+	 * Connection on startup. If that check fails, the default will be determined
+	 * lazily on first access of a Connection.
+	 * @see #setDefaultTransactionIsolationName
+	 * @see java.sql.Connection#setTransactionIsolation
+	 */
+	public void setDefaultTransactionIsolation(int defaultTransactionIsolation) {
+<span class="nc" id="L137">		this.defaultTransactionIsolation = defaultTransactionIsolation;</span>
+<span class="nc" id="L138">	}</span>
+
+	/**
+	 * Set the default transaction isolation level by the name of the corresponding
+	 * constant in {@link java.sql.Connection}, e.g. &quot;TRANSACTION_SERIALIZABLE&quot;.
+	 * @param constantName name of the constant
+	 * @see #setDefaultTransactionIsolation
+	 * @see java.sql.Connection#TRANSACTION_READ_UNCOMMITTED
+	 * @see java.sql.Connection#TRANSACTION_READ_COMMITTED
+	 * @see java.sql.Connection#TRANSACTION_REPEATABLE_READ
+	 * @see java.sql.Connection#TRANSACTION_SERIALIZABLE
+	 */
+	public void setDefaultTransactionIsolationName(String constantName) {
+<span class="nc" id="L151">		setDefaultTransactionIsolation(constants.asNumber(constantName).intValue());</span>
+<span class="nc" id="L152">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="fc" id="L157">		super.afterPropertiesSet();</span>
+
+		// Determine default auto-commit and transaction isolation
+		// via a Connection from the target DataSource, if possible.
+<span class="pc bpc" id="L161" title="3 of 4 branches missed.">		if (this.defaultAutoCommit == null || this.defaultTransactionIsolation == null) {</span>
+			try {
+<span class="fc" id="L163">				try (Connection con = obtainTargetDataSource().getConnection()) {</span>
+<span class="fc" id="L164">					checkDefaultConnectionProperties(con);</span>
+				}
+			}
+<span class="nc" id="L167">			catch (SQLException ex) {</span>
+<span class="nc" id="L168">				logger.debug(&quot;Could not retrieve default auto-commit and transaction isolation settings&quot;, ex);</span>
+<span class="fc" id="L169">			}</span>
+		}
+<span class="fc" id="L171">	}</span>
+
+	/**
+	 * Check the default connection properties (auto-commit, transaction isolation),
+	 * keeping them to be able to expose them correctly without fetching an actual
+	 * JDBC Connection from the target DataSource.
+	 * &lt;p&gt;This will be invoked once on startup, but also for each retrieval of a
+	 * target Connection. If the check failed on startup (because the database was
+	 * down), we'll lazily retrieve those settings.
+	 * @param con the Connection to use for checking
+	 * @throws SQLException if thrown by Connection methods
+	 */
+	protected synchronized void checkDefaultConnectionProperties(Connection con) throws SQLException {
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		if (this.defaultAutoCommit == null) {</span>
+<span class="fc" id="L185">			this.defaultAutoCommit = con.getAutoCommit();</span>
+		}
+<span class="fc bfc" id="L187" title="All 2 branches covered.">		if (this.defaultTransactionIsolation == null) {</span>
+<span class="fc" id="L188">			this.defaultTransactionIsolation = con.getTransactionIsolation();</span>
+		}
+<span class="fc" id="L190">	}</span>
+
+	/**
+	 * Expose the default auto-commit value.
+	 */
+	@Nullable
+	protected Boolean defaultAutoCommit() {
+<span class="fc" id="L197">		return this.defaultAutoCommit;</span>
+	}
+
+	/**
+	 * Expose the default transaction isolation value.
+	 */
+	@Nullable
+	protected Integer defaultTransactionIsolation() {
+<span class="fc" id="L205">		return this.defaultTransactionIsolation;</span>
+	}
+
+
+	/**
+	 * Return a Connection handle that lazily fetches an actual JDBC Connection
+	 * when asked for a Statement (or PreparedStatement or CallableStatement).
+	 * &lt;p&gt;The returned Connection handle implements the ConnectionProxy interface,
+	 * allowing to retrieve the underlying target Connection.
+	 * @return a lazy Connection handle
+	 * @see ConnectionProxy#getTargetConnection()
+	 */
+	@Override
+	public Connection getConnection() throws SQLException {
+<span class="fc" id="L219">		return (Connection) Proxy.newProxyInstance(</span>
+<span class="fc" id="L220">				ConnectionProxy.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {ConnectionProxy.class},
+				new LazyConnectionInvocationHandler());
+	}
+
+	/**
+	 * Return a Connection handle that lazily fetches an actual JDBC Connection
+	 * when asked for a Statement (or PreparedStatement or CallableStatement).
+	 * &lt;p&gt;The returned Connection handle implements the ConnectionProxy interface,
+	 * allowing to retrieve the underlying target Connection.
+	 * @param username the per-Connection username
+	 * @param password the per-Connection password
+	 * @return a lazy Connection handle
+	 * @see ConnectionProxy#getTargetConnection()
+	 */
+	@Override
+	public Connection getConnection(String username, String password) throws SQLException {
+<span class="nc" id="L237">		return (Connection) Proxy.newProxyInstance(</span>
+<span class="nc" id="L238">				ConnectionProxy.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {ConnectionProxy.class},
+				new LazyConnectionInvocationHandler(username, password));
+	}
+
+
+	/**
+	 * Invocation handler that defers fetching an actual JDBC Connection
+	 * until first creation of a Statement.
+	 */
+	private class LazyConnectionInvocationHandler implements InvocationHandler {
+
+		@Nullable
+		private String username;
+
+		@Nullable
+		private String password;
+
+		@Nullable
+		private Boolean autoCommit;
+
+		@Nullable
+		private Integer transactionIsolation;
+
+<span class="fc" id="L262">		private boolean readOnly = false;</span>
+
+<span class="fc" id="L264">		private int holdability = ResultSet.CLOSE_CURSORS_AT_COMMIT;</span>
+
+<span class="fc" id="L266">		private boolean closed = false;</span>
+
+		@Nullable
+		private Connection target;
+
+<span class="fc" id="L271">		public LazyConnectionInvocationHandler() {</span>
+<span class="fc" id="L272">			this.autoCommit = defaultAutoCommit();</span>
+<span class="fc" id="L273">			this.transactionIsolation = defaultTransactionIsolation();</span>
+<span class="fc" id="L274">		}</span>
+
+		public LazyConnectionInvocationHandler(String username, String password) {
+<span class="nc" id="L277">			this();</span>
+<span class="nc" id="L278">			this.username = username;</span>
+<span class="nc" id="L279">			this.password = password;</span>
+<span class="nc" id="L280">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on ConnectionProxy interface coming in...
+
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// We must avoid fetching a target Connection for &quot;equals&quot;.
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L290" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// We must avoid fetching a target Connection for &quot;hashCode&quot;,
+				// and we must return the same hash code even when the target
+				// Connection has been fetched: use hashCode of Connection proxy.
+<span class="nc" id="L296">				return System.identityHashCode(proxy);</span>
+			}
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;unwrap&quot;)) {</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">				if (((Class&lt;?&gt;) args[0]).isInstance(proxy)) {</span>
+<span class="nc" id="L300">					return proxy;</span>
+				}
+			}
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;isWrapperFor&quot;)) {</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">				if (((Class&lt;?&gt;) args[0]).isInstance(proxy)) {</span>
+<span class="nc" id="L305">					return true;</span>
+				}
+			}
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;getTargetConnection&quot;)) {</span>
+				// Handle getTargetConnection method: return underlying connection.
+<span class="nc" id="L310">				return getTargetConnection(method);</span>
+			}
+
+<span class="fc bfc" id="L313" title="All 2 branches covered.">			if (!hasTargetConnection()) {</span>
+				// No physical target Connection kept yet -&gt;
+				// resolve transaction demarcation methods without fetching
+				// a physical JDBC Connection until absolutely necessary.
+
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">				if (method.getName().equals(&quot;toString&quot;)) {</span>
+<span class="nc" id="L319">					return &quot;Lazy Connection proxy for target DataSource [&quot; + getTargetDataSource() + &quot;]&quot;;</span>
+				}
+<span class="fc bfc" id="L321" title="All 2 branches covered.">				else if (method.getName().equals(&quot;getAutoCommit&quot;)) {</span>
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">					if (this.autoCommit != null) {</span>
+<span class="fc" id="L323">						return this.autoCommit;</span>
+					}
+					// Else fetch actual Connection and check there,
+					// because we didn't have a default specified.
+				}
+<span class="fc bfc" id="L328" title="All 2 branches covered.">				else if (method.getName().equals(&quot;setAutoCommit&quot;)) {</span>
+<span class="fc" id="L329">					this.autoCommit = (Boolean) args[0];</span>
+<span class="fc" id="L330">					return null;</span>
+				}
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;getTransactionIsolation&quot;)) {</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">					if (this.transactionIsolation != null) {</span>
+<span class="nc" id="L334">						return this.transactionIsolation;</span>
+					}
+					// Else fetch actual Connection and check there,
+					// because we didn't have a default specified.
+				}
+<span class="pc bpc" id="L339" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;setTransactionIsolation&quot;)) {</span>
+<span class="nc" id="L340">					this.transactionIsolation = (Integer) args[0];</span>
+<span class="nc" id="L341">					return null;</span>
+				}
+<span class="fc bfc" id="L343" title="All 2 branches covered.">				else if (method.getName().equals(&quot;isReadOnly&quot;)) {</span>
+<span class="fc" id="L344">					return this.readOnly;</span>
+				}
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;setReadOnly&quot;)) {</span>
+<span class="nc" id="L347">					this.readOnly = (Boolean) args[0];</span>
+<span class="nc" id="L348">					return null;</span>
+				}
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;getHoldability&quot;)) {</span>
+<span class="nc" id="L351">					return this.holdability;</span>
+				}
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;setHoldability&quot;)) {</span>
+<span class="nc" id="L354">					this.holdability = (Integer) args[0];</span>
+<span class="nc" id="L355">					return null;</span>
+				}
+<span class="fc bfc" id="L357" title="All 2 branches covered.">				else if (method.getName().equals(&quot;commit&quot;)) {</span>
+					// Ignore: no statements created yet.
+<span class="fc" id="L359">					return null;</span>
+				}
+<span class="fc bfc" id="L361" title="All 2 branches covered.">				else if (method.getName().equals(&quot;rollback&quot;)) {</span>
+					// Ignore: no statements created yet.
+<span class="fc" id="L363">					return null;</span>
+				}
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;getWarnings&quot;)) {</span>
+<span class="nc" id="L366">					return null;</span>
+				}
+<span class="pc bpc" id="L368" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;clearWarnings&quot;)) {</span>
+<span class="nc" id="L369">					return null;</span>
+				}
+<span class="fc bfc" id="L371" title="All 2 branches covered.">				else if (method.getName().equals(&quot;close&quot;)) {</span>
+					// Ignore: no target connection yet.
+<span class="fc" id="L373">					this.closed = true;</span>
+<span class="fc" id="L374">					return null;</span>
+				}
+<span class="pc bpc" id="L376" title="1 of 2 branches missed.">				else if (method.getName().equals(&quot;isClosed&quot;)) {</span>
+<span class="nc" id="L377">					return this.closed;</span>
+				}
+<span class="pc bpc" id="L379" title="1 of 2 branches missed.">				else if (this.closed) {</span>
+					// Connection proxy closed, without ever having fetched a
+					// physical JDBC Connection: throw corresponding SQLException.
+<span class="nc" id="L382">					throw new SQLException(&quot;Illegal operation: connection is closed&quot;);</span>
+				}
+			}
+
+			// Target Connection already fetched,
+			// or target Connection necessary for current operation -&gt;
+			// invoke method on target connection.
+			try {
+<span class="fc" id="L390">				return method.invoke(getTargetConnection(method), args);</span>
+			}
+<span class="nc" id="L392">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L393">				throw ex.getTargetException();</span>
+			}
+		}
+
+		/**
+		 * Return whether the proxy currently holds a target Connection.
+		 */
+		private boolean hasTargetConnection() {
+<span class="fc bfc" id="L401" title="All 2 branches covered.">			return (this.target != null);</span>
+		}
+
+		/**
+		 * Return the target Connection, fetching it and initializing it if necessary.
+		 */
+		private Connection getTargetConnection(Method operation) throws SQLException {
+<span class="fc bfc" id="L408" title="All 2 branches covered.">			if (this.target == null) {</span>
+				// No target Connection held -&gt; fetch one.
+<span class="pc bpc" id="L410" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L411">					logger.trace(&quot;Connecting to database for operation '&quot; + operation.getName() + &quot;'&quot;);</span>
+				}
+
+				// Fetch physical Connection from DataSource.
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">				this.target = (this.username != null) ?</span>
+<span class="pc" id="L416">						obtainTargetDataSource().getConnection(this.username, this.password) :</span>
+<span class="fc" id="L417">						obtainTargetDataSource().getConnection();</span>
+
+				// If we still lack default connection properties, check them now.
+<span class="fc" id="L420">				checkDefaultConnectionProperties(this.target);</span>
+
+				// Apply kept transaction settings, if any.
+<span class="pc bpc" id="L423" title="1 of 2 branches missed.">				if (this.readOnly) {</span>
+					try {
+<span class="nc" id="L425">						this.target.setReadOnly(true);</span>
+					}
+<span class="nc" id="L427">					catch (Exception ex) {</span>
+						// &quot;read-only not supported&quot; -&gt; ignore, it's just a hint anyway
+<span class="nc" id="L429">						logger.debug(&quot;Could not set JDBC Connection read-only&quot;, ex);</span>
+<span class="nc" id="L430">					}</span>
+				}
+<span class="pc bpc" id="L432" title="1 of 2 branches missed.">				if (this.transactionIsolation != null &amp;&amp;</span>
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">						!this.transactionIsolation.equals(defaultTransactionIsolation())) {</span>
+<span class="nc" id="L434">					this.target.setTransactionIsolation(this.transactionIsolation);</span>
+				}
+<span class="pc bpc" id="L436" title="1 of 4 branches missed.">				if (this.autoCommit != null &amp;&amp; this.autoCommit != this.target.getAutoCommit()) {</span>
+<span class="fc" id="L437">					this.target.setAutoCommit(this.autoCommit);</span>
+				}
+			}
+
+			else {
+				// Target Connection already held -&gt; return it.
+<span class="pc bpc" id="L443" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L444">					logger.trace(&quot;Using existing database connection for operation '&quot; + operation.getName() + &quot;'&quot;);</span>
+				}
+			}
+
+<span class="fc" id="L448">			return this.target;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

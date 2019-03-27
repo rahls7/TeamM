@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AnnotationTypeMappings.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.annotation</a> &gt; <span class="el_source">AnnotationTypeMappings.java</span></div><h1>AnnotationTypeMappings.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.annotation;
+
+import java.lang.annotation.Annotation;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.ConcurrentReferenceHashMap;
+
+/**
+ * Provides {@link AnnotationTypeMapping} information for a single source
+ * annotation type. Performs a recursive breadth first crawl of all
+ * meta-annotations to ultimately provide a quick way to map the attributes of
+ * root {@link Annotation}.
+ *
+ * &lt;p&gt;Supports convention based merging of meta-annotations as well as implicit
+ * and explicit {@link AliasFor @AliasFor} aliases. Also provide information
+ * about mirrored attributes.
+ *
+ * &lt;p&gt;This class is designed to be cached so that meta-annotations only need to
+ * be searched once, regardless of how many times they are actually used.
+ *
+ * @author Phillip Webb
+ * @since 5.2
+ * @see AnnotationTypeMapping
+ */
+final class AnnotationTypeMappings {
+
+<span class="fc" id="L48">	private static final IntrospectionFailureLogger failureLogger = IntrospectionFailureLogger.DEBUG;</span>
+
+<span class="fc" id="L50">	private static final Map&lt;AnnotationFilter, Cache&gt; cache = new ConcurrentReferenceHashMap&lt;&gt;();</span>
+
+
+	private final AnnotationFilter filter;
+
+	private final List&lt;AnnotationTypeMapping&gt; mappings;
+
+
+<span class="fc" id="L58">	private AnnotationTypeMappings(AnnotationFilter filter, Class&lt;? extends Annotation&gt; annotationType) {</span>
+<span class="fc" id="L59">		this.filter = filter;</span>
+<span class="fc" id="L60">		this.mappings = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L61">		addAllMappings(annotationType);</span>
+<span class="fc" id="L62">		this.mappings.forEach(AnnotationTypeMapping::afterAllMappingsSet);</span>
+<span class="fc" id="L63">	}</span>
+
+
+	private void addAllMappings(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L67">		Deque&lt;AnnotationTypeMapping&gt; queue = new ArrayDeque&lt;&gt;();</span>
+<span class="fc" id="L68">		addIfPossible(queue, null, annotationType, null);</span>
+<span class="fc bfc" id="L69" title="All 2 branches covered.">		while (!queue.isEmpty()) {</span>
+<span class="fc" id="L70">			AnnotationTypeMapping mapping = queue.removeFirst();</span>
+<span class="fc" id="L71">			this.mappings.add(mapping);</span>
+<span class="fc" id="L72">			addMetaAnnotationsToQueue(queue, mapping);</span>
+<span class="fc" id="L73">		}</span>
+<span class="fc" id="L74">	}</span>
+
+	private void addMetaAnnotationsToQueue(Deque&lt;AnnotationTypeMapping&gt; queue, AnnotationTypeMapping parent) {
+<span class="fc" id="L77">		Annotation[] metaAnnotations =</span>
+<span class="fc" id="L78">				AnnotationsScanner.getDeclaredAnnotations(parent.getAnnotationType(), false);</span>
+<span class="fc bfc" id="L79" title="All 2 branches covered.">		for (Annotation metaAnnotation : metaAnnotations) {</span>
+<span class="fc bfc" id="L80" title="All 2 branches covered.">			if (!isMappable(parent, metaAnnotation)) {</span>
+<span class="fc" id="L81">				continue;</span>
+			}
+<span class="fc" id="L83">			Annotation[] repeatedAnnotations = RepeatableContainers.standardRepeatables()</span>
+<span class="fc" id="L84">					.findRepeatedAnnotations(metaAnnotation);</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">			if (repeatedAnnotations != null) {</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">				for (Annotation repeatedAnnotation : repeatedAnnotations) {</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">					if (!isMappable(parent, metaAnnotation)) {</span>
+<span class="nc" id="L88">						continue;</span>
+					}
+<span class="fc" id="L90">					addIfPossible(queue, parent, repeatedAnnotation);</span>
+				}
+			}
+			else {
+<span class="fc" id="L94">				addIfPossible(queue, parent, metaAnnotation);</span>
+			}
+		}
+<span class="fc" id="L97">	}</span>
+
+	private void addIfPossible(Deque&lt;AnnotationTypeMapping&gt; queue, AnnotationTypeMapping parent, Annotation ann) {
+<span class="fc" id="L100">		addIfPossible(queue, parent, ann.annotationType(), ann);</span>
+<span class="fc" id="L101">	}</span>
+
+	private void addIfPossible(Deque&lt;AnnotationTypeMapping&gt; queue, @Nullable AnnotationTypeMapping parent,
+			Class&lt;? extends Annotation&gt; annotationType, @Nullable Annotation ann) {
+
+		try {
+<span class="fc" id="L107">			queue.addLast(new AnnotationTypeMapping(parent, annotationType, ann));</span>
+		}
+<span class="fc" id="L109">		catch (Exception ex) {</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">			if (ex instanceof AnnotationConfigurationException) {</span>
+<span class="fc" id="L111">				throw (AnnotationConfigurationException) ex;</span>
+			}
+<span class="nc bnc" id="L113" title="All 2 branches missed.">			if (failureLogger.isEnabled()) {</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">				failureLogger.log(&quot;Failed to introspect meta-annotation &quot; + annotationType.getName(),</span>
+<span class="nc" id="L115">						(parent != null ? parent.getAnnotationType() : null), ex);</span>
+			}
+<span class="fc" id="L117">		}</span>
+<span class="fc" id="L118">	}</span>
+
+	private boolean isMappable(AnnotationTypeMapping parent, @Nullable Annotation metaAnnotation) {
+<span class="pc bpc" id="L121" title="1 of 4 branches missed.">		return (metaAnnotation != null &amp;&amp; !this.filter.matches(metaAnnotation) &amp;&amp;</span>
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">				!AnnotationFilter.PLAIN.matches(parent.getAnnotationType()) &amp;&amp;</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">				!isAlreadyMapped(parent, metaAnnotation));</span>
+	}
+
+	private boolean isAlreadyMapped(AnnotationTypeMapping parent, Annotation metaAnnotation) {
+<span class="fc" id="L127">		Class&lt;? extends Annotation&gt; annotationType = metaAnnotation.annotationType();</span>
+<span class="fc" id="L128">		AnnotationTypeMapping mapping = parent;</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">		while (mapping != null) {</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">			if (mapping.getAnnotationType() == annotationType) {</span>
+<span class="fc" id="L131">				return true;</span>
+			}
+<span class="fc" id="L133">			mapping = mapping.getParent();</span>
+		}
+<span class="fc" id="L135">		return false;</span>
+	}
+
+	/**
+	 * Return the total number of contained mappings.
+	 * @return the total number of mappings
+	 */
+	int size() {
+<span class="fc" id="L143">		return this.mappings.size();</span>
+	}
+
+	/**
+	 * Return an individual mapping from this instance. Index {@code 0} will
+	 * always be return the root mapping, higer indexes will return
+	 * meta-annotation mappings.
+	 * @param index the index to return
+	 * @return the {@link AnnotationTypeMapping}
+	 * @throws IndexOutOfBoundsException if the index is out of range
+	 * (&lt;tt&gt;index &amp;lt; 0 || index &amp;gt;= size()&lt;/tt&gt;)
+	 */
+	AnnotationTypeMapping get(int index) {
+<span class="fc" id="L156">		return this.mappings.get(index);</span>
+	}
+
+	/**
+	 * Return {@link AnnotationTypeMappings} for the specified annotation type.
+	 * @param annotationType the source annotation type
+	 * @return type mappings for the annotation type
+	 */
+	static AnnotationTypeMappings forAnnotationType(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L165">		return forAnnotationType(annotationType, AnnotationFilter.PLAIN);</span>
+	}
+
+	/**
+	 * Return {@link AnnotationTypeMappings} for the specified annotation type.
+	 * @param annotationType the source annotation type
+	 * @param annotationFilter the annotation filter used to limit which
+	 * annotations are considered
+	 * @return type mappings for the annotation type
+	 */
+	static AnnotationTypeMappings forAnnotationType(
+			Class&lt;? extends Annotation&gt; annotationType, AnnotationFilter annotationFilter) {
+
+<span class="fc" id="L178">		return cache.computeIfAbsent(annotationFilter, Cache::new).get(annotationType);</span>
+	}
+
+	static void clearCache() {
+<span class="fc" id="L182">		cache.clear();</span>
+<span class="fc" id="L183">	}</span>
+
+
+	/**
+	 * Cache created per {@link AnnotationFilter}.
+	 */
+	private static class Cache {
+
+		private final AnnotationFilter filter;
+
+		private final Map&lt;Class&lt;? extends Annotation&gt;, AnnotationTypeMappings&gt; mappings;
+
+		/**
+		 * Create a cache instance with the specified filter.
+		 * @param filter the annotation filter
+		 */
+<span class="fc" id="L199">		Cache(AnnotationFilter filter) {</span>
+<span class="fc" id="L200">			this.filter = filter;</span>
+<span class="fc" id="L201">			this.mappings = new ConcurrentReferenceHashMap&lt;&gt;();</span>
+<span class="fc" id="L202">		}</span>
+
+		/**
+		 * Return or create {@link AnnotationTypeMappings} for the specified
+		 * annotation type.
+		 * @param annotationType the annotation type
+		 * @return a new or existing {@link AnnotationTypeMapping} instance
+		 */
+		AnnotationTypeMappings get(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L211">			return this.mappings.computeIfAbsent(annotationType, this::createMappings);</span>
+		}
+
+		AnnotationTypeMappings createMappings(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L215">			return new AnnotationTypeMappings(this.filter, annotationType);</span>
+		}
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

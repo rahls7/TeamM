@@ -1,0 +1,1472 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DispatcherServlet.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet</a> &gt; <span class="el_source">DispatcherServlet.java</span></div><h1>DispatcherServlet.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Collectors;
+import javax.servlet.DispatcherType;
+import javax.servlet.ServletContext;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.BeanInitializationException;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.i18n.LocaleContext;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.support.PropertiesLoaderUtils;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.server.ServletServerHttpRequest;
+import org.springframework.lang.Nullable;
+import org.springframework.ui.context.ThemeSource;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.context.request.async.WebAsyncManager;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.MultipartHttpServletRequest;
+import org.springframework.web.multipart.MultipartResolver;
+import org.springframework.web.util.NestedServletException;
+import org.springframework.web.util.WebUtils;
+
+/**
+ * Central dispatcher for HTTP request handlers/controllers, e.g. for web UI controllers
+ * or HTTP-based remote service exporters. Dispatches to registered handlers for processing
+ * a web request, providing convenient mapping and exception handling facilities.
+ *
+ * &lt;p&gt;This servlet is very flexible: It can be used with just about any workflow, with the
+ * installation of the appropriate adapter classes. It offers the following functionality
+ * that distinguishes it from other request-driven web MVC frameworks:
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;It is based around a JavaBeans configuration mechanism.
+ *
+ * &lt;li&gt;It can use any {@link HandlerMapping} implementation - pre-built or provided as part
+ * of an application - to control the routing of requests to handler objects. Default is
+ * {@link org.springframework.web.servlet.handler.BeanNameUrlHandlerMapping} and
+ * {@link org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping}.
+ * HandlerMapping objects can be defined as beans in the servlet's application context,
+ * implementing the HandlerMapping interface, overriding the default HandlerMapping if
+ * present. HandlerMappings can be given any bean name (they are tested by type).
+ *
+ * &lt;li&gt;It can use any {@link HandlerAdapter}; this allows for using any handler interface.
+ * Default adapters are {@link org.springframework.web.servlet.mvc.HttpRequestHandlerAdapter},
+ * {@link org.springframework.web.servlet.mvc.SimpleControllerHandlerAdapter}, for Spring's
+ * {@link org.springframework.web.HttpRequestHandler} and
+ * {@link org.springframework.web.servlet.mvc.Controller} interfaces, respectively. A default
+ * {@link org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter}
+ * will be registered as well. HandlerAdapter objects can be added as beans in the
+ * application context, overriding the default HandlerAdapters. Like HandlerMappings,
+ * HandlerAdapters can be given any bean name (they are tested by type).
+ *
+ * &lt;li&gt;The dispatcher's exception resolution strategy can be specified via a
+ * {@link HandlerExceptionResolver}, for example mapping certain exceptions to error pages.
+ * Default are
+ * {@link org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver},
+ * {@link org.springframework.web.servlet.mvc.annotation.ResponseStatusExceptionResolver}, and
+ * {@link org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver}.
+ * These HandlerExceptionResolvers can be overridden through the application context.
+ * HandlerExceptionResolver can be given any bean name (they are tested by type).
+ *
+ * &lt;li&gt;Its view resolution strategy can be specified via a {@link ViewResolver}
+ * implementation, resolving symbolic view names into View objects. Default is
+ * {@link org.springframework.web.servlet.view.InternalResourceViewResolver}.
+ * ViewResolver objects can be added as beans in the application context, overriding the
+ * default ViewResolver. ViewResolvers can be given any bean name (they are tested by type).
+ *
+ * &lt;li&gt;If a {@link View} or view name is not supplied by the user, then the configured
+ * {@link RequestToViewNameTranslator} will translate the current request into a view name.
+ * The corresponding bean name is &quot;viewNameTranslator&quot;; the default is
+ * {@link org.springframework.web.servlet.view.DefaultRequestToViewNameTranslator}.
+ *
+ * &lt;li&gt;The dispatcher's strategy for resolving multipart requests is determined by a
+ * {@link org.springframework.web.multipart.MultipartResolver} implementation.
+ * Implementations for Apache Commons FileUpload and Servlet 3 are included; the typical
+ * choice is {@link org.springframework.web.multipart.commons.CommonsMultipartResolver}.
+ * The MultipartResolver bean name is &quot;multipartResolver&quot;; default is none.
+ *
+ * &lt;li&gt;Its locale resolution strategy is determined by a {@link LocaleResolver}.
+ * Out-of-the-box implementations work via HTTP accept header, cookie, or session.
+ * The LocaleResolver bean name is &quot;localeResolver&quot;; default is
+ * {@link org.springframework.web.servlet.i18n.AcceptHeaderLocaleResolver}.
+ *
+ * &lt;li&gt;Its theme resolution strategy is determined by a {@link ThemeResolver}.
+ * Implementations for a fixed theme and for cookie and session storage are included.
+ * The ThemeResolver bean name is &quot;themeResolver&quot;; default is
+ * {@link org.springframework.web.servlet.theme.FixedThemeResolver}.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: The {@code @RequestMapping} annotation will only be processed if a
+ * corresponding {@code HandlerMapping} (for type-level annotations) and/or
+ * {@code HandlerAdapter} (for method-level annotations) is present in the dispatcher.&lt;/b&gt;
+ * This is the case by default. However, if you are defining custom {@code HandlerMappings}
+ * or {@code HandlerAdapters}, then you need to make sure that a corresponding custom
+ * {@code RequestMappingHandlerMapping} and/or {@code RequestMappingHandlerAdapter}
+ * is defined as well - provided that you intend to use {@code @RequestMapping}.
+ *
+ * &lt;p&gt;&lt;b&gt;A web application can define any number of DispatcherServlets.&lt;/b&gt;
+ * Each servlet will operate in its own namespace, loading its own application context
+ * with mappings, handlers, etc. Only the root application context as loaded by
+ * {@link org.springframework.web.context.ContextLoaderListener}, if any, will be shared.
+ *
+ * &lt;p&gt;As of Spring 3.1, {@code DispatcherServlet} may now be injected with a web
+ * application context, rather than creating its own internally. This is useful in Servlet
+ * 3.0+ environments, which support programmatic registration of servlet instances.
+ * See the {@link #DispatcherServlet(WebApplicationContext)} javadoc for details.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Chris Beams
+ * @author Rossen Stoyanchev
+ * @see org.springframework.web.HttpRequestHandler
+ * @see org.springframework.web.servlet.mvc.Controller
+ * @see org.springframework.web.context.ContextLoaderListener
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class DispatcherServlet extends FrameworkServlet {
+
+	/** Well-known name for the MultipartResolver object in the bean factory for this namespace. */
+	public static final String MULTIPART_RESOLVER_BEAN_NAME = &quot;multipartResolver&quot;;
+
+	/** Well-known name for the LocaleResolver object in the bean factory for this namespace. */
+	public static final String LOCALE_RESOLVER_BEAN_NAME = &quot;localeResolver&quot;;
+
+	/** Well-known name for the ThemeResolver object in the bean factory for this namespace. */
+	public static final String THEME_RESOLVER_BEAN_NAME = &quot;themeResolver&quot;;
+
+	/**
+	 * Well-known name for the HandlerMapping object in the bean factory for this namespace.
+	 * Only used when &quot;detectAllHandlerMappings&quot; is turned off.
+	 * @see #setDetectAllHandlerMappings
+	 */
+	public static final String HANDLER_MAPPING_BEAN_NAME = &quot;handlerMapping&quot;;
+
+	/**
+	 * Well-known name for the HandlerAdapter object in the bean factory for this namespace.
+	 * Only used when &quot;detectAllHandlerAdapters&quot; is turned off.
+	 * @see #setDetectAllHandlerAdapters
+	 */
+	public static final String HANDLER_ADAPTER_BEAN_NAME = &quot;handlerAdapter&quot;;
+
+	/**
+	 * Well-known name for the HandlerExceptionResolver object in the bean factory for this namespace.
+	 * Only used when &quot;detectAllHandlerExceptionResolvers&quot; is turned off.
+	 * @see #setDetectAllHandlerExceptionResolvers
+	 */
+	public static final String HANDLER_EXCEPTION_RESOLVER_BEAN_NAME = &quot;handlerExceptionResolver&quot;;
+
+	/**
+	 * Well-known name for the RequestToViewNameTranslator object in the bean factory for this namespace.
+	 */
+	public static final String REQUEST_TO_VIEW_NAME_TRANSLATOR_BEAN_NAME = &quot;viewNameTranslator&quot;;
+
+	/**
+	 * Well-known name for the ViewResolver object in the bean factory for this namespace.
+	 * Only used when &quot;detectAllViewResolvers&quot; is turned off.
+	 * @see #setDetectAllViewResolvers
+	 */
+	public static final String VIEW_RESOLVER_BEAN_NAME = &quot;viewResolver&quot;;
+
+	/**
+	 * Well-known name for the FlashMapManager object in the bean factory for this namespace.
+	 */
+	public static final String FLASH_MAP_MANAGER_BEAN_NAME = &quot;flashMapManager&quot;;
+
+	/**
+	 * Request attribute to hold the current web application context.
+	 * Otherwise only the global web app context is obtainable by tags etc.
+	 * @see org.springframework.web.servlet.support.RequestContextUtils#findWebApplicationContext
+	 */
+<span class="fc" id="L216">	public static final String WEB_APPLICATION_CONTEXT_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.CONTEXT&quot;;</span>
+
+	/**
+	 * Request attribute to hold the current LocaleResolver, retrievable by views.
+	 * @see org.springframework.web.servlet.support.RequestContextUtils#getLocaleResolver
+	 */
+<span class="fc" id="L222">	public static final String LOCALE_RESOLVER_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.LOCALE_RESOLVER&quot;;</span>
+
+	/**
+	 * Request attribute to hold the current ThemeResolver, retrievable by views.
+	 * @see org.springframework.web.servlet.support.RequestContextUtils#getThemeResolver
+	 */
+<span class="fc" id="L228">	public static final String THEME_RESOLVER_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.THEME_RESOLVER&quot;;</span>
+
+	/**
+	 * Request attribute to hold the current ThemeSource, retrievable by views.
+	 * @see org.springframework.web.servlet.support.RequestContextUtils#getThemeSource
+	 */
+<span class="fc" id="L234">	public static final String THEME_SOURCE_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.THEME_SOURCE&quot;;</span>
+
+	/**
+	 * Name of request attribute that holds a read-only {@code Map&lt;String,?&gt;}
+	 * with &quot;input&quot; flash attributes saved by a previous request, if any.
+	 * @see org.springframework.web.servlet.support.RequestContextUtils#getInputFlashMap(HttpServletRequest)
+	 */
+<span class="fc" id="L241">	public static final String INPUT_FLASH_MAP_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.INPUT_FLASH_MAP&quot;;</span>
+
+	/**
+	 * Name of request attribute that holds the &quot;output&quot; {@link FlashMap} with
+	 * attributes to save for a subsequent request.
+	 * @see org.springframework.web.servlet.support.RequestContextUtils#getOutputFlashMap(HttpServletRequest)
+	 */
+<span class="fc" id="L248">	public static final String OUTPUT_FLASH_MAP_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.OUTPUT_FLASH_MAP&quot;;</span>
+
+	/**
+	 * Name of request attribute that holds the {@link FlashMapManager}.
+	 * @see org.springframework.web.servlet.support.RequestContextUtils#getFlashMapManager(HttpServletRequest)
+	 */
+<span class="fc" id="L254">	public static final String FLASH_MAP_MANAGER_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.FLASH_MAP_MANAGER&quot;;</span>
+
+	/**
+	 * Name of request attribute that exposes an Exception resolved with an
+	 * {@link HandlerExceptionResolver} but where no view was rendered
+	 * (e.g. setting the status code).
+	 */
+<span class="fc" id="L261">	public static final String EXCEPTION_ATTRIBUTE = DispatcherServlet.class.getName() + &quot;.EXCEPTION&quot;;</span>
+
+	/** Log category to use when no mapped handler is found for a request. */
+	public static final String PAGE_NOT_FOUND_LOG_CATEGORY = &quot;org.springframework.web.servlet.PageNotFound&quot;;
+
+	/**
+	 * Name of the class path resource (relative to the DispatcherServlet class)
+	 * that defines DispatcherServlet's default strategy names.
+	 */
+	private static final String DEFAULT_STRATEGIES_PATH = &quot;DispatcherServlet.properties&quot;;
+
+	/**
+	 * Common prefix that DispatcherServlet's default strategy attributes start with.
+	 */
+	private static final String DEFAULT_STRATEGIES_PREFIX = &quot;org.springframework.web.servlet&quot;;
+
+	/** Additional logger to use when no mapped handler is found for a request. */
+<span class="fc" id="L278">	protected static final Log pageNotFoundLogger = LogFactory.getLog(PAGE_NOT_FOUND_LOG_CATEGORY);</span>
+
+	private static final Properties defaultStrategies;
+
+	static {
+		// Load default strategy implementations from properties file.
+		// This is currently strictly internal and not meant to be customized
+		// by application developers.
+		try {
+<span class="fc" id="L287">			ClassPathResource resource = new ClassPathResource(DEFAULT_STRATEGIES_PATH, DispatcherServlet.class);</span>
+<span class="fc" id="L288">			defaultStrategies = PropertiesLoaderUtils.loadProperties(resource);</span>
+		}
+<span class="nc" id="L290">		catch (IOException ex) {</span>
+<span class="nc" id="L291">			throw new IllegalStateException(&quot;Could not load '&quot; + DEFAULT_STRATEGIES_PATH + &quot;': &quot; + ex.getMessage());</span>
+<span class="fc" id="L292">		}</span>
+<span class="fc" id="L293">	}</span>
+
+	/** Detect all HandlerMappings or just expect &quot;handlerMapping&quot; bean?. */
+<span class="fc" id="L296">	private boolean detectAllHandlerMappings = true;</span>
+
+	/** Detect all HandlerAdapters or just expect &quot;handlerAdapter&quot; bean?. */
+<span class="fc" id="L299">	private boolean detectAllHandlerAdapters = true;</span>
+
+	/** Detect all HandlerExceptionResolvers or just expect &quot;handlerExceptionResolver&quot; bean?. */
+<span class="fc" id="L302">	private boolean detectAllHandlerExceptionResolvers = true;</span>
+
+	/** Detect all ViewResolvers or just expect &quot;viewResolver&quot; bean?. */
+<span class="fc" id="L305">	private boolean detectAllViewResolvers = true;</span>
+
+	/** Throw a NoHandlerFoundException if no Handler was found to process this request? *.*/
+<span class="fc" id="L308">	private boolean throwExceptionIfNoHandlerFound = false;</span>
+
+	/** Perform cleanup of request attributes after include request?. */
+<span class="fc" id="L311">	private boolean cleanupAfterInclude = true;</span>
+
+	/** MultipartResolver used by this servlet. */
+	@Nullable
+	private MultipartResolver multipartResolver;
+
+	/** LocaleResolver used by this servlet. */
+	@Nullable
+	private LocaleResolver localeResolver;
+
+	/** ThemeResolver used by this servlet. */
+	@Nullable
+	private ThemeResolver themeResolver;
+
+	/** List of HandlerMappings used by this servlet. */
+	@Nullable
+	private List&lt;HandlerMapping&gt; handlerMappings;
+
+	/** List of HandlerAdapters used by this servlet. */
+	@Nullable
+	private List&lt;HandlerAdapter&gt; handlerAdapters;
+
+	/** List of HandlerExceptionResolvers used by this servlet. */
+	@Nullable
+	private List&lt;HandlerExceptionResolver&gt; handlerExceptionResolvers;
+
+	/** RequestToViewNameTranslator used by this servlet. */
+	@Nullable
+	private RequestToViewNameTranslator viewNameTranslator;
+
+	/** FlashMapManager used by this servlet. */
+	@Nullable
+	private FlashMapManager flashMapManager;
+
+	/** List of ViewResolvers used by this servlet. */
+	@Nullable
+	private List&lt;ViewResolver&gt; viewResolvers;
+
+
+	/**
+	 * Create a new {@code DispatcherServlet} that will create its own internal web
+	 * application context based on defaults and values provided through servlet
+	 * init-params. Typically used in Servlet 2.5 or earlier environments, where the only
+	 * option for servlet registration is through {@code web.xml} which requires the use
+	 * of a no-arg constructor.
+	 * &lt;p&gt;Calling {@link #setContextConfigLocation} (init-param 'contextConfigLocation')
+	 * will dictate which XML files will be loaded by the
+	 * {@linkplain #DEFAULT_CONTEXT_CLASS default XmlWebApplicationContext}
+	 * &lt;p&gt;Calling {@link #setContextClass} (init-param 'contextClass') overrides the
+	 * default {@code XmlWebApplicationContext} and allows for specifying an alternative class,
+	 * such as {@code AnnotationConfigWebApplicationContext}.
+	 * &lt;p&gt;Calling {@link #setContextInitializerClasses} (init-param 'contextInitializerClasses')
+	 * indicates which {@code ApplicationContextInitializer} classes should be used to
+	 * further configure the internal application context prior to refresh().
+	 * @see #DispatcherServlet(WebApplicationContext)
+	 */
+	public DispatcherServlet() {
+<span class="fc" id="L368">		super();</span>
+<span class="fc" id="L369">		setDispatchOptionsRequest(true);</span>
+<span class="fc" id="L370">	}</span>
+
+	/**
+	 * Create a new {@code DispatcherServlet} with the given web application context. This
+	 * constructor is useful in Servlet 3.0+ environments where instance-based registration
+	 * of servlets is possible through the {@link ServletContext#addServlet} API.
+	 * &lt;p&gt;Using this constructor indicates that the following properties / init-params
+	 * will be ignored:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@link #setContextClass(Class)} / 'contextClass'&lt;/li&gt;
+	 * &lt;li&gt;{@link #setContextConfigLocation(String)} / 'contextConfigLocation'&lt;/li&gt;
+	 * &lt;li&gt;{@link #setContextAttribute(String)} / 'contextAttribute'&lt;/li&gt;
+	 * &lt;li&gt;{@link #setNamespace(String)} / 'namespace'&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;The given web application context may or may not yet be {@linkplain
+	 * ConfigurableApplicationContext#refresh() refreshed}. If it has &lt;strong&gt;not&lt;/strong&gt;
+	 * already been refreshed (the recommended approach), then the following will occur:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;If the given context does not already have a {@linkplain
+	 * ConfigurableApplicationContext#setParent parent}, the root application context
+	 * will be set as the parent.&lt;/li&gt;
+	 * &lt;li&gt;If the given context has not already been assigned an {@linkplain
+	 * ConfigurableApplicationContext#setId id}, one will be assigned to it&lt;/li&gt;
+	 * &lt;li&gt;{@code ServletContext} and {@code ServletConfig} objects will be delegated to
+	 * the application context&lt;/li&gt;
+	 * &lt;li&gt;{@link #postProcessWebApplicationContext} will be called&lt;/li&gt;
+	 * &lt;li&gt;Any {@code ApplicationContextInitializer}s specified through the
+	 * &quot;contextInitializerClasses&quot; init-param or through the {@link
+	 * #setContextInitializers} property will be applied.&lt;/li&gt;
+	 * &lt;li&gt;{@link ConfigurableApplicationContext#refresh refresh()} will be called if the
+	 * context implements {@link ConfigurableApplicationContext}&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * If the context has already been refreshed, none of the above will occur, under the
+	 * assumption that the user has performed these actions (or not) per their specific
+	 * needs.
+	 * &lt;p&gt;See {@link org.springframework.web.WebApplicationInitializer} for usage examples.
+	 * @param webApplicationContext the context to use
+	 * @see #initWebApplicationContext
+	 * @see #configureAndRefreshWebApplicationContext
+	 * @see org.springframework.web.WebApplicationInitializer
+	 */
+	public DispatcherServlet(WebApplicationContext webApplicationContext) {
+<span class="fc" id="L412">		super(webApplicationContext);</span>
+<span class="fc" id="L413">		setDispatchOptionsRequest(true);</span>
+<span class="fc" id="L414">	}</span>
+
+
+	/**
+	 * Set whether to detect all HandlerMapping beans in this servlet's context. Otherwise,
+	 * just a single bean with name &quot;handlerMapping&quot; will be expected.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this off if you want this servlet to use a single
+	 * HandlerMapping, despite multiple HandlerMapping beans being defined in the context.
+	 */
+	public void setDetectAllHandlerMappings(boolean detectAllHandlerMappings) {
+<span class="fc" id="L424">		this.detectAllHandlerMappings = detectAllHandlerMappings;</span>
+<span class="fc" id="L425">	}</span>
+
+	/**
+	 * Set whether to detect all HandlerAdapter beans in this servlet's context. Otherwise,
+	 * just a single bean with name &quot;handlerAdapter&quot; will be expected.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this off if you want this servlet to use a single
+	 * HandlerAdapter, despite multiple HandlerAdapter beans being defined in the context.
+	 */
+	public void setDetectAllHandlerAdapters(boolean detectAllHandlerAdapters) {
+<span class="fc" id="L434">		this.detectAllHandlerAdapters = detectAllHandlerAdapters;</span>
+<span class="fc" id="L435">	}</span>
+
+	/**
+	 * Set whether to detect all HandlerExceptionResolver beans in this servlet's context. Otherwise,
+	 * just a single bean with name &quot;handlerExceptionResolver&quot; will be expected.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this off if you want this servlet to use a single
+	 * HandlerExceptionResolver, despite multiple HandlerExceptionResolver beans being defined in the context.
+	 */
+	public void setDetectAllHandlerExceptionResolvers(boolean detectAllHandlerExceptionResolvers) {
+<span class="fc" id="L444">		this.detectAllHandlerExceptionResolvers = detectAllHandlerExceptionResolvers;</span>
+<span class="fc" id="L445">	}</span>
+
+	/**
+	 * Set whether to detect all ViewResolver beans in this servlet's context. Otherwise,
+	 * just a single bean with name &quot;viewResolver&quot; will be expected.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this off if you want this servlet to use a single
+	 * ViewResolver, despite multiple ViewResolver beans being defined in the context.
+	 */
+	public void setDetectAllViewResolvers(boolean detectAllViewResolvers) {
+<span class="fc" id="L454">		this.detectAllViewResolvers = detectAllViewResolvers;</span>
+<span class="fc" id="L455">	}</span>
+
+	/**
+	 * Set whether to throw a NoHandlerFoundException when no Handler was found for this request.
+	 * This exception can then be caught with a HandlerExceptionResolver or an
+	 * {@code @ExceptionHandler} controller method.
+	 * &lt;p&gt;Note that if {@link org.springframework.web.servlet.resource.DefaultServletHttpRequestHandler}
+	 * is used, then requests will always be forwarded to the default servlet and a
+	 * NoHandlerFoundException would never be thrown in that case.
+	 * &lt;p&gt;Default is &quot;false&quot;, meaning the DispatcherServlet sends a NOT_FOUND error through the
+	 * Servlet response.
+	 * @since 4.0
+	 */
+	public void setThrowExceptionIfNoHandlerFound(boolean throwExceptionIfNoHandlerFound) {
+<span class="fc" id="L469">		this.throwExceptionIfNoHandlerFound = throwExceptionIfNoHandlerFound;</span>
+<span class="fc" id="L470">	}</span>
+
+	/**
+	 * Set whether to perform cleanup of request attributes after an include request, that is,
+	 * whether to reset the original state of all request attributes after the DispatcherServlet
+	 * has processed within an include request. Otherwise, just the DispatcherServlet's own
+	 * request attributes will be reset, but not model attributes for JSPs or special attributes
+	 * set by views (for example, JSTL's).
+	 * &lt;p&gt;Default is &quot;true&quot;, which is strongly recommended. Views should not rely on request attributes
+	 * having been set by (dynamic) includes. This allows JSP views rendered by an included controller
+	 * to use any model attributes, even with the same names as in the main JSP, without causing side
+	 * effects. Only turn this off for special needs, for example to deliberately allow main JSPs to
+	 * access attributes from JSP views rendered by an included controller.
+	 */
+	public void setCleanupAfterInclude(boolean cleanupAfterInclude) {
+<span class="fc" id="L485">		this.cleanupAfterInclude = cleanupAfterInclude;</span>
+<span class="fc" id="L486">	}</span>
+
+
+	/**
+	 * This implementation calls {@link #initStrategies}.
+	 */
+	@Override
+	protected void onRefresh(ApplicationContext context) {
+<span class="fc" id="L494">		initStrategies(context);</span>
+<span class="fc" id="L495">	}</span>
+
+	/**
+	 * Initialize the strategy objects that this servlet uses.
+	 * &lt;p&gt;May be overridden in subclasses in order to initialize further strategy objects.
+	 */
+	protected void initStrategies(ApplicationContext context) {
+<span class="fc" id="L502">		initMultipartResolver(context);</span>
+<span class="fc" id="L503">		initLocaleResolver(context);</span>
+<span class="fc" id="L504">		initThemeResolver(context);</span>
+<span class="fc" id="L505">		initHandlerMappings(context);</span>
+<span class="fc" id="L506">		initHandlerAdapters(context);</span>
+<span class="fc" id="L507">		initHandlerExceptionResolvers(context);</span>
+<span class="fc" id="L508">		initRequestToViewNameTranslator(context);</span>
+<span class="fc" id="L509">		initViewResolvers(context);</span>
+<span class="fc" id="L510">		initFlashMapManager(context);</span>
+<span class="fc" id="L511">	}</span>
+
+	/**
+	 * Initialize the MultipartResolver used by this class.
+	 * &lt;p&gt;If no bean is defined with the given name in the BeanFactory for this namespace,
+	 * no multipart handling is provided.
+	 */
+	private void initMultipartResolver(ApplicationContext context) {
+		try {
+<span class="fc" id="L520">			this.multipartResolver = context.getBean(MULTIPART_RESOLVER_BEAN_NAME, MultipartResolver.class);</span>
+<span class="pc bpc" id="L521" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L522">				logger.trace(&quot;Detected &quot; + this.multipartResolver);</span>
+			}
+<span class="pc bpc" id="L524" title="1 of 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L525">				logger.debug(&quot;Detected &quot; + this.multipartResolver.getClass().getSimpleName());</span>
+			}
+		}
+<span class="fc" id="L528">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// Default is no multipart resolver.
+<span class="fc" id="L530">			this.multipartResolver = null;</span>
+<span class="pc bpc" id="L531" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L532">				logger.trace(&quot;No MultipartResolver '&quot; + MULTIPART_RESOLVER_BEAN_NAME + &quot;' declared&quot;);</span>
+			}
+<span class="fc" id="L534">		}</span>
+<span class="fc" id="L535">	}</span>
+
+	/**
+	 * Initialize the LocaleResolver used by this class.
+	 * &lt;p&gt;If no bean is defined with the given name in the BeanFactory for this namespace,
+	 * we default to AcceptHeaderLocaleResolver.
+	 */
+	private void initLocaleResolver(ApplicationContext context) {
+		try {
+<span class="fc" id="L544">			this.localeResolver = context.getBean(LOCALE_RESOLVER_BEAN_NAME, LocaleResolver.class);</span>
+<span class="pc bpc" id="L545" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L546">				logger.trace(&quot;Detected &quot; + this.localeResolver);</span>
+			}
+<span class="pc bpc" id="L548" title="1 of 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L549">				logger.debug(&quot;Detected &quot; + this.localeResolver.getClass().getSimpleName());</span>
+			}
+		}
+<span class="fc" id="L552">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// We need to use the default.
+<span class="fc" id="L554">			this.localeResolver = getDefaultStrategy(context, LocaleResolver.class);</span>
+<span class="pc bpc" id="L555" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L556">				logger.trace(&quot;No LocaleResolver '&quot; + LOCALE_RESOLVER_BEAN_NAME +</span>
+<span class="nc" id="L557">						&quot;': using default [&quot; + this.localeResolver.getClass().getSimpleName() + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L559">		}</span>
+<span class="fc" id="L560">	}</span>
+
+	/**
+	 * Initialize the ThemeResolver used by this class.
+	 * &lt;p&gt;If no bean is defined with the given name in the BeanFactory for this namespace,
+	 * we default to a FixedThemeResolver.
+	 */
+	private void initThemeResolver(ApplicationContext context) {
+		try {
+<span class="fc" id="L569">			this.themeResolver = context.getBean(THEME_RESOLVER_BEAN_NAME, ThemeResolver.class);</span>
+<span class="pc bpc" id="L570" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L571">				logger.trace(&quot;Detected &quot; + this.themeResolver);</span>
+			}
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L574">				logger.debug(&quot;Detected &quot; + this.themeResolver.getClass().getSimpleName());</span>
+			}
+		}
+<span class="fc" id="L577">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// We need to use the default.
+<span class="fc" id="L579">			this.themeResolver = getDefaultStrategy(context, ThemeResolver.class);</span>
+<span class="pc bpc" id="L580" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L581">				logger.trace(&quot;No ThemeResolver '&quot; + THEME_RESOLVER_BEAN_NAME +</span>
+<span class="nc" id="L582">						&quot;': using default [&quot; + this.themeResolver.getClass().getSimpleName() + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L584">		}</span>
+<span class="fc" id="L585">	}</span>
+
+	/**
+	 * Initialize the HandlerMappings used by this class.
+	 * &lt;p&gt;If no HandlerMapping beans are defined in the BeanFactory for this namespace,
+	 * we default to BeanNameUrlHandlerMapping.
+	 */
+	private void initHandlerMappings(ApplicationContext context) {
+<span class="fc" id="L593">		this.handlerMappings = null;</span>
+
+<span class="fc bfc" id="L595" title="All 2 branches covered.">		if (this.detectAllHandlerMappings) {</span>
+			// Find all HandlerMappings in the ApplicationContext, including ancestor contexts.
+<span class="fc" id="L597">			Map&lt;String, HandlerMapping&gt; matchingBeans =</span>
+<span class="fc" id="L598">					BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerMapping.class, true, false);</span>
+<span class="fc bfc" id="L599" title="All 2 branches covered.">			if (!matchingBeans.isEmpty()) {</span>
+<span class="fc" id="L600">				this.handlerMappings = new ArrayList&lt;&gt;(matchingBeans.values());</span>
+				// We keep HandlerMappings in sorted order.
+<span class="fc" id="L602">				AnnotationAwareOrderComparator.sort(this.handlerMappings);</span>
+			}
+<span class="fc" id="L604">		}</span>
+		else {
+			try {
+<span class="fc" id="L607">				HandlerMapping hm = context.getBean(HANDLER_MAPPING_BEAN_NAME, HandlerMapping.class);</span>
+<span class="fc" id="L608">				this.handlerMappings = Collections.singletonList(hm);</span>
+			}
+<span class="nc" id="L610">			catch (NoSuchBeanDefinitionException ex) {</span>
+				// Ignore, we'll add a default HandlerMapping later.
+<span class="fc" id="L612">			}</span>
+		}
+
+		// Ensure we have at least one HandlerMapping, by registering
+		// a default HandlerMapping if no other mappings are found.
+<span class="fc bfc" id="L617" title="All 2 branches covered.">		if (this.handlerMappings == null) {</span>
+<span class="fc" id="L618">			this.handlerMappings = getDefaultStrategies(context, HandlerMapping.class);</span>
+<span class="pc bpc" id="L619" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L620">				logger.trace(&quot;No HandlerMappings declared for servlet '&quot; + getServletName() +</span>
+						&quot;': using default strategies from DispatcherServlet.properties&quot;);
+			}
+		}
+<span class="fc" id="L624">	}</span>
+
+	/**
+	 * Initialize the HandlerAdapters used by this class.
+	 * &lt;p&gt;If no HandlerAdapter beans are defined in the BeanFactory for this namespace,
+	 * we default to SimpleControllerHandlerAdapter.
+	 */
+	private void initHandlerAdapters(ApplicationContext context) {
+<span class="fc" id="L632">		this.handlerAdapters = null;</span>
+
+<span class="fc bfc" id="L634" title="All 2 branches covered.">		if (this.detectAllHandlerAdapters) {</span>
+			// Find all HandlerAdapters in the ApplicationContext, including ancestor contexts.
+<span class="fc" id="L636">			Map&lt;String, HandlerAdapter&gt; matchingBeans =</span>
+<span class="fc" id="L637">					BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerAdapter.class, true, false);</span>
+<span class="fc bfc" id="L638" title="All 2 branches covered.">			if (!matchingBeans.isEmpty()) {</span>
+<span class="fc" id="L639">				this.handlerAdapters = new ArrayList&lt;&gt;(matchingBeans.values());</span>
+				// We keep HandlerAdapters in sorted order.
+<span class="fc" id="L641">				AnnotationAwareOrderComparator.sort(this.handlerAdapters);</span>
+			}
+<span class="fc" id="L643">		}</span>
+		else {
+			try {
+<span class="fc" id="L646">				HandlerAdapter ha = context.getBean(HANDLER_ADAPTER_BEAN_NAME, HandlerAdapter.class);</span>
+<span class="fc" id="L647">				this.handlerAdapters = Collections.singletonList(ha);</span>
+			}
+<span class="nc" id="L649">			catch (NoSuchBeanDefinitionException ex) {</span>
+				// Ignore, we'll add a default HandlerAdapter later.
+<span class="fc" id="L651">			}</span>
+		}
+
+		// Ensure we have at least some HandlerAdapters, by registering
+		// default HandlerAdapters if no other adapters are found.
+<span class="fc bfc" id="L656" title="All 2 branches covered.">		if (this.handlerAdapters == null) {</span>
+<span class="fc" id="L657">			this.handlerAdapters = getDefaultStrategies(context, HandlerAdapter.class);</span>
+<span class="pc bpc" id="L658" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L659">				logger.trace(&quot;No HandlerAdapters declared for servlet '&quot; + getServletName() +</span>
+						&quot;': using default strategies from DispatcherServlet.properties&quot;);
+			}
+		}
+<span class="fc" id="L663">	}</span>
+
+	/**
+	 * Initialize the HandlerExceptionResolver used by this class.
+	 * &lt;p&gt;If no bean is defined with the given name in the BeanFactory for this namespace,
+	 * we default to no exception resolver.
+	 */
+	private void initHandlerExceptionResolvers(ApplicationContext context) {
+<span class="fc" id="L671">		this.handlerExceptionResolvers = null;</span>
+
+<span class="fc bfc" id="L673" title="All 2 branches covered.">		if (this.detectAllHandlerExceptionResolvers) {</span>
+			// Find all HandlerExceptionResolvers in the ApplicationContext, including ancestor contexts.
+<span class="fc" id="L675">			Map&lt;String, HandlerExceptionResolver&gt; matchingBeans = BeanFactoryUtils</span>
+<span class="fc" id="L676">					.beansOfTypeIncludingAncestors(context, HandlerExceptionResolver.class, true, false);</span>
+<span class="fc bfc" id="L677" title="All 2 branches covered.">			if (!matchingBeans.isEmpty()) {</span>
+<span class="fc" id="L678">				this.handlerExceptionResolvers = new ArrayList&lt;&gt;(matchingBeans.values());</span>
+				// We keep HandlerExceptionResolvers in sorted order.
+<span class="fc" id="L680">				AnnotationAwareOrderComparator.sort(this.handlerExceptionResolvers);</span>
+			}
+<span class="fc" id="L682">		}</span>
+		else {
+			try {
+<span class="fc" id="L685">				HandlerExceptionResolver her =</span>
+<span class="fc" id="L686">						context.getBean(HANDLER_EXCEPTION_RESOLVER_BEAN_NAME, HandlerExceptionResolver.class);</span>
+<span class="fc" id="L687">				this.handlerExceptionResolvers = Collections.singletonList(her);</span>
+			}
+<span class="nc" id="L689">			catch (NoSuchBeanDefinitionException ex) {</span>
+				// Ignore, no HandlerExceptionResolver is fine too.
+<span class="fc" id="L691">			}</span>
+		}
+
+		// Ensure we have at least some HandlerExceptionResolvers, by registering
+		// default HandlerExceptionResolvers if no other resolvers are found.
+<span class="fc bfc" id="L696" title="All 2 branches covered.">		if (this.handlerExceptionResolvers == null) {</span>
+<span class="fc" id="L697">			this.handlerExceptionResolvers = getDefaultStrategies(context, HandlerExceptionResolver.class);</span>
+<span class="pc bpc" id="L698" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L699">				logger.trace(&quot;No HandlerExceptionResolvers declared in servlet '&quot; + getServletName() +</span>
+						&quot;': using default strategies from DispatcherServlet.properties&quot;);
+			}
+		}
+<span class="fc" id="L703">	}</span>
+
+	/**
+	 * Initialize the RequestToViewNameTranslator used by this servlet instance.
+	 * &lt;p&gt;If no implementation is configured then we default to DefaultRequestToViewNameTranslator.
+	 */
+	private void initRequestToViewNameTranslator(ApplicationContext context) {
+		try {
+<span class="fc" id="L711">			this.viewNameTranslator =</span>
+<span class="nc" id="L712">					context.getBean(REQUEST_TO_VIEW_NAME_TRANSLATOR_BEAN_NAME, RequestToViewNameTranslator.class);</span>
+<span class="nc bnc" id="L713" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L714">				logger.trace(&quot;Detected &quot; + this.viewNameTranslator.getClass().getSimpleName());</span>
+			}
+<span class="nc bnc" id="L716" title="All 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L717">				logger.debug(&quot;Detected &quot; + this.viewNameTranslator);</span>
+			}
+		}
+<span class="fc" id="L720">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// We need to use the default.
+<span class="fc" id="L722">			this.viewNameTranslator = getDefaultStrategy(context, RequestToViewNameTranslator.class);</span>
+<span class="pc bpc" id="L723" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L724">				logger.trace(&quot;No RequestToViewNameTranslator '&quot; + REQUEST_TO_VIEW_NAME_TRANSLATOR_BEAN_NAME +</span>
+<span class="nc" id="L725">						&quot;': using default [&quot; + this.viewNameTranslator.getClass().getSimpleName() + &quot;]&quot;);</span>
+			}
+<span class="nc" id="L727">		}</span>
+<span class="fc" id="L728">	}</span>
+
+	/**
+	 * Initialize the ViewResolvers used by this class.
+	 * &lt;p&gt;If no ViewResolver beans are defined in the BeanFactory for this
+	 * namespace, we default to InternalResourceViewResolver.
+	 */
+	private void initViewResolvers(ApplicationContext context) {
+<span class="fc" id="L736">		this.viewResolvers = null;</span>
+
+<span class="fc bfc" id="L738" title="All 2 branches covered.">		if (this.detectAllViewResolvers) {</span>
+			// Find all ViewResolvers in the ApplicationContext, including ancestor contexts.
+<span class="fc" id="L740">			Map&lt;String, ViewResolver&gt; matchingBeans =</span>
+<span class="fc" id="L741">					BeanFactoryUtils.beansOfTypeIncludingAncestors(context, ViewResolver.class, true, false);</span>
+<span class="fc bfc" id="L742" title="All 2 branches covered.">			if (!matchingBeans.isEmpty()) {</span>
+<span class="fc" id="L743">				this.viewResolvers = new ArrayList&lt;&gt;(matchingBeans.values());</span>
+				// We keep ViewResolvers in sorted order.
+<span class="fc" id="L745">				AnnotationAwareOrderComparator.sort(this.viewResolvers);</span>
+			}
+<span class="fc" id="L747">		}</span>
+		else {
+			try {
+<span class="fc" id="L750">				ViewResolver vr = context.getBean(VIEW_RESOLVER_BEAN_NAME, ViewResolver.class);</span>
+<span class="fc" id="L751">				this.viewResolvers = Collections.singletonList(vr);</span>
+			}
+<span class="nc" id="L753">			catch (NoSuchBeanDefinitionException ex) {</span>
+				// Ignore, we'll add a default ViewResolver later.
+<span class="fc" id="L755">			}</span>
+		}
+
+		// Ensure we have at least one ViewResolver, by registering
+		// a default ViewResolver if no other resolvers are found.
+<span class="fc bfc" id="L760" title="All 2 branches covered.">		if (this.viewResolvers == null) {</span>
+<span class="fc" id="L761">			this.viewResolvers = getDefaultStrategies(context, ViewResolver.class);</span>
+<span class="pc bpc" id="L762" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L763">				logger.trace(&quot;No ViewResolvers declared for servlet '&quot; + getServletName() +</span>
+						&quot;': using default strategies from DispatcherServlet.properties&quot;);
+			}
+		}
+<span class="fc" id="L767">	}</span>
+
+	/**
+	 * Initialize the {@link FlashMapManager} used by this servlet instance.
+	 * &lt;p&gt;If no implementation is configured then we default to
+	 * {@code org.springframework.web.servlet.support.DefaultFlashMapManager}.
+	 */
+	private void initFlashMapManager(ApplicationContext context) {
+		try {
+<span class="nc" id="L776">			this.flashMapManager = context.getBean(FLASH_MAP_MANAGER_BEAN_NAME, FlashMapManager.class);</span>
+<span class="nc bnc" id="L777" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L778">				logger.trace(&quot;Detected &quot; + this.flashMapManager.getClass().getSimpleName());</span>
+			}
+<span class="nc bnc" id="L780" title="All 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L781">				logger.debug(&quot;Detected &quot; + this.flashMapManager);</span>
+			}
+		}
+<span class="fc" id="L784">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// We need to use the default.
+<span class="fc" id="L786">			this.flashMapManager = getDefaultStrategy(context, FlashMapManager.class);</span>
+<span class="pc bpc" id="L787" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L788">				logger.trace(&quot;No FlashMapManager '&quot; + FLASH_MAP_MANAGER_BEAN_NAME +</span>
+<span class="nc" id="L789">						&quot;': using default [&quot; + this.flashMapManager.getClass().getSimpleName() + &quot;]&quot;);</span>
+			}
+<span class="nc" id="L791">		}</span>
+<span class="fc" id="L792">	}</span>
+
+	/**
+	 * Return this servlet's ThemeSource, if any; else return {@code null}.
+	 * &lt;p&gt;Default is to return the WebApplicationContext as ThemeSource,
+	 * provided that it implements the ThemeSource interface.
+	 * @return the ThemeSource, if any
+	 * @see #getWebApplicationContext()
+	 */
+	@Nullable
+	public final ThemeSource getThemeSource() {
+<span class="pc bpc" id="L803" title="1 of 2 branches missed.">		return (getWebApplicationContext() instanceof ThemeSource ? (ThemeSource) getWebApplicationContext() : null);</span>
+	}
+
+	/**
+	 * Obtain this servlet's MultipartResolver, if any.
+	 * @return the MultipartResolver used by this servlet, or {@code null} if none
+	 * (indicating that no multipart support is available)
+	 */
+	@Nullable
+	public final MultipartResolver getMultipartResolver() {
+<span class="fc" id="L813">		return this.multipartResolver;</span>
+	}
+
+	/**
+	 * Return the configured {@link HandlerMapping} beans that were detected by
+	 * type in the {@link WebApplicationContext} or initialized based on the
+	 * default set of strategies from {@literal DispatcherServlet.properties}.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; This method may return {@code null} if invoked
+	 * prior to {@link #onRefresh(ApplicationContext)}.
+	 * @return an immutable list with the configured mappings, or {@code null}
+	 * if not initialized yet
+	 * @since 5.0
+	 */
+	@Nullable
+	public final List&lt;HandlerMapping&gt; getHandlerMappings() {
+<span class="nc bnc" id="L828" title="All 2 branches missed.">		return (this.handlerMappings != null ? Collections.unmodifiableList(this.handlerMappings) : null);</span>
+	}
+
+	/**
+	 * Return the default strategy object for the given strategy interface.
+	 * &lt;p&gt;The default implementation delegates to {@link #getDefaultStrategies},
+	 * expecting a single object in the list.
+	 * @param context the current WebApplicationContext
+	 * @param strategyInterface the strategy interface
+	 * @return the corresponding strategy object
+	 * @see #getDefaultStrategies
+	 */
+	protected &lt;T&gt; T getDefaultStrategy(ApplicationContext context, Class&lt;T&gt; strategyInterface) {
+<span class="fc" id="L841">		List&lt;T&gt; strategies = getDefaultStrategies(context, strategyInterface);</span>
+<span class="pc bpc" id="L842" title="1 of 2 branches missed.">		if (strategies.size() != 1) {</span>
+<span class="nc" id="L843">			throw new BeanInitializationException(</span>
+<span class="nc" id="L844">					&quot;DispatcherServlet needs exactly 1 strategy for interface [&quot; + strategyInterface.getName() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L846">		return strategies.get(0);</span>
+	}
+
+	/**
+	 * Create a List of default strategy objects for the given strategy interface.
+	 * &lt;p&gt;The default implementation uses the &quot;DispatcherServlet.properties&quot; file (in the same
+	 * package as the DispatcherServlet class) to determine the class names. It instantiates
+	 * the strategy objects through the context's BeanFactory.
+	 * @param context the current WebApplicationContext
+	 * @param strategyInterface the strategy interface
+	 * @return the List of corresponding strategy objects
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	protected &lt;T&gt; List&lt;T&gt; getDefaultStrategies(ApplicationContext context, Class&lt;T&gt; strategyInterface) {
+<span class="fc" id="L860">		String key = strategyInterface.getName();</span>
+<span class="fc" id="L861">		String value = defaultStrategies.getProperty(key);</span>
+<span class="pc bpc" id="L862" title="1 of 2 branches missed.">		if (value != null) {</span>
+<span class="fc" id="L863">			String[] classNames = StringUtils.commaDelimitedListToStringArray(value);</span>
+<span class="fc" id="L864">			List&lt;T&gt; strategies = new ArrayList&lt;&gt;(classNames.length);</span>
+<span class="fc bfc" id="L865" title="All 2 branches covered.">			for (String className : classNames) {</span>
+				try {
+<span class="fc" id="L867">					Class&lt;?&gt; clazz = ClassUtils.forName(className, DispatcherServlet.class.getClassLoader());</span>
+<span class="fc" id="L868">					Object strategy = createDefaultStrategy(context, clazz);</span>
+<span class="fc" id="L869">					strategies.add((T) strategy);</span>
+				}
+<span class="nc" id="L871">				catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L872">					throw new BeanInitializationException(</span>
+							&quot;Could not find DispatcherServlet's default strategy class [&quot; + className +
+							&quot;] for interface [&quot; + key + &quot;]&quot;, ex);
+				}
+<span class="nc" id="L876">				catch (LinkageError err) {</span>
+<span class="nc" id="L877">					throw new BeanInitializationException(</span>
+							&quot;Unresolvable class definition for DispatcherServlet's default strategy class [&quot; +
+							className + &quot;] for interface [&quot; + key + &quot;]&quot;, err);
+<span class="fc" id="L880">				}</span>
+			}
+<span class="fc" id="L882">			return strategies;</span>
+		}
+		else {
+<span class="nc" id="L885">			return new LinkedList&lt;&gt;();</span>
+		}
+	}
+
+	/**
+	 * Create a default strategy.
+	 * &lt;p&gt;The default implementation uses
+	 * {@link org.springframework.beans.factory.config.AutowireCapableBeanFactory#createBean}.
+	 * @param context the current WebApplicationContext
+	 * @param clazz the strategy implementation class to instantiate
+	 * @return the fully configured strategy instance
+	 * @see org.springframework.context.ApplicationContext#getAutowireCapableBeanFactory()
+	 * @see org.springframework.beans.factory.config.AutowireCapableBeanFactory#createBean
+	 */
+	protected Object createDefaultStrategy(ApplicationContext context, Class&lt;?&gt; clazz) {
+<span class="fc" id="L900">		return context.getAutowireCapableBeanFactory().createBean(clazz);</span>
+	}
+
+
+	/**
+	 * Exposes the DispatcherServlet-specific request attributes and delegates to {@link #doDispatch}
+	 * for the actual dispatching.
+	 */
+	@Override
+	protected void doService(HttpServletRequest request, HttpServletResponse response) throws Exception {
+<span class="fc" id="L910">		logRequest(request);</span>
+
+		// Keep a snapshot of the request attributes in case of an include,
+		// to be able to restore the original attributes after the include.
+<span class="fc" id="L914">		Map&lt;String, Object&gt; attributesSnapshot = null;</span>
+<span class="fc bfc" id="L915" title="All 2 branches covered.">		if (WebUtils.isIncludeRequest(request)) {</span>
+<span class="fc" id="L916">			attributesSnapshot = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L917">			Enumeration&lt;?&gt; attrNames = request.getAttributeNames();</span>
+<span class="fc bfc" id="L918" title="All 2 branches covered.">			while (attrNames.hasMoreElements()) {</span>
+<span class="fc" id="L919">				String attrName = (String) attrNames.nextElement();</span>
+<span class="fc bfc" id="L920" title="All 4 branches covered.">				if (this.cleanupAfterInclude || attrName.startsWith(DEFAULT_STRATEGIES_PREFIX)) {</span>
+<span class="fc" id="L921">					attributesSnapshot.put(attrName, request.getAttribute(attrName));</span>
+				}
+<span class="fc" id="L923">			}</span>
+		}
+
+		// Make framework objects available to handlers and view objects.
+<span class="fc" id="L927">		request.setAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE, getWebApplicationContext());</span>
+<span class="fc" id="L928">		request.setAttribute(LOCALE_RESOLVER_ATTRIBUTE, this.localeResolver);</span>
+<span class="fc" id="L929">		request.setAttribute(THEME_RESOLVER_ATTRIBUTE, this.themeResolver);</span>
+<span class="fc" id="L930">		request.setAttribute(THEME_SOURCE_ATTRIBUTE, getThemeSource());</span>
+
+<span class="pc bpc" id="L932" title="1 of 2 branches missed.">		if (this.flashMapManager != null) {</span>
+<span class="fc" id="L933">			FlashMap inputFlashMap = this.flashMapManager.retrieveAndUpdate(request, response);</span>
+<span class="fc bfc" id="L934" title="All 2 branches covered.">			if (inputFlashMap != null) {</span>
+<span class="fc" id="L935">				request.setAttribute(INPUT_FLASH_MAP_ATTRIBUTE, Collections.unmodifiableMap(inputFlashMap));</span>
+			}
+<span class="fc" id="L937">			request.setAttribute(OUTPUT_FLASH_MAP_ATTRIBUTE, new FlashMap());</span>
+<span class="fc" id="L938">			request.setAttribute(FLASH_MAP_MANAGER_ATTRIBUTE, this.flashMapManager);</span>
+		}
+
+		try {
+<span class="fc" id="L942">			doDispatch(request, response);</span>
+		}
+		finally {
+<span class="pc bpc" id="L945" title="1 of 2 branches missed.">			if (!WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {</span>
+				// Restore the original attribute snapshot, in case of an include.
+<span class="fc bfc" id="L947" title="All 2 branches covered.">				if (attributesSnapshot != null) {</span>
+<span class="fc" id="L948">					restoreAttributesAfterInclude(request, attributesSnapshot);</span>
+				}
+			}
+		}
+<span class="fc" id="L952">	}</span>
+
+	private void logRequest(HttpServletRequest request) {
+<span class="fc" id="L955">		LogFormatUtils.traceDebug(logger, traceOn -&gt; {</span>
+			String params;
+<span class="nc bnc" id="L957" title="All 2 branches missed.">			if (isEnableLoggingRequestDetails()) {</span>
+<span class="nc" id="L958">				params = request.getParameterMap().entrySet().stream()</span>
+<span class="nc" id="L959">						.map(entry -&gt; entry.getKey() + &quot;:&quot; + Arrays.toString(entry.getValue()))</span>
+<span class="nc" id="L960">						.collect(Collectors.joining(&quot;, &quot;));</span>
+			}
+			else {
+<span class="nc bnc" id="L963" title="All 2 branches missed.">				params = (request.getParameterMap().isEmpty() ? &quot;&quot; : &quot;masked&quot;);</span>
+			}
+
+<span class="nc bnc" id="L966" title="All 2 branches missed.">			String query = StringUtils.isEmpty(request.getQueryString()) ? &quot;&quot; : &quot;?&quot; + request.getQueryString();</span>
+<span class="nc bnc" id="L967" title="All 2 branches missed.">			String dispatchType = (!request.getDispatcherType().equals(DispatcherType.REQUEST) ?</span>
+<span class="nc" id="L968">					&quot;\&quot;&quot; + request.getDispatcherType().name() + &quot;\&quot; dispatch for &quot; : &quot;&quot;);</span>
+<span class="nc" id="L969">			String message = (dispatchType + request.getMethod() + &quot; \&quot;&quot; + getRequestUri(request) +</span>
+					query + &quot;\&quot;, parameters={&quot; + params + &quot;}&quot;);
+
+<span class="nc bnc" id="L972" title="All 2 branches missed.">			if (traceOn) {</span>
+<span class="nc" id="L973">				List&lt;String&gt; values = Collections.list(request.getHeaderNames());</span>
+<span class="nc bnc" id="L974" title="All 2 branches missed.">				String headers = values.size() &gt; 0 ? &quot;masked&quot; : &quot;&quot;;</span>
+<span class="nc bnc" id="L975" title="All 2 branches missed.">				if (isEnableLoggingRequestDetails()) {</span>
+<span class="nc" id="L976">					headers = values.stream().map(name -&gt; name + &quot;:&quot; + Collections.list(request.getHeaders(name)))</span>
+<span class="nc" id="L977">							.collect(Collectors.joining(&quot;, &quot;));</span>
+				}
+<span class="nc" id="L979">				return message + &quot;, headers={&quot; + headers + &quot;} in DispatcherServlet '&quot; + getServletName() + &quot;'&quot;;</span>
+			}
+			else {
+<span class="nc" id="L982">				return message;</span>
+			}
+		});
+<span class="fc" id="L985">	}</span>
+
+	/**
+	 * Process the actual dispatching to the handler.
+	 * &lt;p&gt;The handler will be obtained by applying the servlet's HandlerMappings in order.
+	 * The HandlerAdapter will be obtained by querying the servlet's installed HandlerAdapters
+	 * to find the first that supports the handler class.
+	 * &lt;p&gt;All HTTP methods are handled by this method. It's up to HandlerAdapters or handlers
+	 * themselves to decide which methods are acceptable.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @throws Exception in case of any kind of processing failure
+	 */
+	protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
+<span class="fc" id="L999">		HttpServletRequest processedRequest = request;</span>
+<span class="fc" id="L1000">		HandlerExecutionChain mappedHandler = null;</span>
+<span class="fc" id="L1001">		boolean multipartRequestParsed = false;</span>
+
+<span class="fc" id="L1003">		WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);</span>
+
+		try {
+<span class="fc" id="L1006">			ModelAndView mv = null;</span>
+<span class="fc" id="L1007">			Exception dispatchException = null;</span>
+
+			try {
+<span class="fc" id="L1010">				processedRequest = checkMultipart(request);</span>
+<span class="fc bfc" id="L1011" title="All 2 branches covered.">				multipartRequestParsed = (processedRequest != request);</span>
+
+				// Determine handler for the current request.
+<span class="fc" id="L1014">				mappedHandler = getHandler(processedRequest);</span>
+<span class="fc bfc" id="L1015" title="All 2 branches covered.">				if (mappedHandler == null) {</span>
+<span class="fc" id="L1016">					noHandlerFound(processedRequest, response);</span>
+<span class="fc" id="L1017">					return;</span>
+				}
+
+				// Determine handler adapter for the current request.
+<span class="fc" id="L1021">				HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());</span>
+
+				// Process last-modified header, if supported by the handler.
+<span class="fc" id="L1024">				String method = request.getMethod();</span>
+<span class="fc" id="L1025">				boolean isGet = &quot;GET&quot;.equals(method);</span>
+<span class="fc bfc" id="L1026" title="All 4 branches covered.">				if (isGet || &quot;HEAD&quot;.equals(method)) {</span>
+<span class="fc" id="L1027">					long lastModified = ha.getLastModified(request, mappedHandler.getHandler());</span>
+<span class="pc bpc" id="L1028" title="3 of 4 branches missed.">					if (new ServletWebRequest(request, response).checkNotModified(lastModified) &amp;&amp; isGet) {</span>
+<span class="nc" id="L1029">						return;</span>
+					}
+				}
+
+<span class="fc bfc" id="L1033" title="All 2 branches covered.">				if (!mappedHandler.applyPreHandle(processedRequest, response)) {</span>
+<span class="fc" id="L1034">					return;</span>
+				}
+
+				// Actually invoke the handler.
+<span class="fc" id="L1038">				mv = ha.handle(processedRequest, response, mappedHandler.getHandler());</span>
+
+<span class="pc bpc" id="L1040" title="1 of 2 branches missed.">				if (asyncManager.isConcurrentHandlingStarted()) {</span>
+<span class="nc" id="L1041">					return;</span>
+				}
+
+<span class="fc" id="L1044">				applyDefaultViewName(processedRequest, mv);</span>
+<span class="fc" id="L1045">				mappedHandler.applyPostHandle(processedRequest, response, mv);</span>
+			}
+<span class="fc" id="L1047">			catch (Exception ex) {</span>
+<span class="fc" id="L1048">				dispatchException = ex;</span>
+			}
+<span class="fc" id="L1050">			catch (Throwable err) {</span>
+				// As of 4.3, we're processing Errors thrown from handler methods as well,
+				// making them available for @ExceptionHandler methods and other scenarios.
+<span class="fc" id="L1053">				dispatchException = new NestedServletException(&quot;Handler dispatch failed&quot;, err);</span>
+<span class="fc" id="L1054">			}</span>
+<span class="fc" id="L1055">			processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);</span>
+		}
+<span class="fc" id="L1057">		catch (Exception ex) {</span>
+<span class="nc" id="L1058">			triggerAfterCompletion(processedRequest, response, mappedHandler, ex);</span>
+		}
+<span class="nc" id="L1060">		catch (Throwable err) {</span>
+<span class="nc" id="L1061">			triggerAfterCompletion(processedRequest, response, mappedHandler,</span>
+					new NestedServletException(&quot;Handler processing failed&quot;, err));
+		}
+		finally {
+<span class="pc bpc" id="L1065" title="1 of 2 branches missed.">			if (asyncManager.isConcurrentHandlingStarted()) {</span>
+				// Instead of postHandle and afterCompletion
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">				if (mappedHandler != null) {</span>
+<span class="nc" id="L1068">					mappedHandler.applyAfterConcurrentHandlingStarted(processedRequest, response);</span>
+				}
+			}
+			else {
+				// Clean up any resources used by a multipart request.
+<span class="fc bfc" id="L1073" title="All 2 branches covered.">				if (multipartRequestParsed) {</span>
+<span class="fc" id="L1074">					cleanupMultipart(processedRequest);</span>
+				}
+			}
+		}
+<span class="fc" id="L1078">	}</span>
+
+	/**
+	 * Do we need view name translation?
+	 */
+	private void applyDefaultViewName(HttpServletRequest request, @Nullable ModelAndView mv) throws Exception {
+<span class="fc bfc" id="L1084" title="All 4 branches covered.">		if (mv != null &amp;&amp; !mv.hasView()) {</span>
+<span class="fc" id="L1085">			String defaultViewName = getDefaultViewName(request);</span>
+<span class="pc bpc" id="L1086" title="1 of 2 branches missed.">			if (defaultViewName != null) {</span>
+<span class="fc" id="L1087">				mv.setViewName(defaultViewName);</span>
+			}
+		}
+<span class="fc" id="L1090">	}</span>
+
+	/**
+	 * Handle the result of handler selection and handler invocation, which is
+	 * either a ModelAndView or an Exception to be resolved to a ModelAndView.
+	 */
+	private void processDispatchResult(HttpServletRequest request, HttpServletResponse response,
+			@Nullable HandlerExecutionChain mappedHandler, @Nullable ModelAndView mv,
+			@Nullable Exception exception) throws Exception {
+
+<span class="fc" id="L1100">		boolean errorView = false;</span>
+
+<span class="fc bfc" id="L1102" title="All 2 branches covered.">		if (exception != null) {</span>
+<span class="fc bfc" id="L1103" title="All 2 branches covered.">			if (exception instanceof ModelAndViewDefiningException) {</span>
+<span class="fc" id="L1104">				logger.debug(&quot;ModelAndViewDefiningException encountered&quot;, exception);</span>
+<span class="fc" id="L1105">				mv = ((ModelAndViewDefiningException) exception).getModelAndView();</span>
+			}
+			else {
+<span class="fc bfc" id="L1108" title="All 2 branches covered.">				Object handler = (mappedHandler != null ? mappedHandler.getHandler() : null);</span>
+<span class="fc" id="L1109">				mv = processHandlerException(request, response, handler, exception);</span>
+<span class="fc bfc" id="L1110" title="All 2 branches covered.">				errorView = (mv != null);</span>
+			}
+		}
+
+		// Did the handler return a view to render?
+<span class="fc bfc" id="L1115" title="All 4 branches covered.">		if (mv != null &amp;&amp; !mv.wasCleared()) {</span>
+<span class="fc" id="L1116">			render(mv, request, response);</span>
+<span class="fc bfc" id="L1117" title="All 2 branches covered.">			if (errorView) {</span>
+<span class="fc" id="L1118">				WebUtils.clearErrorRequestAttributes(request);</span>
+			}
+		}
+		else {
+<span class="pc bpc" id="L1122" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1123">				logger.trace(&quot;No view rendering, null ModelAndView returned.&quot;);</span>
+			}
+		}
+
+<span class="pc bpc" id="L1127" title="1 of 2 branches missed.">		if (WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {</span>
+			// Concurrent handling started during a forward
+<span class="nc" id="L1129">			return;</span>
+		}
+
+<span class="fc bfc" id="L1132" title="All 2 branches covered.">		if (mappedHandler != null) {</span>
+<span class="fc" id="L1133">			mappedHandler.triggerAfterCompletion(request, response, null);</span>
+		}
+<span class="fc" id="L1135">	}</span>
+
+	/**
+	 * Build a LocaleContext for the given request, exposing the request's primary locale as current locale.
+	 * &lt;p&gt;The default implementation uses the dispatcher's LocaleResolver to obtain the current locale,
+	 * which might change during a request.
+	 * @param request current HTTP request
+	 * @return the corresponding LocaleContext
+	 */
+	@Override
+	protected LocaleContext buildLocaleContext(final HttpServletRequest request) {
+<span class="fc" id="L1146">		LocaleResolver lr = this.localeResolver;</span>
+<span class="fc bfc" id="L1147" title="All 2 branches covered.">		if (lr instanceof LocaleContextResolver) {</span>
+<span class="fc" id="L1148">			return ((LocaleContextResolver) lr).resolveLocaleContext(request);</span>
+		}
+		else {
+<span class="pc bpc" id="L1151" title="1 of 2 branches missed.">			return () -&gt; (lr != null ? lr.resolveLocale(request) : request.getLocale());</span>
+		}
+	}
+
+	/**
+	 * Convert the request into a multipart request, and make multipart resolver available.
+	 * &lt;p&gt;If no multipart resolver is set, simply use the existing request.
+	 * @param request current HTTP request
+	 * @return the processed request (multipart wrapper if necessary)
+	 * @see MultipartResolver#resolveMultipart
+	 */
+	protected HttpServletRequest checkMultipart(HttpServletRequest request) throws MultipartException {
+<span class="pc bpc" id="L1163" title="1 of 4 branches missed.">		if (this.multipartResolver != null &amp;&amp; this.multipartResolver.isMultipart(request)) {</span>
+<span class="fc bfc" id="L1164" title="All 2 branches covered.">			if (WebUtils.getNativeRequest(request, MultipartHttpServletRequest.class) != null) {</span>
+<span class="pc bpc" id="L1165" title="1 of 2 branches missed.">				if (request.getDispatcherType().equals(DispatcherType.REQUEST)) {</span>
+<span class="fc" id="L1166">					logger.trace(&quot;Request already resolved to MultipartHttpServletRequest, e.g. by MultipartFilter&quot;);</span>
+				}
+			}
+<span class="pc bpc" id="L1169" title="1 of 2 branches missed.">			else if (hasMultipartException(request)) {</span>
+<span class="nc" id="L1170">				logger.debug(&quot;Multipart resolution previously failed for current request - &quot; +</span>
+						&quot;skipping re-resolution for undisturbed error rendering&quot;);
+			}
+			else {
+				try {
+<span class="fc" id="L1175">					return this.multipartResolver.resolveMultipart(request);</span>
+				}
+<span class="fc" id="L1177">				catch (MultipartException ex) {</span>
+<span class="pc bpc" id="L1178" title="1 of 2 branches missed.">					if (request.getAttribute(WebUtils.ERROR_EXCEPTION_ATTRIBUTE) != null) {</span>
+<span class="nc" id="L1179">						logger.debug(&quot;Multipart resolution failed for error dispatch&quot;, ex);</span>
+						// Keep processing error dispatch with regular request handle below
+					}
+					else {
+<span class="fc" id="L1183">						throw ex;</span>
+					}
+				}
+			}
+		}
+		// If not returned before: return original request.
+<span class="fc" id="L1189">		return request;</span>
+	}
+
+	/**
+	 * Check &quot;javax.servlet.error.exception&quot; attribute for a multipart exception.
+	 */
+	private boolean hasMultipartException(HttpServletRequest request) {
+<span class="fc" id="L1196">		Throwable error = (Throwable) request.getAttribute(WebUtils.ERROR_EXCEPTION_ATTRIBUTE);</span>
+<span class="pc bpc" id="L1197" title="1 of 2 branches missed.">		while (error != null) {</span>
+<span class="nc bnc" id="L1198" title="All 2 branches missed.">			if (error instanceof MultipartException) {</span>
+<span class="nc" id="L1199">				return true;</span>
+			}
+<span class="nc" id="L1201">			error = error.getCause();</span>
+		}
+<span class="fc" id="L1203">		return false;</span>
+	}
+
+	/**
+	 * Clean up any resources used by the given multipart request (if any).
+	 * @param request current HTTP request
+	 * @see MultipartResolver#cleanupMultipart
+	 */
+	protected void cleanupMultipart(HttpServletRequest request) {
+<span class="pc bpc" id="L1212" title="1 of 2 branches missed.">		if (this.multipartResolver != null) {</span>
+<span class="fc" id="L1213">			MultipartHttpServletRequest multipartRequest =</span>
+<span class="fc" id="L1214">					WebUtils.getNativeRequest(request, MultipartHttpServletRequest.class);</span>
+<span class="pc bpc" id="L1215" title="1 of 2 branches missed.">			if (multipartRequest != null) {</span>
+<span class="fc" id="L1216">				this.multipartResolver.cleanupMultipart(multipartRequest);</span>
+			}
+		}
+<span class="fc" id="L1219">	}</span>
+
+	/**
+	 * Return the HandlerExecutionChain for this request.
+	 * &lt;p&gt;Tries all handler mappings in order.
+	 * @param request current HTTP request
+	 * @return the HandlerExecutionChain, or {@code null} if no handler could be found
+	 */
+	@Nullable
+	protected HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
+<span class="pc bpc" id="L1229" title="1 of 2 branches missed.">		if (this.handlerMappings != null) {</span>
+<span class="fc bfc" id="L1230" title="All 2 branches covered.">			for (HandlerMapping mapping : this.handlerMappings) {</span>
+<span class="fc" id="L1231">				HandlerExecutionChain handler = mapping.getHandler(request);</span>
+<span class="fc bfc" id="L1232" title="All 2 branches covered.">				if (handler != null) {</span>
+<span class="fc" id="L1233">					return handler;</span>
+				}
+<span class="fc" id="L1235">			}</span>
+		}
+<span class="fc" id="L1237">		return null;</span>
+	}
+
+	/**
+	 * No handler found -&gt; set appropriate HTTP response status.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @throws Exception if preparing the response failed
+	 */
+	protected void noHandlerFound(HttpServletRequest request, HttpServletResponse response) throws Exception {
+<span class="pc bpc" id="L1247" title="1 of 2 branches missed.">		if (pageNotFoundLogger.isWarnEnabled()) {</span>
+<span class="fc" id="L1248">			pageNotFoundLogger.warn(&quot;No mapping for &quot; + request.getMethod() + &quot; &quot; + getRequestUri(request));</span>
+		}
+<span class="fc bfc" id="L1250" title="All 2 branches covered.">		if (this.throwExceptionIfNoHandlerFound) {</span>
+<span class="fc" id="L1251">			throw new NoHandlerFoundException(request.getMethod(), getRequestUri(request),</span>
+<span class="fc" id="L1252">					new ServletServerHttpRequest(request).getHeaders());</span>
+		}
+		else {
+<span class="fc" id="L1255">			response.sendError(HttpServletResponse.SC_NOT_FOUND);</span>
+		}
+<span class="fc" id="L1257">	}</span>
+
+	/**
+	 * Return the HandlerAdapter for this handler object.
+	 * @param handler the handler object to find an adapter for
+	 * @throws ServletException if no HandlerAdapter can be found for the handler. This is a fatal error.
+	 */
+	protected HandlerAdapter getHandlerAdapter(Object handler) throws ServletException {
+<span class="pc bpc" id="L1265" title="1 of 2 branches missed.">		if (this.handlerAdapters != null) {</span>
+<span class="fc bfc" id="L1266" title="All 2 branches covered.">			for (HandlerAdapter adapter : this.handlerAdapters) {</span>
+<span class="fc bfc" id="L1267" title="All 2 branches covered.">				if (adapter.supports(handler)) {</span>
+<span class="fc" id="L1268">					return adapter;</span>
+				}
+<span class="fc" id="L1270">			}</span>
+		}
+<span class="fc" id="L1272">		throw new ServletException(&quot;No adapter for handler [&quot; + handler +</span>
+				&quot;]: The DispatcherServlet configuration needs to include a HandlerAdapter that supports this handler&quot;);
+	}
+
+	/**
+	 * Determine an error ModelAndView via the registered HandlerExceptionResolvers.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @param handler the executed handler, or {@code null} if none chosen at the time of the exception
+	 * (for example, if multipart resolution failed)
+	 * @param ex the exception that got thrown during handler execution
+	 * @return a corresponding ModelAndView to forward to
+	 * @throws Exception if no error ModelAndView found
+	 */
+	@Nullable
+	protected ModelAndView processHandlerException(HttpServletRequest request, HttpServletResponse response,
+			@Nullable Object handler, Exception ex) throws Exception {
+
+		// Success and error responses may use different content types
+<span class="fc" id="L1291">		request.removeAttribute(HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE);</span>
+
+		// Check registered HandlerExceptionResolvers...
+<span class="fc" id="L1294">		ModelAndView exMv = null;</span>
+<span class="pc bpc" id="L1295" title="1 of 2 branches missed.">		if (this.handlerExceptionResolvers != null) {</span>
+<span class="fc bfc" id="L1296" title="All 2 branches covered.">			for (HandlerExceptionResolver resolver : this.handlerExceptionResolvers) {</span>
+<span class="fc" id="L1297">				exMv = resolver.resolveException(request, response, handler, ex);</span>
+<span class="fc bfc" id="L1298" title="All 2 branches covered.">				if (exMv != null) {</span>
+<span class="fc" id="L1299">					break;</span>
+				}
+<span class="fc" id="L1301">			}</span>
+		}
+<span class="fc bfc" id="L1303" title="All 2 branches covered.">		if (exMv != null) {</span>
+<span class="fc bfc" id="L1304" title="All 2 branches covered.">			if (exMv.isEmpty()) {</span>
+<span class="fc" id="L1305">				request.setAttribute(EXCEPTION_ATTRIBUTE, ex);</span>
+<span class="fc" id="L1306">				return null;</span>
+			}
+			// We might still need view name translation for a plain error model...
+<span class="pc bpc" id="L1309" title="1 of 2 branches missed.">			if (!exMv.hasView()) {</span>
+<span class="nc" id="L1310">				String defaultViewName = getDefaultViewName(request);</span>
+<span class="nc bnc" id="L1311" title="All 2 branches missed.">				if (defaultViewName != null) {</span>
+<span class="nc" id="L1312">					exMv.setViewName(defaultViewName);</span>
+				}
+			}
+<span class="pc bpc" id="L1315" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1316">				logger.trace(&quot;Using resolved error view: &quot; + exMv, ex);</span>
+			}
+<span class="pc bpc" id="L1318" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1319">				logger.debug(&quot;Using resolved error view: &quot; + exMv);</span>
+			}
+<span class="fc" id="L1321">			WebUtils.exposeErrorRequestAttributes(request, ex, getServletName());</span>
+<span class="fc" id="L1322">			return exMv;</span>
+		}
+
+<span class="fc" id="L1325">		throw ex;</span>
+	}
+
+	/**
+	 * Render the given ModelAndView.
+	 * &lt;p&gt;This is the last stage in handling a request. It may involve resolving the view by name.
+	 * @param mv the ModelAndView to render
+	 * @param request current HTTP servlet request
+	 * @param response current HTTP servlet response
+	 * @throws ServletException if view is missing or cannot be resolved
+	 * @throws Exception if there's a problem rendering the view
+	 */
+	protected void render(ModelAndView mv, HttpServletRequest request, HttpServletResponse response) throws Exception {
+		// Determine locale for request and apply it to the response.
+<span class="pc bpc" id="L1339" title="1 of 2 branches missed.">		Locale locale =</span>
+<span class="pc" id="L1340">				(this.localeResolver != null ? this.localeResolver.resolveLocale(request) : request.getLocale());</span>
+<span class="fc" id="L1341">		response.setLocale(locale);</span>
+
+		View view;
+<span class="fc" id="L1344">		String viewName = mv.getViewName();</span>
+<span class="fc bfc" id="L1345" title="All 2 branches covered.">		if (viewName != null) {</span>
+			// We need to resolve the view name.
+<span class="fc" id="L1347">			view = resolveViewName(viewName, mv.getModelInternal(), locale, request);</span>
+<span class="fc bfc" id="L1348" title="All 2 branches covered.">			if (view == null) {</span>
+<span class="fc" id="L1349">				throw new ServletException(&quot;Could not resolve view with name '&quot; + mv.getViewName() +</span>
+<span class="fc" id="L1350">						&quot;' in servlet with name '&quot; + getServletName() + &quot;'&quot;);</span>
+			}
+		}
+		else {
+			// No need to lookup: the ModelAndView object contains the actual View object.
+<span class="fc" id="L1355">			view = mv.getView();</span>
+<span class="pc bpc" id="L1356" title="1 of 2 branches missed.">			if (view == null) {</span>
+<span class="nc" id="L1357">				throw new ServletException(&quot;ModelAndView [&quot; + mv + &quot;] neither contains a view name nor a &quot; +</span>
+<span class="nc" id="L1358">						&quot;View object in servlet with name '&quot; + getServletName() + &quot;'&quot;);</span>
+			}
+		}
+
+		// Delegate to the View object for rendering.
+<span class="pc bpc" id="L1363" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1364">			logger.trace(&quot;Rendering view [&quot; + view + &quot;] &quot;);</span>
+		}
+		try {
+<span class="fc bfc" id="L1367" title="All 2 branches covered.">			if (mv.getStatus() != null) {</span>
+<span class="fc" id="L1368">				response.setStatus(mv.getStatus().value());</span>
+			}
+<span class="fc" id="L1370">			view.render(mv.getModelInternal(), request, response);</span>
+		}
+<span class="fc" id="L1372">		catch (Exception ex) {</span>
+<span class="pc bpc" id="L1373" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1374">				logger.debug(&quot;Error rendering view [&quot; + view + &quot;]&quot;, ex);</span>
+			}
+<span class="fc" id="L1376">			throw ex;</span>
+<span class="fc" id="L1377">		}</span>
+<span class="fc" id="L1378">	}</span>
+
+	/**
+	 * Translate the supplied request into a default view name.
+	 * @param request current HTTP servlet request
+	 * @return the view name (or {@code null} if no default found)
+	 * @throws Exception if view name translation failed
+	 */
+	@Nullable
+	protected String getDefaultViewName(HttpServletRequest request) throws Exception {
+<span class="pc bpc" id="L1388" title="1 of 2 branches missed.">		return (this.viewNameTranslator != null ? this.viewNameTranslator.getViewName(request) : null);</span>
+	}
+
+	/**
+	 * Resolve the given view name into a View object (to be rendered).
+	 * &lt;p&gt;The default implementations asks all ViewResolvers of this dispatcher.
+	 * Can be overridden for custom resolution strategies, potentially based on
+	 * specific model attributes or request parameters.
+	 * @param viewName the name of the view to resolve
+	 * @param model the model to be passed to the view
+	 * @param locale the current locale
+	 * @param request current HTTP servlet request
+	 * @return the View object, or {@code null} if none found
+	 * @throws Exception if the view cannot be resolved
+	 * (typically in case of problems creating an actual View object)
+	 * @see ViewResolver#resolveViewName
+	 */
+	@Nullable
+	protected View resolveViewName(String viewName, @Nullable Map&lt;String, Object&gt; model,
+			Locale locale, HttpServletRequest request) throws Exception {
+
+<span class="pc bpc" id="L1409" title="1 of 2 branches missed.">		if (this.viewResolvers != null) {</span>
+<span class="fc bfc" id="L1410" title="All 2 branches covered.">			for (ViewResolver viewResolver : this.viewResolvers) {</span>
+<span class="fc" id="L1411">				View view = viewResolver.resolveViewName(viewName, locale);</span>
+<span class="fc bfc" id="L1412" title="All 2 branches covered.">				if (view != null) {</span>
+<span class="fc" id="L1413">					return view;</span>
+				}
+<span class="fc" id="L1415">			}</span>
+		}
+<span class="fc" id="L1417">		return null;</span>
+	}
+
+	private void triggerAfterCompletion(HttpServletRequest request, HttpServletResponse response,
+			@Nullable HandlerExecutionChain mappedHandler, Exception ex) throws Exception {
+
+<span class="pc bpc" id="L1423" title="1 of 2 branches missed.">		if (mappedHandler != null) {</span>
+<span class="fc" id="L1424">			mappedHandler.triggerAfterCompletion(request, response, ex);</span>
+		}
+<span class="fc" id="L1426">		throw ex;</span>
+	}
+
+	/**
+	 * Restore the request attributes after an include.
+	 * @param request current HTTP request
+	 * @param attributesSnapshot the snapshot of the request attributes before the include
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private void restoreAttributesAfterInclude(HttpServletRequest request, Map&lt;?, ?&gt; attributesSnapshot) {
+		// Need to copy into separate Collection here, to avoid side effects
+		// on the Enumeration when removing attributes.
+<span class="fc" id="L1438">		Set&lt;String&gt; attrsToCheck = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L1439">		Enumeration&lt;?&gt; attrNames = request.getAttributeNames();</span>
+<span class="fc bfc" id="L1440" title="All 2 branches covered.">		while (attrNames.hasMoreElements()) {</span>
+<span class="fc" id="L1441">			String attrName = (String) attrNames.nextElement();</span>
+<span class="fc bfc" id="L1442" title="All 4 branches covered.">			if (this.cleanupAfterInclude || attrName.startsWith(DEFAULT_STRATEGIES_PREFIX)) {</span>
+<span class="fc" id="L1443">				attrsToCheck.add(attrName);</span>
+			}
+<span class="fc" id="L1445">		}</span>
+
+		// Add attributes that may have been removed
+<span class="fc" id="L1448">		attrsToCheck.addAll((Set&lt;String&gt;) attributesSnapshot.keySet());</span>
+
+		// Iterate over the attributes to check, restoring the original value
+		// or removing the attribute, respectively, if appropriate.
+<span class="fc bfc" id="L1452" title="All 2 branches covered.">		for (String attrName : attrsToCheck) {</span>
+<span class="fc" id="L1453">			Object attrValue = attributesSnapshot.get(attrName);</span>
+<span class="fc bfc" id="L1454" title="All 2 branches covered.">			if (attrValue == null) {</span>
+<span class="fc" id="L1455">				request.removeAttribute(attrName);</span>
+			}
+<span class="fc bfc" id="L1457" title="All 2 branches covered.">			else if (attrValue != request.getAttribute(attrName)) {</span>
+<span class="fc" id="L1458">				request.setAttribute(attrName, attrValue);</span>
+			}
+<span class="fc" id="L1460">		}</span>
+<span class="fc" id="L1461">	}</span>
+
+	private static String getRequestUri(HttpServletRequest request) {
+<span class="fc" id="L1464">		String uri = (String) request.getAttribute(WebUtils.INCLUDE_REQUEST_URI_ATTRIBUTE);</span>
+<span class="fc bfc" id="L1465" title="All 2 branches covered.">		if (uri == null) {</span>
+<span class="fc" id="L1466">			uri = request.getRequestURI();</span>
+		}
+<span class="fc" id="L1468">		return uri;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

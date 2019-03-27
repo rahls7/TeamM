@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StompDecoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.stomp</a> &gt; <span class="el_source">StompDecoder.java</span></div><h1>StompDecoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.stomp;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.Buffer;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.commons.logging.Log;
+
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.simp.SimpLogging;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderInitializer;
+import org.springframework.messaging.support.NativeMessageHeaderAccessor;
+import org.springframework.util.InvalidMimeTypeException;
+import org.springframework.util.MultiValueMap;
+
+/**
+ * Decodes one or more STOMP frames contained in a {@link ByteBuffer}.
+ *
+ * &lt;p&gt;An attempt is made to read all complete STOMP frames from the buffer, which
+ * could be zero, one, or more. If there is any left-over content, i.e. an incomplete
+ * STOMP frame, at the end the buffer is reset to point to the beginning of the
+ * partial content. The caller is then responsible for dealing with that
+ * incomplete content by buffering until there is more input available.
+ *
+ * @author Andy Wilkinson
+ * @author Rossen Stoyanchev
+ * @since 4.0
+ */
+<span class="fc" id="L50">public class StompDecoder {</span>
+
+<span class="fc" id="L52">	static final byte[] HEARTBEAT_PAYLOAD = new byte[] {'\n'};</span>
+
+<span class="fc" id="L54">	private static final Log logger = SimpLogging.forLogName(StompDecoder.class);</span>
+
+	@Nullable
+	private MessageHeaderInitializer headerInitializer;
+
+
+	/**
+	 * Configure a {@link MessageHeaderInitializer} to apply to the headers of
+	 * {@link Message Messages} from decoded STOMP frames.
+	 */
+	public void setHeaderInitializer(@Nullable MessageHeaderInitializer headerInitializer) {
+<span class="nc" id="L65">		this.headerInitializer = headerInitializer;</span>
+<span class="nc" id="L66">	}</span>
+
+	/**
+	 * Return the configured {@code MessageHeaderInitializer}, if any.
+	 */
+	@Nullable
+	public MessageHeaderInitializer getHeaderInitializer() {
+<span class="fc" id="L73">		return this.headerInitializer;</span>
+	}
+
+
+	/**
+	 * Decodes one or more STOMP frames from the given {@code ByteBuffer} into a
+	 * list of {@link Message Messages}. If the input buffer contains partial STOMP frame
+	 * content, or additional content with a partial STOMP frame, the buffer is
+	 * reset and {@code null} is returned.
+	 * @param byteBuffer the buffer to decode the STOMP frame from
+	 * @return the decoded messages, or an empty list if none
+	 * @throws StompConversionException raised in case of decoding issues
+	 */
+	public List&lt;Message&lt;byte[]&gt;&gt; decode(ByteBuffer byteBuffer) {
+<span class="fc" id="L87">		return decode(byteBuffer, null);</span>
+	}
+
+	/**
+	 * Decodes one or more STOMP frames from the given {@code buffer} and returns
+	 * a list of {@link Message Messages}.
+	 * &lt;p&gt;If the given ByteBuffer contains only partial STOMP frame content and no
+	 * complete STOMP frames, an empty list is returned, and the buffer is reset to
+	 * to where it was.
+	 * &lt;p&gt;If the buffer contains one ore more STOMP frames, those are returned and
+	 * the buffer reset to point to the beginning of the unused partial content.
+	 * &lt;p&gt;The output partialMessageHeaders map is used to store successfully parsed
+	 * headers in case of partial content. The caller can then check if a
+	 * &quot;content-length&quot; header was read, which helps to determine how much more
+	 * content is needed before the next attempt to decode.
+	 * @param byteBuffer the buffer to decode the STOMP frame from
+	 * @param partialMessageHeaders an empty output map that will store the last
+	 * successfully parsed partialMessageHeaders in case of partial message content
+	 * in cases where the partial buffer ended with a partial STOMP frame
+	 * @return the decoded messages, or an empty list if none
+	 * @throws StompConversionException raised in case of decoding issues
+	 */
+	public List&lt;Message&lt;byte[]&gt;&gt; decode(ByteBuffer byteBuffer,
+			@Nullable MultiValueMap&lt;String, String&gt; partialMessageHeaders) {
+
+<span class="fc" id="L112">		List&lt;Message&lt;byte[]&gt;&gt; messages = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L113" title="All 2 branches covered.">		while (byteBuffer.hasRemaining()) {</span>
+<span class="fc" id="L114">			Message&lt;byte[]&gt; message = decodeMessage(byteBuffer, partialMessageHeaders);</span>
+<span class="fc bfc" id="L115" title="All 2 branches covered.">			if (message != null) {</span>
+<span class="fc" id="L116">				messages.add(message);</span>
+			}
+			else {
+				break;
+			}
+<span class="fc" id="L121">		}</span>
+<span class="fc" id="L122">		return messages;</span>
+	}
+
+	/**
+	 * Decode a single STOMP frame from the given {@code buffer} into a {@link Message}.
+	 */
+	@Nullable
+	private Message&lt;byte[]&gt; decodeMessage(ByteBuffer byteBuffer, @Nullable MultiValueMap&lt;String, String&gt; headers) {
+<span class="fc" id="L130">		Message&lt;byte[]&gt; decodedMessage = null;</span>
+<span class="fc" id="L131">		skipLeadingEol(byteBuffer);</span>
+
+		// Explicit mark/reset access via Buffer base type for compatibility
+		// with covariant return type on JDK 9's ByteBuffer...
+<span class="fc" id="L135">		Buffer buffer = byteBuffer;</span>
+<span class="fc" id="L136">		buffer.mark();</span>
+
+<span class="fc" id="L138">		String command = readCommand(byteBuffer);</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">		if (command.length() &gt; 0) {</span>
+<span class="fc" id="L140">			StompHeaderAccessor headerAccessor = null;</span>
+<span class="fc" id="L141">			byte[] payload = null;</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">			if (byteBuffer.remaining() &gt; 0) {</span>
+<span class="fc" id="L143">				StompCommand stompCommand = StompCommand.valueOf(command);</span>
+<span class="fc" id="L144">				headerAccessor = StompHeaderAccessor.create(stompCommand);</span>
+<span class="fc" id="L145">				initHeaders(headerAccessor);</span>
+<span class="fc" id="L146">				readHeaders(byteBuffer, headerAccessor);</span>
+<span class="fc" id="L147">				payload = readPayload(byteBuffer, headerAccessor);</span>
+			}
+<span class="fc bfc" id="L149" title="All 2 branches covered.">			if (payload != null) {</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">				if (payload.length &gt; 0) {</span>
+<span class="fc" id="L151">					StompCommand stompCommand = headerAccessor.getCommand();</span>
+<span class="pc bpc" id="L152" title="1 of 4 branches missed.">					if (stompCommand != null &amp;&amp; !stompCommand.isBodyAllowed()) {</span>
+<span class="fc" id="L153">						throw new StompConversionException(stompCommand +</span>
+								&quot; shouldn't have a payload: length=&quot; + payload.length + &quot;, headers=&quot; + headers);
+					}
+				}
+<span class="fc" id="L157">				headerAccessor.updateSimpMessageHeadersFromStompHeaders();</span>
+<span class="fc" id="L158">				headerAccessor.setLeaveMutable(true);</span>
+<span class="fc" id="L159">				decodedMessage = MessageBuilder.createMessage(payload, headerAccessor.getMessageHeaders());</span>
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L161">					logger.trace(&quot;Decoded &quot; + headerAccessor.getDetailedLogMessage(payload));</span>
+				}
+			}
+			else {
+<span class="fc" id="L165">				logger.trace(&quot;Incomplete frame, resetting input buffer...&quot;);</span>
+<span class="fc bfc" id="L166" title="All 4 branches covered.">				if (headers != null &amp;&amp; headerAccessor != null) {</span>
+<span class="fc" id="L167">					String name = NativeMessageHeaderAccessor.NATIVE_HEADERS;</span>
+					@SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L169">					MultiValueMap&lt;String, String&gt; map = (MultiValueMap&lt;String, String&gt;) headerAccessor.getHeader(name);</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">					if (map != null) {</span>
+<span class="fc" id="L171">						headers.putAll(map);</span>
+					}
+				}
+<span class="fc" id="L174">				buffer.reset();</span>
+			}
+<span class="fc" id="L176">		}</span>
+		else {
+<span class="fc" id="L178">			StompHeaderAccessor headerAccessor = StompHeaderAccessor.createForHeartbeat();</span>
+<span class="fc" id="L179">			initHeaders(headerAccessor);</span>
+<span class="fc" id="L180">			headerAccessor.setLeaveMutable(true);</span>
+<span class="fc" id="L181">			decodedMessage = MessageBuilder.createMessage(HEARTBEAT_PAYLOAD, headerAccessor.getMessageHeaders());</span>
+<span class="pc bpc" id="L182" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L183">				logger.trace(&quot;Decoded &quot; + headerAccessor.getDetailedLogMessage(null));</span>
+			}
+		}
+
+<span class="fc" id="L187">		return decodedMessage;</span>
+	}
+
+	private void initHeaders(StompHeaderAccessor headerAccessor) {
+<span class="fc" id="L191">		MessageHeaderInitializer initializer = getHeaderInitializer();</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">		if (initializer != null) {</span>
+<span class="nc" id="L193">			initializer.initHeaders(headerAccessor);</span>
+		}
+<span class="fc" id="L195">	}</span>
+
+	/**
+	 * Skip one ore more EOL characters at the start of the given ByteBuffer.
+	 * Those are STOMP heartbeat frames.
+	 */
+	protected void skipLeadingEol(ByteBuffer byteBuffer) {
+		while (true) {
+<span class="fc bfc" id="L203" title="All 2 branches covered.">			if (!tryConsumeEndOfLine(byteBuffer)) {</span>
+<span class="fc" id="L204">				break;</span>
+			}
+		}
+<span class="fc" id="L207">	}</span>
+
+	private String readCommand(ByteBuffer byteBuffer) {
+<span class="fc" id="L210">		ByteArrayOutputStream command = new ByteArrayOutputStream(256);</span>
+<span class="fc bfc" id="L211" title="All 4 branches covered.">		while (byteBuffer.remaining() &gt; 0 &amp;&amp; !tryConsumeEndOfLine(byteBuffer)) {</span>
+<span class="fc" id="L212">			command.write(byteBuffer.get());</span>
+		}
+<span class="fc" id="L214">		return new String(command.toByteArray(), StandardCharsets.UTF_8);</span>
+	}
+
+	private void readHeaders(ByteBuffer byteBuffer, StompHeaderAccessor headerAccessor) {
+		while (true) {
+<span class="fc" id="L219">			ByteArrayOutputStream headerStream = new ByteArrayOutputStream(256);</span>
+<span class="fc" id="L220">			boolean headerComplete = false;</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">			while (byteBuffer.hasRemaining()) {</span>
+<span class="fc bfc" id="L222" title="All 2 branches covered.">				if (tryConsumeEndOfLine(byteBuffer)) {</span>
+<span class="fc" id="L223">					headerComplete = true;</span>
+<span class="fc" id="L224">					break;</span>
+				}
+<span class="fc" id="L226">				headerStream.write(byteBuffer.get());</span>
+			}
+<span class="fc bfc" id="L228" title="All 4 branches covered.">			if (headerStream.size() &gt; 0 &amp;&amp; headerComplete) {</span>
+<span class="fc" id="L229">				String header = new String(headerStream.toByteArray(), StandardCharsets.UTF_8);</span>
+<span class="fc" id="L230">				int colonIndex = header.indexOf(':');</span>
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">				if (colonIndex &lt;= 0) {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">					if (byteBuffer.remaining() &gt; 0) {</span>
+<span class="nc" id="L233">						throw new StompConversionException(&quot;Illegal header: '&quot; + header +</span>
+								&quot;'. A header must be of the form &lt;name&gt;:[&lt;value&gt;].&quot;);
+					}
+				}
+				else {
+<span class="fc" id="L238">					String headerName = unescape(header.substring(0, colonIndex));</span>
+<span class="fc" id="L239">					String headerValue = unescape(header.substring(colonIndex + 1));</span>
+					try {
+<span class="fc" id="L241">						headerAccessor.addNativeHeader(headerName, headerValue);</span>
+					}
+<span class="nc" id="L243">					catch (InvalidMimeTypeException ex) {</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">						if (byteBuffer.remaining() &gt; 0) {</span>
+<span class="nc" id="L245">							throw ex;</span>
+						}
+<span class="fc" id="L247">					}</span>
+				}
+			}
+			else {
+				break;
+			}
+<span class="fc" id="L253">		}</span>
+<span class="fc" id="L254">	}</span>
+
+	/**
+	 * See STOMP Spec 1.2:
+	 * &lt;a href=&quot;https://stomp.github.io/stomp-specification-1.2.html#Value_Encoding&quot;&gt;&quot;Value Encoding&quot;&lt;/a&gt;.
+	 */
+	private String unescape(String inString) {
+<span class="fc" id="L261">		StringBuilder sb = new StringBuilder(inString.length());</span>
+<span class="fc" id="L262">		int pos = 0;  // position in the old string</span>
+<span class="fc" id="L263">		int index = inString.indexOf('\\');</span>
+
+<span class="fc bfc" id="L265" title="All 2 branches covered.">		while (index &gt;= 0) {</span>
+<span class="fc" id="L266">			sb.append(inString.substring(pos, index));</span>
+<span class="fc bfc" id="L267" title="All 2 branches covered.">			if (index + 1 &gt;= inString.length()) {</span>
+<span class="fc" id="L268">				throw new StompConversionException(&quot;Illegal escape sequence at index &quot; + index + &quot;: &quot; + inString);</span>
+			}
+<span class="fc" id="L270">			char c = inString.charAt(index + 1);</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">			if (c == 'r') {</span>
+<span class="fc" id="L272">				sb.append('\r');</span>
+			}
+<span class="fc bfc" id="L274" title="All 2 branches covered.">			else if (c == 'n') {</span>
+<span class="fc" id="L275">				sb.append('\n');</span>
+			}
+<span class="fc bfc" id="L277" title="All 2 branches covered.">			else if (c == 'c') {</span>
+<span class="fc" id="L278">				sb.append(':');</span>
+			}
+<span class="fc bfc" id="L280" title="All 2 branches covered.">			else if (c == '\\') {</span>
+<span class="fc" id="L281">				sb.append('\\');</span>
+			}
+			else {
+				// should never happen
+<span class="fc" id="L285">				throw new StompConversionException(&quot;Illegal escape sequence at index &quot; + index + &quot;: &quot; + inString);</span>
+			}
+<span class="fc" id="L287">			pos = index + 2;</span>
+<span class="fc" id="L288">			index = inString.indexOf('\\', pos);</span>
+<span class="fc" id="L289">		}</span>
+
+<span class="fc" id="L291">		sb.append(inString.substring(pos));</span>
+<span class="fc" id="L292">		return sb.toString();</span>
+	}
+
+	@Nullable
+	private byte[] readPayload(ByteBuffer byteBuffer, StompHeaderAccessor headerAccessor) {
+		Integer contentLength;
+		try {
+<span class="fc" id="L299">			contentLength = headerAccessor.getContentLength();</span>
+		}
+<span class="nc" id="L301">		catch (NumberFormatException ex) {</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L303">				logger.debug(&quot;Ignoring invalid content-length: '&quot; + headerAccessor);</span>
+			}
+<span class="nc" id="L305">			contentLength = null;</span>
+<span class="fc" id="L306">		}</span>
+
+<span class="fc bfc" id="L308" title="All 4 branches covered.">		if (contentLength != null &amp;&amp; contentLength &gt;= 0) {</span>
+<span class="fc bfc" id="L309" title="All 2 branches covered.">			if (byteBuffer.remaining() &gt; contentLength) {</span>
+<span class="fc" id="L310">				byte[] payload = new byte[contentLength];</span>
+<span class="fc" id="L311">				byteBuffer.get(payload);</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">				if (byteBuffer.get() != 0) {</span>
+<span class="fc" id="L313">					throw new StompConversionException(&quot;Frame must be terminated with a null octet&quot;);</span>
+				}
+<span class="fc" id="L315">				return payload;</span>
+			}
+			else {
+<span class="fc" id="L318">				return null;</span>
+			}
+		}
+		else {
+<span class="fc" id="L322">			ByteArrayOutputStream payload = new ByteArrayOutputStream(256);</span>
+<span class="fc bfc" id="L323" title="All 2 branches covered.">			while (byteBuffer.remaining() &gt; 0) {</span>
+<span class="fc" id="L324">				byte b = byteBuffer.get();</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">				if (b == 0) {</span>
+<span class="fc" id="L326">					return payload.toByteArray();</span>
+				}
+				else {
+<span class="fc" id="L329">					payload.write(b);</span>
+				}
+<span class="fc" id="L331">			}</span>
+		}
+<span class="fc" id="L333">		return null;</span>
+	}
+
+	/**
+	 * Try to read an EOL incrementing the buffer position if successful.
+	 * @return whether an EOL was consumed
+	 */
+	private boolean tryConsumeEndOfLine(ByteBuffer byteBuffer) {
+<span class="fc bfc" id="L341" title="All 2 branches covered.">		if (byteBuffer.remaining() &gt; 0) {</span>
+<span class="fc" id="L342">			byte b = byteBuffer.get();</span>
+<span class="fc bfc" id="L343" title="All 2 branches covered.">			if (b == '\n') {</span>
+<span class="fc" id="L344">				return true;</span>
+			}
+<span class="fc bfc" id="L346" title="All 2 branches covered.">			else if (b == '\r') {</span>
+<span class="pc bpc" id="L347" title="2 of 4 branches missed.">				if (byteBuffer.remaining() &gt; 0 &amp;&amp; byteBuffer.get() == '\n') {</span>
+<span class="fc" id="L348">					return true;</span>
+				}
+				else {
+<span class="nc" id="L351">					throw new StompConversionException(&quot;'\\r' must be followed by '\\n'&quot;);</span>
+				}
+			}
+			// Explicit cast for compatibility with covariant return type on JDK 9's ByteBuffer
+<span class="fc" id="L355">			((Buffer) byteBuffer).position(byteBuffer.position() - 1);</span>
+		}
+<span class="fc" id="L357">		return false;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

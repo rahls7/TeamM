@@ -1,0 +1,474 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WebAsyncManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.context.request.async</a> &gt; <span class="el_source">WebAsyncManager.java</span></div><h1>WebAsyncManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.context.request.async;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import javax.servlet.http.HttpServletRequest;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.core.task.SyncTaskExecutor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.async.DeferredResult.DeferredResultHandler;
+
+/**
+ * The central class for managing asynchronous request processing, mainly intended
+ * as an SPI and not typically used directly by application classes.
+ *
+ * &lt;p&gt;An async scenario starts with request processing as usual in a thread (T1).
+ * Concurrent request handling can be initiated by calling
+ * {@link #startCallableProcessing(Callable, Object...) startCallableProcessing} or
+ * {@link #startDeferredResultProcessing(DeferredResult, Object...) startDeferredResultProcessing},
+ * both of which produce a result in a separate thread (T2). The result is saved
+ * and the request dispatched to the container, to resume processing with the saved
+ * result in a third thread (T3). Within the dispatched thread (T3), the saved
+ * result can be accessed via {@link #getConcurrentResult()} or its presence
+ * detected via {@link #hasConcurrentResult()}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 3.2
+ * @see org.springframework.web.context.request.AsyncWebRequestInterceptor
+ * @see org.springframework.web.servlet.AsyncHandlerInterceptor
+ * @see org.springframework.web.filter.OncePerRequestFilter#shouldNotFilterAsyncDispatch
+ * @see org.springframework.web.filter.OncePerRequestFilter#isAsyncDispatch
+ */
+public final class WebAsyncManager {
+
+<span class="fc" id="L63">	private static final Object RESULT_NONE = new Object();</span>
+
+<span class="fc" id="L65">	private static final AsyncTaskExecutor DEFAULT_TASK_EXECUTOR =</span>
+<span class="fc" id="L66">			new SimpleAsyncTaskExecutor(WebAsyncManager.class.getSimpleName());</span>
+
+<span class="fc" id="L68">	private static final Log logger = LogFactory.getLog(WebAsyncManager.class);</span>
+
+<span class="fc" id="L70">	private static final CallableProcessingInterceptor timeoutCallableInterceptor =</span>
+			new TimeoutCallableProcessingInterceptor();
+
+<span class="fc" id="L73">	private static final DeferredResultProcessingInterceptor timeoutDeferredResultInterceptor =</span>
+			new TimeoutDeferredResultProcessingInterceptor();
+
+<span class="fc" id="L76">	private static Boolean taskExecutorWarning = true;</span>
+
+
+	private AsyncWebRequest asyncWebRequest;
+
+<span class="fc" id="L81">	private AsyncTaskExecutor taskExecutor = DEFAULT_TASK_EXECUTOR;</span>
+
+<span class="fc" id="L83">	private volatile Object concurrentResult = RESULT_NONE;</span>
+
+	private volatile Object[] concurrentResultContext;
+
+<span class="fc" id="L87">	private final Map&lt;Object, CallableProcessingInterceptor&gt; callableInterceptors = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L89">	private final Map&lt;Object, DeferredResultProcessingInterceptor&gt; deferredResultInterceptors = new LinkedHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Package-private constructor.
+	 * @see WebAsyncUtils#getAsyncManager(javax.servlet.ServletRequest)
+	 * @see WebAsyncUtils#getAsyncManager(org.springframework.web.context.request.WebRequest)
+	 */
+<span class="fc" id="L97">	WebAsyncManager() {</span>
+<span class="fc" id="L98">	}</span>
+
+
+	/**
+	 * Configure the {@link AsyncWebRequest} to use. This property may be set
+	 * more than once during a single request to accurately reflect the current
+	 * state of the request (e.g. following a forward, request/response
+	 * wrapping, etc). However, it should not be set while concurrent handling
+	 * is in progress, i.e. while {@link #isConcurrentHandlingStarted()} is
+	 * {@code true}.
+	 * @param asyncWebRequest the web request to use
+	 */
+	public void setAsyncWebRequest(AsyncWebRequest asyncWebRequest) {
+<span class="fc" id="L111">		Assert.notNull(asyncWebRequest, &quot;AsyncWebRequest must not be null&quot;);</span>
+<span class="fc" id="L112">		this.asyncWebRequest = asyncWebRequest;</span>
+<span class="fc" id="L113">		this.asyncWebRequest.addCompletionHandler(() -&gt; asyncWebRequest.removeAttribute(</span>
+				WebAsyncUtils.WEB_ASYNC_MANAGER_ATTRIBUTE, RequestAttributes.SCOPE_REQUEST));
+<span class="fc" id="L115">	}</span>
+
+	/**
+	 * Configure an AsyncTaskExecutor for use with concurrent processing via
+	 * {@link #startCallableProcessing(Callable, Object...)}.
+	 * &lt;p&gt;By default a {@link SimpleAsyncTaskExecutor} instance is used.
+	 */
+	public void setTaskExecutor(AsyncTaskExecutor taskExecutor) {
+<span class="fc" id="L123">		this.taskExecutor = taskExecutor;</span>
+<span class="fc" id="L124">	}</span>
+
+	/**
+	 * Whether the selected handler for the current request chose to handle the
+	 * request asynchronously. A return value of &quot;true&quot; indicates concurrent
+	 * handling is under way and the response will remain open. A return value
+	 * of &quot;false&quot; means concurrent handling was either not started or possibly
+	 * that it has completed and the request was dispatched for further
+	 * processing of the concurrent result.
+	 */
+	public boolean isConcurrentHandlingStarted() {
+<span class="fc bfc" id="L135" title="All 4 branches covered.">		return (this.asyncWebRequest != null &amp;&amp; this.asyncWebRequest.isAsyncStarted());</span>
+	}
+
+	/**
+	 * Whether a result value exists as a result of concurrent handling.
+	 */
+	public boolean hasConcurrentResult() {
+<span class="fc bfc" id="L142" title="All 2 branches covered.">		return (this.concurrentResult != RESULT_NONE);</span>
+	}
+
+	/**
+	 * Provides access to the result from concurrent handling.
+	 * @return an Object, possibly an {@code Exception} or {@code Throwable} if
+	 * concurrent handling raised one.
+	 * @see #clearConcurrentResult()
+	 */
+	public Object getConcurrentResult() {
+<span class="fc" id="L152">		return this.concurrentResult;</span>
+	}
+
+	/**
+	 * Provides access to additional processing context saved at the start of
+	 * concurrent handling.
+	 * @see #clearConcurrentResult()
+	 */
+	public Object[] getConcurrentResultContext() {
+<span class="nc" id="L161">		return this.concurrentResultContext;</span>
+	}
+
+	/**
+	 * Get the {@link CallableProcessingInterceptor} registered under the given key.
+	 * @param key the key
+	 * @return the interceptor registered under that key, or {@code null} if none
+	 */
+	@Nullable
+	public CallableProcessingInterceptor getCallableInterceptor(Object key) {
+<span class="nc" id="L171">		return this.callableInterceptors.get(key);</span>
+	}
+
+	/**
+	 * Get the {@link DeferredResultProcessingInterceptor} registered under the given key.
+	 * @param key the key
+	 * @return the interceptor registered under that key, or {@code null} if none
+	 */
+	@Nullable
+	public DeferredResultProcessingInterceptor getDeferredResultInterceptor(Object key) {
+<span class="nc" id="L181">		return this.deferredResultInterceptors.get(key);</span>
+	}
+
+	/**
+	 * Register a {@link CallableProcessingInterceptor} under the given key.
+	 * @param key the key
+	 * @param interceptor the interceptor to register
+	 */
+	public void registerCallableInterceptor(Object key, CallableProcessingInterceptor interceptor) {
+<span class="fc" id="L190">		Assert.notNull(key, &quot;Key is required&quot;);</span>
+<span class="fc" id="L191">		Assert.notNull(interceptor, &quot;CallableProcessingInterceptor  is required&quot;);</span>
+<span class="fc" id="L192">		this.callableInterceptors.put(key, interceptor);</span>
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * Register a {@link CallableProcessingInterceptor} without a key.
+	 * The key is derived from the class name and hashcode.
+	 * @param interceptors one or more interceptors to register
+	 */
+	public void registerCallableInterceptors(CallableProcessingInterceptor... interceptors) {
+<span class="fc" id="L201">		Assert.notNull(interceptors, &quot;A CallableProcessingInterceptor is required&quot;);</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">		for (CallableProcessingInterceptor interceptor : interceptors) {</span>
+<span class="fc" id="L203">			String key = interceptor.getClass().getName() + &quot;:&quot; + interceptor.hashCode();</span>
+<span class="fc" id="L204">			this.callableInterceptors.put(key, interceptor);</span>
+		}
+<span class="fc" id="L206">	}</span>
+
+	/**
+	 * Register a {@link DeferredResultProcessingInterceptor} under the given key.
+	 * @param key the key
+	 * @param interceptor the interceptor to register
+	 */
+	public void registerDeferredResultInterceptor(Object key, DeferredResultProcessingInterceptor interceptor) {
+<span class="fc" id="L214">		Assert.notNull(key, &quot;Key is required&quot;);</span>
+<span class="fc" id="L215">		Assert.notNull(interceptor, &quot;DeferredResultProcessingInterceptor is required&quot;);</span>
+<span class="fc" id="L216">		this.deferredResultInterceptors.put(key, interceptor);</span>
+<span class="fc" id="L217">	}</span>
+
+	/**
+	 * Register one or more {@link DeferredResultProcessingInterceptor DeferredResultProcessingInterceptors} without a specified key.
+	 * The default key is derived from the interceptor class name and hash code.
+	 * @param interceptors one or more interceptors to register
+	 */
+	public void registerDeferredResultInterceptors(DeferredResultProcessingInterceptor... interceptors) {
+<span class="nc" id="L225">		Assert.notNull(interceptors, &quot;A DeferredResultProcessingInterceptor is required&quot;);</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">		for (DeferredResultProcessingInterceptor interceptor : interceptors) {</span>
+<span class="nc" id="L227">			String key = interceptor.getClass().getName() + &quot;:&quot; + interceptor.hashCode();</span>
+<span class="nc" id="L228">			this.deferredResultInterceptors.put(key, interceptor);</span>
+		}
+<span class="nc" id="L230">	}</span>
+
+	/**
+	 * Clear {@linkplain #getConcurrentResult() concurrentResult} and
+	 * {@linkplain #getConcurrentResultContext() concurrentResultContext}.
+	 */
+	public void clearConcurrentResult() {
+<span class="nc" id="L237">		synchronized (WebAsyncManager.this) {</span>
+<span class="nc" id="L238">			this.concurrentResult = RESULT_NONE;</span>
+<span class="nc" id="L239">			this.concurrentResultContext = null;</span>
+<span class="nc" id="L240">		}</span>
+<span class="nc" id="L241">	}</span>
+
+	/**
+	 * Start concurrent request processing and execute the given task with an
+	 * {@link #setTaskExecutor(AsyncTaskExecutor) AsyncTaskExecutor}. The result
+	 * from the task execution is saved and the request dispatched in order to
+	 * resume processing of that result. If the task raises an Exception then
+	 * the saved result will be the raised Exception.
+	 * @param callable a unit of work to be executed asynchronously
+	 * @param processingContext additional context to save that can be accessed
+	 * via {@link #getConcurrentResultContext()}
+	 * @throws Exception if concurrent processing failed to start
+	 * @see #getConcurrentResult()
+	 * @see #getConcurrentResultContext()
+	 */
+	@SuppressWarnings({&quot;unchecked&quot;, &quot;rawtypes&quot;})
+	public void startCallableProcessing(Callable&lt;?&gt; callable, Object... processingContext) throws Exception {
+<span class="fc" id="L258">		Assert.notNull(callable, &quot;Callable must not be null&quot;);</span>
+<span class="fc" id="L259">		startCallableProcessing(new WebAsyncTask(callable), processingContext);</span>
+<span class="fc" id="L260">	}</span>
+
+	/**
+	 * Use the given {@link WebAsyncTask} to configure the task executor as well as
+	 * the timeout value of the {@code AsyncWebRequest} before delegating to
+	 * {@link #startCallableProcessing(Callable, Object...)}.
+	 * @param webAsyncTask a WebAsyncTask containing the target {@code Callable}
+	 * @param processingContext additional context to save that can be accessed
+	 * via {@link #getConcurrentResultContext()}
+	 * @throws Exception if concurrent processing failed to start
+	 */
+	public void startCallableProcessing(final WebAsyncTask&lt;?&gt; webAsyncTask, Object... processingContext)
+			throws Exception {
+
+<span class="fc" id="L274">		Assert.notNull(webAsyncTask, &quot;WebAsyncTask must not be null&quot;);</span>
+<span class="fc bfc" id="L275" title="All 2 branches covered.">		Assert.state(this.asyncWebRequest != null, &quot;AsyncWebRequest must not be null&quot;);</span>
+
+<span class="fc" id="L277">		Long timeout = webAsyncTask.getTimeout();</span>
+<span class="fc bfc" id="L278" title="All 2 branches covered.">		if (timeout != null) {</span>
+<span class="fc" id="L279">			this.asyncWebRequest.setTimeout(timeout);</span>
+		}
+
+<span class="fc" id="L282">		AsyncTaskExecutor executor = webAsyncTask.getExecutor();</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">		if (executor != null) {</span>
+<span class="fc" id="L284">			this.taskExecutor = executor;</span>
+		}
+		else {
+<span class="fc" id="L287">			logExecutorWarning();</span>
+		}
+
+<span class="fc" id="L290">		List&lt;CallableProcessingInterceptor&gt; interceptors = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L291">		interceptors.add(webAsyncTask.getInterceptor());</span>
+<span class="fc" id="L292">		interceptors.addAll(this.callableInterceptors.values());</span>
+<span class="fc" id="L293">		interceptors.add(timeoutCallableInterceptor);</span>
+
+<span class="fc" id="L295">		final Callable&lt;?&gt; callable = webAsyncTask.getCallable();</span>
+<span class="fc" id="L296">		final CallableInterceptorChain interceptorChain = new CallableInterceptorChain(interceptors);</span>
+
+<span class="fc" id="L298">		this.asyncWebRequest.addTimeoutHandler(() -&gt; {</span>
+<span class="fc" id="L299">			logger.debug(&quot;Async request timeout for &quot; + formatRequestUri());</span>
+<span class="fc" id="L300">			Object result = interceptorChain.triggerAfterTimeout(this.asyncWebRequest, callable);</span>
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">			if (result != CallableProcessingInterceptor.RESULT_NONE) {</span>
+<span class="fc" id="L302">				setConcurrentResultAndDispatch(result);</span>
+			}
+<span class="fc" id="L304">		});</span>
+
+<span class="fc" id="L306">		this.asyncWebRequest.addErrorHandler(ex -&gt; {</span>
+<span class="fc" id="L307">			logger.debug(&quot;Async request error for &quot; + formatRequestUri() + &quot;: &quot; + ex);</span>
+<span class="fc" id="L308">			Object result = interceptorChain.triggerAfterError(this.asyncWebRequest, callable, ex);</span>
+<span class="fc bfc" id="L309" title="All 2 branches covered.">			result = (result != CallableProcessingInterceptor.RESULT_NONE ? result : ex);</span>
+<span class="fc" id="L310">			setConcurrentResultAndDispatch(result);</span>
+<span class="fc" id="L311">		});</span>
+
+<span class="fc" id="L313">		this.asyncWebRequest.addCompletionHandler(() -&gt;</span>
+<span class="fc" id="L314">				interceptorChain.triggerAfterCompletion(this.asyncWebRequest, callable));</span>
+
+<span class="fc" id="L316">		interceptorChain.applyBeforeConcurrentHandling(this.asyncWebRequest, callable);</span>
+<span class="fc" id="L317">		startAsyncProcessing(processingContext);</span>
+		try {
+<span class="fc" id="L319">			Future&lt;?&gt; future = this.taskExecutor.submit(() -&gt; {</span>
+<span class="fc" id="L320">				Object result = null;</span>
+				try {
+<span class="fc" id="L322">					interceptorChain.applyPreProcess(this.asyncWebRequest, callable);</span>
+<span class="fc" id="L323">					result = callable.call();</span>
+				}
+<span class="fc" id="L325">				catch (Throwable ex) {</span>
+<span class="fc" id="L326">					result = ex;</span>
+				}
+				finally {
+<span class="fc" id="L329">					result = interceptorChain.applyPostProcess(this.asyncWebRequest, callable, result);</span>
+				}
+<span class="fc" id="L331">				setConcurrentResultAndDispatch(result);</span>
+<span class="fc" id="L332">			});</span>
+<span class="fc" id="L333">			interceptorChain.setTaskFuture(future);</span>
+		}
+<span class="nc" id="L335">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L336">			Object result = interceptorChain.applyPostProcess(this.asyncWebRequest, callable, ex);</span>
+<span class="nc" id="L337">			setConcurrentResultAndDispatch(result);</span>
+<span class="nc" id="L338">			throw ex;</span>
+<span class="fc" id="L339">		}</span>
+<span class="fc" id="L340">	}</span>
+
+	@SuppressWarnings(&quot;ConstantConditions&quot;)
+	private void logExecutorWarning() {
+<span class="pc bpc" id="L344" title="1 of 4 branches missed.">		if (taskExecutorWarning &amp;&amp; logger.isWarnEnabled()) {</span>
+<span class="fc" id="L345">			synchronized (DEFAULT_TASK_EXECUTOR) {</span>
+<span class="fc" id="L346">				AsyncTaskExecutor executor = this.taskExecutor;</span>
+<span class="pc bpc" id="L347" title="2 of 6 branches missed.">				if (taskExecutorWarning &amp;&amp;</span>
+						(executor instanceof SimpleAsyncTaskExecutor || executor instanceof SyncTaskExecutor)) {
+<span class="fc" id="L349">					String executorTypeName = executor.getClass().getSimpleName();</span>
+<span class="fc" id="L350">					logger.warn(&quot;\n!!!\n&quot; +</span>
+							&quot;An Executor is required to handle java.util.concurrent.Callable return values.\n&quot; +
+							&quot;Please, configure a TaskExecutor in the MVC config under \&quot;async support\&quot;.\n&quot; +
+							&quot;The &quot; + executorTypeName + &quot; currently in use is not suitable under load.\n&quot; +
+							&quot;-------------------------------\n&quot; +
+<span class="fc" id="L355">							&quot;Request URI: '&quot; + formatRequestUri() + &quot;'\n&quot; +</span>
+							&quot;!!!&quot;);
+<span class="fc" id="L357">					taskExecutorWarning = false;</span>
+				}
+<span class="fc" id="L359">			}</span>
+		}
+<span class="fc" id="L361">	}</span>
+
+	private String formatRequestUri() {
+<span class="fc" id="L364">		HttpServletRequest request = this.asyncWebRequest.getNativeRequest(HttpServletRequest.class);</span>
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">		return request != null ? request.getRequestURI() : &quot;servlet container&quot;;</span>
+	}
+
+	private void setConcurrentResultAndDispatch(Object result) {
+<span class="fc" id="L369">		synchronized (WebAsyncManager.this) {</span>
+<span class="pc bpc" id="L370" title="1 of 2 branches missed.">			if (this.concurrentResult != RESULT_NONE) {</span>
+<span class="nc" id="L371">				return;</span>
+			}
+<span class="fc" id="L373">			this.concurrentResult = result;</span>
+<span class="fc" id="L374">		}</span>
+
+<span class="pc bpc" id="L376" title="1 of 2 branches missed.">		if (this.asyncWebRequest.isAsyncComplete()) {</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L378">				logger.debug(&quot;Async result set but request already complete: &quot; + formatRequestUri());</span>
+			}
+<span class="nc" id="L380">			return;</span>
+		}
+
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L384">			boolean isError = result instanceof Throwable;</span>
+<span class="fc bfc" id="L385" title="All 2 branches covered.">			logger.debug(&quot;Async &quot; + (isError ? &quot;error&quot; : &quot;result set&quot;) + &quot;, dispatch to &quot; + formatRequestUri());</span>
+		}
+<span class="fc" id="L387">		this.asyncWebRequest.dispatch();</span>
+<span class="fc" id="L388">	}</span>
+
+	/**
+	 * Start concurrent request processing and initialize the given
+	 * {@link DeferredResult} with a {@link DeferredResultHandler} that saves
+	 * the result and dispatches the request to resume processing of that
+	 * result. The {@code AsyncWebRequest} is also updated with a completion
+	 * handler that expires the {@code DeferredResult} and a timeout handler
+	 * assuming the {@code DeferredResult} has a default timeout result.
+	 * @param deferredResult the DeferredResult instance to initialize
+	 * @param processingContext additional context to save that can be accessed
+	 * via {@link #getConcurrentResultContext()}
+	 * @throws Exception if concurrent processing failed to start
+	 * @see #getConcurrentResult()
+	 * @see #getConcurrentResultContext()
+	 */
+	public void startDeferredResultProcessing(
+			final DeferredResult&lt;?&gt; deferredResult, Object... processingContext) throws Exception {
+
+<span class="fc" id="L407">		Assert.notNull(deferredResult, &quot;DeferredResult must not be null&quot;);</span>
+<span class="fc bfc" id="L408" title="All 2 branches covered.">		Assert.state(this.asyncWebRequest != null, &quot;AsyncWebRequest must not be null&quot;);</span>
+
+<span class="fc" id="L410">		Long timeout = deferredResult.getTimeoutValue();</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">		if (timeout != null) {</span>
+<span class="fc" id="L412">			this.asyncWebRequest.setTimeout(timeout);</span>
+		}
+
+<span class="fc" id="L415">		List&lt;DeferredResultProcessingInterceptor&gt; interceptors = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L416">		interceptors.add(deferredResult.getInterceptor());</span>
+<span class="fc" id="L417">		interceptors.addAll(this.deferredResultInterceptors.values());</span>
+<span class="fc" id="L418">		interceptors.add(timeoutDeferredResultInterceptor);</span>
+
+<span class="fc" id="L420">		final DeferredResultInterceptorChain interceptorChain = new DeferredResultInterceptorChain(interceptors);</span>
+
+<span class="fc" id="L422">		this.asyncWebRequest.addTimeoutHandler(() -&gt; {</span>
+			try {
+<span class="fc" id="L424">				interceptorChain.triggerAfterTimeout(this.asyncWebRequest, deferredResult);</span>
+			}
+<span class="fc" id="L426">			catch (Throwable ex) {</span>
+<span class="fc" id="L427">				setConcurrentResultAndDispatch(ex);</span>
+<span class="fc" id="L428">			}</span>
+<span class="fc" id="L429">		});</span>
+
+<span class="fc" id="L431">		this.asyncWebRequest.addErrorHandler(ex -&gt; {</span>
+			try {
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">				if (!interceptorChain.triggerAfterError(this.asyncWebRequest, deferredResult, ex)) {</span>
+<span class="fc" id="L434">					return;</span>
+				}
+<span class="nc" id="L436">				deferredResult.setErrorResult(ex);</span>
+			}
+<span class="nc" id="L438">			catch (Throwable interceptorEx) {</span>
+<span class="nc" id="L439">				setConcurrentResultAndDispatch(interceptorEx);</span>
+<span class="nc" id="L440">			}</span>
+<span class="nc" id="L441">		});</span>
+
+<span class="fc" id="L443">		this.asyncWebRequest.addCompletionHandler(()</span>
+<span class="fc" id="L444">				-&gt; interceptorChain.triggerAfterCompletion(this.asyncWebRequest, deferredResult));</span>
+
+<span class="fc" id="L446">		interceptorChain.applyBeforeConcurrentHandling(this.asyncWebRequest, deferredResult);</span>
+<span class="fc" id="L447">		startAsyncProcessing(processingContext);</span>
+
+		try {
+<span class="fc" id="L450">			interceptorChain.applyPreProcess(this.asyncWebRequest, deferredResult);</span>
+<span class="fc" id="L451">			deferredResult.setResultHandler(result -&gt; {</span>
+<span class="fc" id="L452">				result = interceptorChain.applyPostProcess(this.asyncWebRequest, deferredResult, result);</span>
+<span class="fc" id="L453">				setConcurrentResultAndDispatch(result);</span>
+<span class="fc" id="L454">			});</span>
+		}
+<span class="fc" id="L456">		catch (Throwable ex) {</span>
+<span class="fc" id="L457">			setConcurrentResultAndDispatch(ex);</span>
+<span class="fc" id="L458">		}</span>
+<span class="fc" id="L459">	}</span>
+
+	private void startAsyncProcessing(Object[] processingContext) {
+<span class="fc" id="L462">		synchronized (WebAsyncManager.this) {</span>
+<span class="fc" id="L463">			this.concurrentResult = RESULT_NONE;</span>
+<span class="fc" id="L464">			this.concurrentResultContext = processingContext;</span>
+<span class="fc" id="L465">		}</span>
+<span class="fc" id="L466">		this.asyncWebRequest.startAsync();</span>
+
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L469">			logger.debug(&quot;Started async request&quot;);</span>
+		}
+<span class="fc" id="L471">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

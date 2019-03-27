@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HttpInvokerServiceExporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.remoting.httpinvoker</a> &gt; <span class="el_source">HttpInvokerServiceExporter.java</span></div><h1>HttpInvokerServiceExporter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2017 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.remoting.httpinvoker;
+
+import java.io.FilterOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.OutputStream;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.remoting.rmi.RemoteInvocationSerializingExporter;
+import org.springframework.remoting.support.RemoteInvocation;
+import org.springframework.remoting.support.RemoteInvocationResult;
+import org.springframework.web.HttpRequestHandler;
+import org.springframework.web.util.NestedServletException;
+
+/**
+ * Servlet-API-based HTTP request handler that exports the specified service bean
+ * as HTTP invoker service endpoint, accessible via an HTTP invoker proxy.
+ *
+ * &lt;p&gt;Deserializes remote invocation objects and serializes remote invocation
+ * result objects. Uses Java serialization just like RMI, but provides the
+ * same ease of setup as Caucho's HTTP-based Hessian protocol.
+ *
+ * &lt;p&gt;&lt;b&gt;HTTP invoker is the recommended protocol for Java-to-Java remoting.&lt;/b&gt;
+ * It is more powerful and more extensible than Hessian, at the expense of
+ * being tied to Java. Nevertheless, it is as easy to set up as Hessian,
+ * which is its main advantage compared to RMI.
+ *
+ * &lt;p&gt;&lt;b&gt;WARNING: Be aware of vulnerabilities due to unsafe Java deserialization:
+ * Manipulated input streams could lead to unwanted code execution on the server
+ * during the deserialization step. As a consequence, do not expose HTTP invoker
+ * endpoints to untrusted clients but rather just between your own services.&lt;/b&gt;
+ * In general, we strongly recommend any other message format (e.g. JSON) instead.
+ *
+ * @author Juergen Hoeller
+ * @since 1.1
+ * @see HttpInvokerClientInterceptor
+ * @see HttpInvokerProxyFactoryBean
+ * @see org.springframework.remoting.rmi.RmiServiceExporter
+ * @see org.springframework.remoting.caucho.HessianServiceExporter
+ */
+<span class="fc" id="L61">public class HttpInvokerServiceExporter extends RemoteInvocationSerializingExporter implements HttpRequestHandler {</span>
+
+	/**
+	 * Reads a remote invocation from the request, executes it,
+	 * and writes the remote invocation result to the response.
+	 * @see #readRemoteInvocation(HttpServletRequest)
+	 * @see #invokeAndCreateResult(org.springframework.remoting.support.RemoteInvocation, Object)
+	 * @see #writeRemoteInvocationResult(HttpServletRequest, HttpServletResponse, RemoteInvocationResult)
+	 */
+	@Override
+	public void handleRequest(HttpServletRequest request, HttpServletResponse response)
+			throws ServletException, IOException {
+
+		try {
+<span class="fc" id="L75">			RemoteInvocation invocation = readRemoteInvocation(request);</span>
+<span class="fc" id="L76">			RemoteInvocationResult result = invokeAndCreateResult(invocation, getProxy());</span>
+<span class="fc" id="L77">			writeRemoteInvocationResult(request, response, result);</span>
+		}
+<span class="nc" id="L79">		catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L80">			throw new NestedServletException(&quot;Class not found during deserialization&quot;, ex);</span>
+<span class="fc" id="L81">		}</span>
+<span class="fc" id="L82">	}</span>
+
+	/**
+	 * Read a RemoteInvocation from the given HTTP request.
+	 * &lt;p&gt;Delegates to {@link #readRemoteInvocation(HttpServletRequest, InputStream)} with
+	 * the {@link HttpServletRequest#getInputStream() servlet request's input stream}.
+	 * @param request current HTTP request
+	 * @return the RemoteInvocation object
+	 * @throws IOException in case of I/O failure
+	 * @throws ClassNotFoundException if thrown by deserialization
+	 */
+	protected RemoteInvocation readRemoteInvocation(HttpServletRequest request)
+			throws IOException, ClassNotFoundException {
+
+<span class="fc" id="L96">		return readRemoteInvocation(request, request.getInputStream());</span>
+	}
+
+	/**
+	 * Deserialize a RemoteInvocation object from the given InputStream.
+	 * &lt;p&gt;Gives {@link #decorateInputStream} a chance to decorate the stream
+	 * first (for example, for custom encryption or compression). Creates a
+	 * {@link org.springframework.remoting.rmi.CodebaseAwareObjectInputStream}
+	 * and calls {@link #doReadRemoteInvocation} to actually read the object.
+	 * &lt;p&gt;Can be overridden for custom serialization of the invocation.
+	 * @param request current HTTP request
+	 * @param is the InputStream to read from
+	 * @return the RemoteInvocation object
+	 * @throws IOException in case of I/O failure
+	 * @throws ClassNotFoundException if thrown during deserialization
+	 */
+	protected RemoteInvocation readRemoteInvocation(HttpServletRequest request, InputStream is)
+			throws IOException, ClassNotFoundException {
+
+<span class="fc" id="L115">		ObjectInputStream ois = createObjectInputStream(decorateInputStream(request, is));</span>
+		try {
+<span class="fc" id="L117">			return doReadRemoteInvocation(ois);</span>
+		}
+		finally {
+<span class="fc" id="L120">			ois.close();</span>
+		}
+	}
+
+	/**
+	 * Return the InputStream to use for reading remote invocations,
+	 * potentially decorating the given original InputStream.
+	 * &lt;p&gt;The default implementation returns the given stream as-is.
+	 * Can be overridden, for example, for custom encryption or compression.
+	 * @param request current HTTP request
+	 * @param is the original InputStream
+	 * @return the potentially decorated InputStream
+	 * @throws IOException in case of I/O failure
+	 */
+	protected InputStream decorateInputStream(HttpServletRequest request, InputStream is) throws IOException {
+<span class="fc" id="L135">		return is;</span>
+	}
+
+	/**
+	 * Write the given RemoteInvocationResult to the given HTTP response.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @param result the RemoteInvocationResult object
+	 * @throws IOException in case of I/O failure
+	 */
+	protected void writeRemoteInvocationResult(
+			HttpServletRequest request, HttpServletResponse response, RemoteInvocationResult result)
+			throws IOException {
+
+<span class="fc" id="L149">		response.setContentType(getContentType());</span>
+<span class="fc" id="L150">		writeRemoteInvocationResult(request, response, result, response.getOutputStream());</span>
+<span class="fc" id="L151">	}</span>
+
+	/**
+	 * Serialize the given RemoteInvocation to the given OutputStream.
+	 * &lt;p&gt;The default implementation gives {@link #decorateOutputStream} a chance
+	 * to decorate the stream first (for example, for custom encryption or compression).
+	 * Creates an {@link java.io.ObjectOutputStream} for the final stream and calls
+	 * {@link #doWriteRemoteInvocationResult} to actually write the object.
+	 * &lt;p&gt;Can be overridden for custom serialization of the invocation.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @param result the RemoteInvocationResult object
+	 * @param os the OutputStream to write to
+	 * @throws IOException in case of I/O failure
+	 * @see #decorateOutputStream
+	 * @see #doWriteRemoteInvocationResult
+	 */
+	protected void writeRemoteInvocationResult(
+			HttpServletRequest request, HttpServletResponse response, RemoteInvocationResult result, OutputStream os)
+			throws IOException {
+
+<span class="fc" id="L172">		ObjectOutputStream oos =</span>
+<span class="fc" id="L173">				createObjectOutputStream(new FlushGuardedOutputStream(decorateOutputStream(request, response, os)));</span>
+		try {
+<span class="fc" id="L175">			doWriteRemoteInvocationResult(result, oos);</span>
+		}
+		finally {
+<span class="fc" id="L178">			oos.close();</span>
+		}
+<span class="fc" id="L180">	}</span>
+
+	/**
+	 * Return the OutputStream to use for writing remote invocation results,
+	 * potentially decorating the given original OutputStream.
+	 * &lt;p&gt;The default implementation returns the given stream as-is.
+	 * Can be overridden, for example, for custom encryption or compression.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @param os the original OutputStream
+	 * @return the potentially decorated OutputStream
+	 * @throws IOException in case of I/O failure
+	 */
+	protected OutputStream decorateOutputStream(
+			HttpServletRequest request, HttpServletResponse response, OutputStream os) throws IOException {
+
+<span class="fc" id="L196">		return os;</span>
+	}
+
+
+	/**
+	 * Decorate an {@code OutputStream} to guard against {@code flush()} calls,
+	 * which are turned into no-ops.
+	 * &lt;p&gt;Because {@link ObjectOutputStream#close()} will in fact flush/drain
+	 * the underlying stream twice, this {@link FilterOutputStream} will
+	 * guard against individual flush calls. Multiple flush calls can lead
+	 * to performance issues, since writes aren't gathered as they should be.
+	 * @see &lt;a href=&quot;https://jira.spring.io/browse/SPR-14040&quot;&gt;SPR-14040&lt;/a&gt;
+	 */
+	private static class FlushGuardedOutputStream extends FilterOutputStream {
+
+		public FlushGuardedOutputStream(OutputStream out) {
+<span class="fc" id="L212">			super(out);</span>
+<span class="fc" id="L213">		}</span>
+
+		@Override
+		public void flush() throws IOException {
+			// Do nothing on flush
+<span class="fc" id="L218">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

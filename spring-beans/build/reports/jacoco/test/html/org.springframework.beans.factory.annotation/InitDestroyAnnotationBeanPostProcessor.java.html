@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InitDestroyAnnotationBeanPostProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.annotation</a> &gt; <span class="el_source">InitDestroyAnnotationBeanPostProcessor.java</span></div><h1>InitDestroyAnnotationBeanPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.annotation;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.Serializable;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.config.DestructionAwareBeanPostProcessor;
+import org.springframework.beans.factory.support.MergedBeanDefinitionPostProcessor;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.core.Ordered;
+import org.springframework.core.PriorityOrdered;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * {@link org.springframework.beans.factory.config.BeanPostProcessor} implementation
+ * that invokes annotated init and destroy methods. Allows for an annotation
+ * alternative to Spring's {@link org.springframework.beans.factory.InitializingBean}
+ * and {@link org.springframework.beans.factory.DisposableBean} callback interfaces.
+ *
+ * &lt;p&gt;The actual annotation types that this post-processor checks for can be
+ * configured through the {@link #setInitAnnotationType &quot;initAnnotationType&quot;}
+ * and {@link #setDestroyAnnotationType &quot;destroyAnnotationType&quot;} properties.
+ * Any custom annotation can be used, since there are no required annotation
+ * attributes.
+ *
+ * &lt;p&gt;Init and destroy annotations may be applied to methods of any visibility:
+ * public, package-protected, protected, or private. Multiple such methods
+ * may be annotated, but it is recommended to only annotate one single
+ * init method and destroy method, respectively.
+ *
+ * &lt;p&gt;Spring's {@link org.springframework.context.annotation.CommonAnnotationBeanPostProcessor}
+ * supports the JSR-250 {@link javax.annotation.PostConstruct} and {@link javax.annotation.PreDestroy}
+ * annotations out of the box, as init annotation and destroy annotation, respectively.
+ * Furthermore, it also supports the {@link javax.annotation.Resource} annotation
+ * for annotation-driven injection of named beans.
+ *
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see #setInitAnnotationType
+ * @see #setDestroyAnnotationType
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="nc" id="L80">public class InitDestroyAnnotationBeanPostProcessor</span>
+		implements DestructionAwareBeanPostProcessor, MergedBeanDefinitionPostProcessor, PriorityOrdered, Serializable {
+
+<span class="nc" id="L83">	private final transient LifecycleMetadata emptyLifecycleMetadata =</span>
+<span class="nc" id="L84">			new LifecycleMetadata(Object.class, Collections.emptyList(), Collections.emptyList()) {</span>
+				@Override
+				public void checkConfigMembers(RootBeanDefinition beanDefinition) {
+<span class="nc" id="L87">				}</span>
+				@Override
+				public void invokeInitMethods(Object target, String beanName) {
+<span class="nc" id="L90">				}</span>
+				@Override
+				public void invokeDestroyMethods(Object target, String beanName) {
+<span class="nc" id="L93">				}</span>
+				@Override
+				public boolean hasDestroyMethods() {
+<span class="nc" id="L96">					return false;</span>
+				}
+			};
+
+
+<span class="nc" id="L101">	protected transient Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private Class&lt;? extends Annotation&gt; initAnnotationType;
+
+	@Nullable
+	private Class&lt;? extends Annotation&gt; destroyAnnotationType;
+
+<span class="nc" id="L109">	private int order = Ordered.LOWEST_PRECEDENCE;</span>
+
+<span class="nc" id="L111">	@Nullable</span>
+	private final transient Map&lt;Class&lt;?&gt;, LifecycleMetadata&gt; lifecycleMetadataCache = new ConcurrentHashMap&lt;&gt;(256);
+
+
+	/**
+	 * Specify the init annotation to check for, indicating initialization
+	 * methods to call after configuration of a bean.
+	 * &lt;p&gt;Any custom annotation can be used, since there are no required
+	 * annotation attributes. There is no default, although a typical choice
+	 * is the JSR-250 {@link javax.annotation.PostConstruct} annotation.
+	 */
+	public void setInitAnnotationType(Class&lt;? extends Annotation&gt; initAnnotationType) {
+<span class="nc" id="L123">		this.initAnnotationType = initAnnotationType;</span>
+<span class="nc" id="L124">	}</span>
+
+	/**
+	 * Specify the destroy annotation to check for, indicating destruction
+	 * methods to call when the context is shutting down.
+	 * &lt;p&gt;Any custom annotation can be used, since there are no required
+	 * annotation attributes. There is no default, although a typical choice
+	 * is the JSR-250 {@link javax.annotation.PreDestroy} annotation.
+	 */
+	public void setDestroyAnnotationType(Class&lt;? extends Annotation&gt; destroyAnnotationType) {
+<span class="nc" id="L134">		this.destroyAnnotationType = destroyAnnotationType;</span>
+<span class="nc" id="L135">	}</span>
+
+	public void setOrder(int order) {
+<span class="nc" id="L138">		this.order = order;</span>
+<span class="nc" id="L139">	}</span>
+
+	@Override
+	public int getOrder() {
+<span class="nc" id="L143">		return this.order;</span>
+	}
+
+
+	@Override
+	public void postProcessMergedBeanDefinition(RootBeanDefinition beanDefinition, Class&lt;?&gt; beanType, String beanName) {
+<span class="nc" id="L149">		LifecycleMetadata metadata = findLifecycleMetadata(beanType);</span>
+<span class="nc" id="L150">		metadata.checkConfigMembers(beanDefinition);</span>
+<span class="nc" id="L151">	}</span>
+
+	@Override
+	public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+<span class="nc" id="L155">		LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());</span>
+		try {
+<span class="nc" id="L157">			metadata.invokeInitMethods(bean, beanName);</span>
+		}
+<span class="nc" id="L159">		catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L160">			throw new BeanCreationException(beanName, &quot;Invocation of init method failed&quot;, ex.getTargetException());</span>
+		}
+<span class="nc" id="L162">		catch (Throwable ex) {</span>
+<span class="nc" id="L163">			throw new BeanCreationException(beanName, &quot;Failed to invoke init method&quot;, ex);</span>
+<span class="nc" id="L164">		}</span>
+<span class="nc" id="L165">		return bean;</span>
+	}
+
+	@Override
+	public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+<span class="nc" id="L170">		return bean;</span>
+	}
+
+	@Override
+	public void postProcessBeforeDestruction(Object bean, String beanName) throws BeansException {
+<span class="nc" id="L175">		LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());</span>
+		try {
+<span class="nc" id="L177">			metadata.invokeDestroyMethods(bean, beanName);</span>
+		}
+<span class="nc" id="L179">		catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L180">			String msg = &quot;Destroy method on bean with name '&quot; + beanName + &quot;' threw an exception&quot;;</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L182">				logger.warn(msg, ex.getTargetException());</span>
+			}
+			else {
+<span class="nc" id="L185">				logger.warn(msg + &quot;: &quot; + ex.getTargetException());</span>
+			}
+		}
+<span class="nc" id="L188">		catch (Throwable ex) {</span>
+<span class="nc" id="L189">			logger.warn(&quot;Failed to invoke destroy method on bean with name '&quot; + beanName + &quot;'&quot;, ex);</span>
+<span class="nc" id="L190">		}</span>
+<span class="nc" id="L191">	}</span>
+
+	@Override
+	public boolean requiresDestruction(Object bean) {
+<span class="nc" id="L195">		return findLifecycleMetadata(bean.getClass()).hasDestroyMethods();</span>
+	}
+
+
+	private LifecycleMetadata findLifecycleMetadata(Class&lt;?&gt; clazz) {
+<span class="nc bnc" id="L200" title="All 2 branches missed.">		if (this.lifecycleMetadataCache == null) {</span>
+			// Happens after deserialization, during destruction...
+<span class="nc" id="L202">			return buildLifecycleMetadata(clazz);</span>
+		}
+		// Quick check on the concurrent map first, with minimal locking.
+<span class="nc" id="L205">		LifecycleMetadata metadata = this.lifecycleMetadataCache.get(clazz);</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">		if (metadata == null) {</span>
+<span class="nc" id="L207">			synchronized (this.lifecycleMetadataCache) {</span>
+<span class="nc" id="L208">				metadata = this.lifecycleMetadataCache.get(clazz);</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">				if (metadata == null) {</span>
+<span class="nc" id="L210">					metadata = buildLifecycleMetadata(clazz);</span>
+<span class="nc" id="L211">					this.lifecycleMetadataCache.put(clazz, metadata);</span>
+				}
+<span class="nc" id="L213">				return metadata;</span>
+			}
+		}
+<span class="nc" id="L216">		return metadata;</span>
+	}
+
+	private LifecycleMetadata buildLifecycleMetadata(final Class&lt;?&gt; clazz) {
+<span class="nc bnc" id="L220" title="All 2 branches missed.">		if (!AnnotationUtils.isCandidateClass(clazz, Arrays.asList(this.initAnnotationType, this.destroyAnnotationType))) {</span>
+<span class="nc" id="L221">			return this.emptyLifecycleMetadata;</span>
+		}
+
+<span class="nc" id="L224">		List&lt;LifecycleElement&gt; initMethods = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L225">		List&lt;LifecycleElement&gt; destroyMethods = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L226">		Class&lt;?&gt; targetClass = clazz;</span>
+
+		do {
+<span class="nc" id="L229">			final List&lt;LifecycleElement&gt; currInitMethods = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L230">			final List&lt;LifecycleElement&gt; currDestroyMethods = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L232">			ReflectionUtils.doWithLocalMethods(targetClass, method -&gt; {</span>
+<span class="nc bnc" id="L233" title="All 4 branches missed.">				if (this.initAnnotationType != null &amp;&amp; method.isAnnotationPresent(this.initAnnotationType)) {</span>
+<span class="nc" id="L234">					LifecycleElement element = new LifecycleElement(method);</span>
+<span class="nc" id="L235">					currInitMethods.add(element);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L237">						logger.trace(&quot;Found init method on class [&quot; + clazz.getName() + &quot;]: &quot; + method);</span>
+					}
+				}
+<span class="nc bnc" id="L240" title="All 4 branches missed.">				if (this.destroyAnnotationType != null &amp;&amp; method.isAnnotationPresent(this.destroyAnnotationType)) {</span>
+<span class="nc" id="L241">					currDestroyMethods.add(new LifecycleElement(method));</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L243">						logger.trace(&quot;Found destroy method on class [&quot; + clazz.getName() + &quot;]: &quot; + method);</span>
+					}
+				}
+<span class="nc" id="L246">			});</span>
+
+<span class="nc" id="L248">			initMethods.addAll(0, currInitMethods);</span>
+<span class="nc" id="L249">			destroyMethods.addAll(currDestroyMethods);</span>
+<span class="nc" id="L250">			targetClass = targetClass.getSuperclass();</span>
+		}
+<span class="nc bnc" id="L252" title="All 4 branches missed.">		while (targetClass != null &amp;&amp; targetClass != Object.class);</span>
+
+<span class="nc bnc" id="L254" title="All 4 branches missed.">		return (initMethods.isEmpty() &amp;&amp; destroyMethods.isEmpty() ? this.emptyLifecycleMetadata :</span>
+				new LifecycleMetadata(clazz, initMethods, destroyMethods));
+	}
+
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+		// Rely on default serialization; just initialize state after deserialization.
+<span class="nc" id="L265">		ois.defaultReadObject();</span>
+
+		// Initialize transient fields.
+<span class="nc" id="L268">		this.logger = LogFactory.getLog(getClass());</span>
+<span class="nc" id="L269">	}</span>
+
+
+	/**
+	 * Class representing information about annotated init and destroy methods.
+	 */
+	private class LifecycleMetadata {
+
+		private final Class&lt;?&gt; targetClass;
+
+		private final Collection&lt;LifecycleElement&gt; initMethods;
+
+		private final Collection&lt;LifecycleElement&gt; destroyMethods;
+
+		@Nullable
+		private volatile Set&lt;LifecycleElement&gt; checkedInitMethods;
+
+		@Nullable
+		private volatile Set&lt;LifecycleElement&gt; checkedDestroyMethods;
+
+		public LifecycleMetadata(Class&lt;?&gt; targetClass, Collection&lt;LifecycleElement&gt; initMethods,
+<span class="nc" id="L290">				Collection&lt;LifecycleElement&gt; destroyMethods) {</span>
+
+<span class="nc" id="L292">			this.targetClass = targetClass;</span>
+<span class="nc" id="L293">			this.initMethods = initMethods;</span>
+<span class="nc" id="L294">			this.destroyMethods = destroyMethods;</span>
+<span class="nc" id="L295">		}</span>
+
+		public void checkConfigMembers(RootBeanDefinition beanDefinition) {
+<span class="nc" id="L298">			Set&lt;LifecycleElement&gt; checkedInitMethods = new LinkedHashSet&lt;&gt;(this.initMethods.size());</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">			for (LifecycleElement element : this.initMethods) {</span>
+<span class="nc" id="L300">				String methodIdentifier = element.getIdentifier();</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">				if (!beanDefinition.isExternallyManagedInitMethod(methodIdentifier)) {</span>
+<span class="nc" id="L302">					beanDefinition.registerExternallyManagedInitMethod(methodIdentifier);</span>
+<span class="nc" id="L303">					checkedInitMethods.add(element);</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L305">						logger.trace(&quot;Registered init method on class [&quot; + this.targetClass.getName() + &quot;]: &quot; + element);</span>
+					}
+				}
+<span class="nc" id="L308">			}</span>
+<span class="nc" id="L309">			Set&lt;LifecycleElement&gt; checkedDestroyMethods = new LinkedHashSet&lt;&gt;(this.destroyMethods.size());</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">			for (LifecycleElement element : this.destroyMethods) {</span>
+<span class="nc" id="L311">				String methodIdentifier = element.getIdentifier();</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">				if (!beanDefinition.isExternallyManagedDestroyMethod(methodIdentifier)) {</span>
+<span class="nc" id="L313">					beanDefinition.registerExternallyManagedDestroyMethod(methodIdentifier);</span>
+<span class="nc" id="L314">					checkedDestroyMethods.add(element);</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L316">						logger.trace(&quot;Registered destroy method on class [&quot; + this.targetClass.getName() + &quot;]: &quot; + element);</span>
+					}
+				}
+<span class="nc" id="L319">			}</span>
+<span class="nc" id="L320">			this.checkedInitMethods = checkedInitMethods;</span>
+<span class="nc" id="L321">			this.checkedDestroyMethods = checkedDestroyMethods;</span>
+<span class="nc" id="L322">		}</span>
+
+		public void invokeInitMethods(Object target, String beanName) throws Throwable {
+<span class="nc" id="L325">			Collection&lt;LifecycleElement&gt; checkedInitMethods = this.checkedInitMethods;</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">			Collection&lt;LifecycleElement&gt; initMethodsToIterate =</span>
+					(checkedInitMethods != null ? checkedInitMethods : this.initMethods);
+<span class="nc bnc" id="L328" title="All 2 branches missed.">			if (!initMethodsToIterate.isEmpty()) {</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">				for (LifecycleElement element : initMethodsToIterate) {</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L331">						logger.trace(&quot;Invoking init method on bean '&quot; + beanName + &quot;': &quot; + element.getMethod());</span>
+					}
+<span class="nc" id="L333">					element.invoke(target);</span>
+<span class="nc" id="L334">				}</span>
+			}
+<span class="nc" id="L336">		}</span>
+
+		public void invokeDestroyMethods(Object target, String beanName) throws Throwable {
+<span class="nc" id="L339">			Collection&lt;LifecycleElement&gt; checkedDestroyMethods = this.checkedDestroyMethods;</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">			Collection&lt;LifecycleElement&gt; destroyMethodsToUse =</span>
+					(checkedDestroyMethods != null ? checkedDestroyMethods : this.destroyMethods);
+<span class="nc bnc" id="L342" title="All 2 branches missed.">			if (!destroyMethodsToUse.isEmpty()) {</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">				for (LifecycleElement element : destroyMethodsToUse) {</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L345">						logger.trace(&quot;Invoking destroy method on bean '&quot; + beanName + &quot;': &quot; + element.getMethod());</span>
+					}
+<span class="nc" id="L347">					element.invoke(target);</span>
+<span class="nc" id="L348">				}</span>
+			}
+<span class="nc" id="L350">		}</span>
+
+		public boolean hasDestroyMethods() {
+<span class="nc" id="L353">			Collection&lt;LifecycleElement&gt; checkedDestroyMethods = this.checkedDestroyMethods;</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">			Collection&lt;LifecycleElement&gt; destroyMethodsToUse =</span>
+					(checkedDestroyMethods != null ? checkedDestroyMethods : this.destroyMethods);
+<span class="nc bnc" id="L356" title="All 2 branches missed.">			return !destroyMethodsToUse.isEmpty();</span>
+		}
+	}
+
+
+	/**
+	 * Class representing injection information about an annotated method.
+	 */
+	private static class LifecycleElement {
+
+		private final Method method;
+
+		private final String identifier;
+
+<span class="nc" id="L370">		public LifecycleElement(Method method) {</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">			if (method.getParameterCount() != 0) {</span>
+<span class="nc" id="L372">				throw new IllegalStateException(&quot;Lifecycle method annotation requires a no-arg method: &quot; + method);</span>
+			}
+<span class="nc" id="L374">			this.method = method;</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">			this.identifier = (Modifier.isPrivate(method.getModifiers()) ?</span>
+<span class="nc" id="L376">					ClassUtils.getQualifiedMethodName(method) : method.getName());</span>
+<span class="nc" id="L377">		}</span>
+
+		public Method getMethod() {
+<span class="nc" id="L380">			return this.method;</span>
+		}
+
+		public String getIdentifier() {
+<span class="nc" id="L384">			return this.identifier;</span>
+		}
+
+		public void invoke(Object target) throws Throwable {
+<span class="nc" id="L388">			ReflectionUtils.makeAccessible(this.method);</span>
+<span class="nc" id="L389">			this.method.invoke(target, (Object[]) null);</span>
+<span class="nc" id="L390">		}</span>
+
+		@Override
+		public boolean equals(Object other) {
+<span class="nc bnc" id="L394" title="All 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L395">				return true;</span>
+			}
+<span class="nc bnc" id="L397" title="All 2 branches missed.">			if (!(other instanceof LifecycleElement)) {</span>
+<span class="nc" id="L398">				return false;</span>
+			}
+<span class="nc" id="L400">			LifecycleElement otherElement = (LifecycleElement) other;</span>
+<span class="nc" id="L401">			return (this.identifier.equals(otherElement.identifier));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L406">			return this.identifier.hashCode();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

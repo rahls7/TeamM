@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Netty4ClientHttpRequestFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client</a> &gt; <span class="el_source">Netty4ClientHttpRequestFactory.java</span></div><h1>Netty4ClientHttpRequestFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client;
+
+import java.io.IOException;
+import java.net.URI;
+import java.util.concurrent.TimeUnit;
+import javax.net.ssl.SSLException;
+
+import io.netty.bootstrap.Bootstrap;
+import io.netty.channel.ChannelConfig;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelPipeline;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.SocketChannelConfig;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http.HttpClientCodec;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.timeout.ReadTimeoutHandler;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.http.HttpMethod;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+
+/**
+ * {@link org.springframework.http.client.ClientHttpRequestFactory} implementation
+ * that uses &lt;a href=&quot;https://netty.io/&quot;&gt;Netty 4&lt;/a&gt; to create requests.
+ *
+ * &lt;p&gt;Allows to use a pre-configured {@link EventLoopGroup} instance: useful for
+ * sharing across multiple clients.
+ *
+ * &lt;p&gt;Note that this implementation consistently closes the HTTP connection on each
+ * request.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Mark Paluch
+ * @since 4.1.2
+ * @deprecated as of Spring 5.0, in favor of
+ * {@link org.springframework.http.client.reactive.ReactorClientHttpConnector}
+ */
+@Deprecated
+public class Netty4ClientHttpRequestFactory implements ClientHttpRequestFactory,
+		AsyncClientHttpRequestFactory, InitializingBean, DisposableBean {
+
+	/**
+	 * The default maximum response size.
+	 * @see #setMaxResponseSize(int)
+	 */
+	public static final int DEFAULT_MAX_RESPONSE_SIZE = 1024 * 1024 * 10;
+
+
+	private final EventLoopGroup eventLoopGroup;
+
+	private final boolean defaultEventLoopGroup;
+
+<span class="fc" id="L78">	private int maxResponseSize = DEFAULT_MAX_RESPONSE_SIZE;</span>
+
+	@Nullable
+	private SslContext sslContext;
+
+<span class="fc" id="L83">	private int connectTimeout = -1;</span>
+
+<span class="fc" id="L85">	private int readTimeout = -1;</span>
+
+	@Nullable
+	private volatile Bootstrap bootstrap;
+
+
+	/**
+	 * Create a new {@code Netty4ClientHttpRequestFactory} with a default
+	 * {@link NioEventLoopGroup}.
+	 */
+<span class="fc" id="L95">	public Netty4ClientHttpRequestFactory() {</span>
+<span class="fc" id="L96">		int ioWorkerCount = Runtime.getRuntime().availableProcessors() * 2;</span>
+<span class="fc" id="L97">		this.eventLoopGroup = new NioEventLoopGroup(ioWorkerCount);</span>
+<span class="fc" id="L98">		this.defaultEventLoopGroup = true;</span>
+<span class="fc" id="L99">	}</span>
+
+	/**
+	 * Create a new {@code Netty4ClientHttpRequestFactory} with the given
+	 * {@link EventLoopGroup}.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; the given group will &lt;strong&gt;not&lt;/strong&gt; be
+	 * {@linkplain EventLoopGroup#shutdownGracefully() shutdown} by this factory;
+	 * doing so becomes the responsibility of the caller.
+	 */
+<span class="fc" id="L108">	public Netty4ClientHttpRequestFactory(EventLoopGroup eventLoopGroup) {</span>
+<span class="fc" id="L109">		Assert.notNull(eventLoopGroup, &quot;EventLoopGroup must not be null&quot;);</span>
+<span class="fc" id="L110">		this.eventLoopGroup = eventLoopGroup;</span>
+<span class="fc" id="L111">		this.defaultEventLoopGroup = false;</span>
+<span class="fc" id="L112">	}</span>
+
+
+	/**
+	 * Set the default maximum response size.
+	 * &lt;p&gt;By default this is set to {@link #DEFAULT_MAX_RESPONSE_SIZE}.
+	 * @since 4.1.5
+	 * @see HttpObjectAggregator#HttpObjectAggregator(int)
+	 */
+	public void setMaxResponseSize(int maxResponseSize) {
+<span class="nc" id="L122">		this.maxResponseSize = maxResponseSize;</span>
+<span class="nc" id="L123">	}</span>
+
+	/**
+	 * Set the SSL context. When configured it is used to create and insert an
+	 * {@link io.netty.handler.ssl.SslHandler} in the channel pipeline.
+	 * &lt;p&gt;A default client SslContext is configured if none has been provided.
+	 */
+	public void setSslContext(SslContext sslContext) {
+<span class="nc" id="L131">		this.sslContext = sslContext;</span>
+<span class="nc" id="L132">	}</span>
+
+	/**
+	 * Set the underlying connect timeout (in milliseconds).
+	 * A timeout value of 0 specifies an infinite timeout.
+	 * @see ChannelConfig#setConnectTimeoutMillis(int)
+	 */
+	public void setConnectTimeout(int connectTimeout) {
+<span class="nc" id="L140">		this.connectTimeout = connectTimeout;</span>
+<span class="nc" id="L141">	}</span>
+
+	/**
+	 * Set the underlying URLConnection's read timeout (in milliseconds).
+	 * A timeout value of 0 specifies an infinite timeout.
+	 * @see ReadTimeoutHandler
+	 */
+	public void setReadTimeout(int readTimeout) {
+<span class="nc" id="L149">		this.readTimeout = readTimeout;</span>
+<span class="nc" id="L150">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">		if (this.sslContext == null) {</span>
+<span class="fc" id="L156">			this.sslContext = getDefaultClientSslContext();</span>
+		}
+<span class="fc" id="L158">	}</span>
+
+	private SslContext getDefaultClientSslContext() {
+		try {
+<span class="fc" id="L162">			return SslContextBuilder.forClient().build();</span>
+		}
+<span class="nc" id="L164">		catch (SSLException ex) {</span>
+<span class="nc" id="L165">			throw new IllegalStateException(&quot;Could not create default client SslContext&quot;, ex);</span>
+		}
+	}
+
+
+	@Override
+	public ClientHttpRequest createRequest(URI uri, HttpMethod httpMethod) throws IOException {
+<span class="fc" id="L172">		return createRequestInternal(uri, httpMethod);</span>
+	}
+
+	@Override
+	public AsyncClientHttpRequest createAsyncRequest(URI uri, HttpMethod httpMethod) throws IOException {
+<span class="fc" id="L177">		return createRequestInternal(uri, httpMethod);</span>
+	}
+
+	private Netty4ClientHttpRequest createRequestInternal(URI uri, HttpMethod httpMethod) {
+<span class="fc" id="L181">		return new Netty4ClientHttpRequest(getBootstrap(uri), uri, httpMethod);</span>
+	}
+
+	private Bootstrap getBootstrap(URI uri) {
+<span class="pc bpc" id="L185" title="2 of 4 branches missed.">		boolean isSecure = (uri.getPort() == 443 || &quot;https&quot;.equalsIgnoreCase(uri.getScheme()));</span>
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">		if (isSecure) {</span>
+<span class="nc" id="L187">			return buildBootstrap(uri, true);</span>
+		}
+		else {
+<span class="fc" id="L190">			Bootstrap bootstrap = this.bootstrap;</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">			if (bootstrap == null) {</span>
+<span class="fc" id="L192">				bootstrap = buildBootstrap(uri, false);</span>
+<span class="fc" id="L193">				this.bootstrap = bootstrap;</span>
+			}
+<span class="fc" id="L195">			return bootstrap;</span>
+		}
+	}
+
+	private Bootstrap buildBootstrap(URI uri, boolean isSecure) {
+<span class="fc" id="L200">		Bootstrap bootstrap = new Bootstrap();</span>
+<span class="fc" id="L201">		bootstrap.group(this.eventLoopGroup).channel(NioSocketChannel.class)</span>
+<span class="fc" id="L202">				.handler(new ChannelInitializer&lt;SocketChannel&gt;() {</span>
+					@Override
+					protected void initChannel(SocketChannel channel) throws Exception {
+<span class="fc" id="L205">						configureChannel(channel.config());</span>
+<span class="fc" id="L206">						ChannelPipeline pipeline = channel.pipeline();</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">						if (isSecure) {</span>
+<span class="nc" id="L208">							Assert.notNull(sslContext, &quot;sslContext should not be null&quot;);</span>
+<span class="nc" id="L209">							pipeline.addLast(sslContext.newHandler(channel.alloc(), uri.getHost(), uri.getPort()));</span>
+						}
+<span class="fc" id="L211">						pipeline.addLast(new HttpClientCodec());</span>
+<span class="fc" id="L212">						pipeline.addLast(new HttpObjectAggregator(maxResponseSize));</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">						if (readTimeout &gt; 0) {</span>
+<span class="nc" id="L214">							pipeline.addLast(new ReadTimeoutHandler(readTimeout,</span>
+									TimeUnit.MILLISECONDS));
+						}
+<span class="fc" id="L217">					}</span>
+				});
+<span class="fc" id="L219">		return bootstrap;</span>
+	}
+
+	/**
+	 * Template method for changing properties on the given {@link SocketChannelConfig}.
+	 * &lt;p&gt;The default implementation sets the connect timeout based on the set property.
+	 * @param config the channel configuration
+	 */
+	protected void configureChannel(SocketChannelConfig config) {
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">		if (this.connectTimeout &gt;= 0) {</span>
+<span class="nc" id="L229">			config.setConnectTimeoutMillis(this.connectTimeout);</span>
+		}
+<span class="fc" id="L231">	}</span>
+
+
+	@Override
+	public void destroy() throws InterruptedException {
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">		if (this.defaultEventLoopGroup) {</span>
+			// Clean up the EventLoopGroup if we created it in the constructor
+<span class="nc" id="L238">			this.eventLoopGroup.shutdownGracefully().sync();</span>
+		}
+<span class="fc" id="L240">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

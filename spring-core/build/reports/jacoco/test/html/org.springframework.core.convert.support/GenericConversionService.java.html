@@ -1,0 +1,712 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GenericConversionService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.convert.support</a> &gt; <span class="el_source">GenericConversionService.java</span></div><h1>GenericConversionService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.convert.support;
+
+import java.lang.reflect.Array;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+import org.springframework.core.DecoratingProxy;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.convert.ConversionException;
+import org.springframework.core.convert.ConversionFailedException;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.ConverterNotFoundException;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.core.convert.converter.ConditionalConverter;
+import org.springframework.core.convert.converter.ConditionalGenericConverter;
+import org.springframework.core.convert.converter.Converter;
+import org.springframework.core.convert.converter.ConverterFactory;
+import org.springframework.core.convert.converter.ConverterRegistry;
+import org.springframework.core.convert.converter.GenericConverter;
+import org.springframework.core.convert.converter.GenericConverter.ConvertiblePair;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.StringUtils;
+
+/**
+ * Base {@link ConversionService} implementation suitable for use in most environments.
+ * Indirectly implements {@link ConverterRegistry} as registration API through the
+ * {@link ConfigurableConversionService} interface.
+ *
+ * @author Keith Donald
+ * @author Juergen Hoeller
+ * @author Chris Beams
+ * @author Phillip Webb
+ * @author David Haraburda
+ * @since 3.0
+ */
+<span class="fc" id="L63">public class GenericConversionService implements ConfigurableConversionService {</span>
+
+	/**
+	 * General NO-OP converter used when conversion is not required.
+	 */
+<span class="fc" id="L68">	private static final GenericConverter NO_OP_CONVERTER = new NoOpConverter(&quot;NO_OP&quot;);</span>
+
+	/**
+	 * Used as a cache entry when no converter is available.
+	 * This converter is never returned.
+	 */
+<span class="fc" id="L74">	private static final GenericConverter NO_MATCH = new NoOpConverter(&quot;NO_MATCH&quot;);</span>
+
+
+<span class="fc" id="L77">	private final Converters converters = new Converters();</span>
+
+<span class="fc" id="L79">	private final Map&lt;ConverterCacheKey, GenericConverter&gt; converterCache = new ConcurrentReferenceHashMap&lt;&gt;(64);</span>
+
+
+	// ConverterRegistry implementation
+
+	@Override
+	public void addConverter(Converter&lt;?, ?&gt; converter) {
+<span class="fc" id="L86">		ResolvableType[] typeInfo = getRequiredTypeInfo(converter.getClass(), Converter.class);</span>
+<span class="pc bpc" id="L87" title="1 of 4 branches missed.">		if (typeInfo == null &amp;&amp; converter instanceof DecoratingProxy) {</span>
+<span class="nc" id="L88">			typeInfo = getRequiredTypeInfo(((DecoratingProxy) converter).getDecoratedClass(), Converter.class);</span>
+		}
+<span class="fc bfc" id="L90" title="All 2 branches covered.">		if (typeInfo == null) {</span>
+<span class="fc" id="L91">			throw new IllegalArgumentException(&quot;Unable to determine source type &lt;S&gt; and target type &lt;T&gt; for your &quot; +</span>
+<span class="fc" id="L92">					&quot;Converter [&quot; + converter.getClass().getName() + &quot;]; does the class parameterize those types?&quot;);</span>
+		}
+<span class="fc" id="L94">		addConverter(new ConverterAdapter(converter, typeInfo[0], typeInfo[1]));</span>
+<span class="fc" id="L95">	}</span>
+
+	@Override
+	public &lt;S, T&gt; void addConverter(Class&lt;S&gt; sourceType, Class&lt;T&gt; targetType, Converter&lt;? super S, ? extends T&gt; converter) {
+<span class="fc" id="L99">		addConverter(new ConverterAdapter(</span>
+<span class="fc" id="L100">				converter, ResolvableType.forClass(sourceType), ResolvableType.forClass(targetType)));</span>
+<span class="fc" id="L101">	}</span>
+
+	@Override
+	public void addConverter(GenericConverter converter) {
+<span class="fc" id="L105">		this.converters.add(converter);</span>
+<span class="fc" id="L106">		invalidateCache();</span>
+<span class="fc" id="L107">	}</span>
+
+	@Override
+	public void addConverterFactory(ConverterFactory&lt;?, ?&gt; factory) {
+<span class="fc" id="L111">		ResolvableType[] typeInfo = getRequiredTypeInfo(factory.getClass(), ConverterFactory.class);</span>
+<span class="pc bpc" id="L112" title="3 of 4 branches missed.">		if (typeInfo == null &amp;&amp; factory instanceof DecoratingProxy) {</span>
+<span class="nc" id="L113">			typeInfo = getRequiredTypeInfo(((DecoratingProxy) factory).getDecoratedClass(), ConverterFactory.class);</span>
+		}
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">		if (typeInfo == null) {</span>
+<span class="nc" id="L116">			throw new IllegalArgumentException(&quot;Unable to determine source type &lt;S&gt; and target type &lt;T&gt; for your &quot; +</span>
+<span class="nc" id="L117">					&quot;ConverterFactory [&quot; + factory.getClass().getName() + &quot;]; does the class parameterize those types?&quot;);</span>
+		}
+<span class="fc" id="L119">		addConverter(new ConverterFactoryAdapter(factory,</span>
+<span class="fc" id="L120">				new ConvertiblePair(typeInfo[0].toClass(), typeInfo[1].toClass())));</span>
+<span class="fc" id="L121">	}</span>
+
+	@Override
+	public void removeConvertible(Class&lt;?&gt; sourceType, Class&lt;?&gt; targetType) {
+<span class="fc" id="L125">		this.converters.remove(sourceType, targetType);</span>
+<span class="fc" id="L126">		invalidateCache();</span>
+<span class="fc" id="L127">	}</span>
+
+
+	// ConversionService implementation
+
+	@Override
+	public boolean canConvert(@Nullable Class&lt;?&gt; sourceType, Class&lt;?&gt; targetType) {
+<span class="fc" id="L134">		Assert.notNull(targetType, &quot;Target type to convert to cannot be null&quot;);</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">		return canConvert((sourceType != null ? TypeDescriptor.valueOf(sourceType) : null),</span>
+<span class="fc" id="L136">				TypeDescriptor.valueOf(targetType));</span>
+	}
+
+	@Override
+	public boolean canConvert(@Nullable TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc" id="L141">		Assert.notNull(targetType, &quot;Target type to convert to cannot be null&quot;);</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">		if (sourceType == null) {</span>
+<span class="fc" id="L143">			return true;</span>
+		}
+<span class="fc" id="L145">		GenericConverter converter = getConverter(sourceType, targetType);</span>
+<span class="fc bfc" id="L146" title="All 2 branches covered.">		return (converter != null);</span>
+	}
+
+	/**
+	 * Return whether conversion between the source type and the target type can be bypassed.
+	 * &lt;p&gt;More precisely, this method will return true if objects of sourceType can be
+	 * converted to the target type by returning the source object unchanged.
+	 * @param sourceType context about the source type to convert from
+	 * (may be {@code null} if source is {@code null})
+	 * @param targetType context about the target type to convert to (required)
+	 * @return {@code true} if conversion can be bypassed; {@code false} otherwise
+	 * @throws IllegalArgumentException if targetType is {@code null}
+	 * @since 3.2
+	 */
+	public boolean canBypassConvert(@Nullable TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc" id="L161">		Assert.notNull(targetType, &quot;Target type to convert to cannot be null&quot;);</span>
+<span class="pc bpc" id="L162" title="1 of 2 branches missed.">		if (sourceType == null) {</span>
+<span class="nc" id="L163">			return true;</span>
+		}
+<span class="fc" id="L165">		GenericConverter converter = getConverter(sourceType, targetType);</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">		return (converter == NO_OP_CONVERTER);</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Nullable
+	public &lt;T&gt; T convert(@Nullable Object source, Class&lt;T&gt; targetType) {
+<span class="fc" id="L173">		Assert.notNull(targetType, &quot;Target type to convert to cannot be null&quot;);</span>
+<span class="fc" id="L174">		return (T) convert(source, TypeDescriptor.forObject(source), TypeDescriptor.valueOf(targetType));</span>
+	}
+
+	@Override
+	@Nullable
+	public Object convert(@Nullable Object source, @Nullable TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc" id="L180">		Assert.notNull(targetType, &quot;Target type to convert to cannot be null&quot;);</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">		if (sourceType == null) {</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">			Assert.isTrue(source == null, &quot;Source must be [null] if source type == [null]&quot;);</span>
+<span class="fc" id="L183">			return handleResult(null, targetType, convertNullSource(null, targetType));</span>
+		}
+<span class="fc bfc" id="L185" title="All 4 branches covered.">		if (source != null &amp;&amp; !sourceType.getObjectType().isInstance(source)) {</span>
+<span class="fc" id="L186">			throw new IllegalArgumentException(&quot;Source to convert from must be an instance of [&quot; +</span>
+<span class="fc" id="L187">					sourceType + &quot;]; instead it was a [&quot; + source.getClass().getName() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L189">		GenericConverter converter = getConverter(sourceType, targetType);</span>
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">		if (converter != null) {</span>
+<span class="fc" id="L191">			Object result = ConversionUtils.invokeConverter(converter, source, sourceType, targetType);</span>
+<span class="fc" id="L192">			return handleResult(sourceType, targetType, result);</span>
+		}
+<span class="nc" id="L194">		return handleConverterNotFound(source, sourceType, targetType);</span>
+	}
+
+	/**
+	 * Convenience operation for converting a source object to the specified targetType,
+	 * where the target type is a descriptor that provides additional conversion context.
+	 * Simply delegates to {@link #convert(Object, TypeDescriptor, TypeDescriptor)} and
+	 * encapsulates the construction of the source type descriptor using
+	 * {@link TypeDescriptor#forObject(Object)}.
+	 * @param source the source object
+	 * @param targetType the target type
+	 * @return the converted value
+	 * @throws ConversionException if a conversion exception occurred
+	 * @throws IllegalArgumentException if targetType is {@code null},
+	 * or sourceType is {@code null} but source is not {@code null}
+	 */
+	@Nullable
+	public Object convert(@Nullable Object source, TypeDescriptor targetType) {
+<span class="fc" id="L212">		return convert(source, TypeDescriptor.forObject(source), targetType);</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="nc" id="L217">		return this.converters.toString();</span>
+	}
+
+
+	// Protected template methods
+
+	/**
+	 * Template method to convert a {@code null} source.
+	 * &lt;p&gt;The default implementation returns {@code null} or the Java 8
+	 * {@link java.util.Optional#empty()} instance if the target type is
+	 * {@code java.util.Optional}. Subclasses may override this to return
+	 * custom {@code null} objects for specific target types.
+	 * @param sourceType the source type to convert from
+	 * @param targetType the target type to convert to
+	 * @return the converted null object
+	 */
+	@Nullable
+	protected Object convertNullSource(@Nullable TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc bfc" id="L235" title="All 2 branches covered.">		if (targetType.getObjectType() == Optional.class) {</span>
+<span class="fc" id="L236">			return Optional.empty();</span>
+		}
+<span class="fc" id="L238">		return null;</span>
+	}
+
+	/**
+	 * Hook method to lookup the converter for a given sourceType/targetType pair.
+	 * First queries this ConversionService's converter cache.
+	 * On a cache miss, then performs an exhaustive search for a matching converter.
+	 * If no converter matches, returns the default converter.
+	 * @param sourceType the source type to convert from
+	 * @param targetType the target type to convert to
+	 * @return the generic converter that will perform the conversion,
+	 * or {@code null} if no suitable converter was found
+	 * @see #getDefaultConverter(TypeDescriptor, TypeDescriptor)
+	 */
+	@Nullable
+	protected GenericConverter getConverter(TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc" id="L254">		ConverterCacheKey key = new ConverterCacheKey(sourceType, targetType);</span>
+<span class="fc" id="L255">		GenericConverter converter = this.converterCache.get(key);</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">		if (converter != null) {</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">			return (converter != NO_MATCH ? converter : null);</span>
+		}
+
+<span class="fc" id="L260">		converter = this.converters.find(sourceType, targetType);</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">		if (converter == null) {</span>
+<span class="fc" id="L262">			converter = getDefaultConverter(sourceType, targetType);</span>
+		}
+
+<span class="fc bfc" id="L265" title="All 2 branches covered.">		if (converter != null) {</span>
+<span class="fc" id="L266">			this.converterCache.put(key, converter);</span>
+<span class="fc" id="L267">			return converter;</span>
+		}
+
+<span class="fc" id="L270">		this.converterCache.put(key, NO_MATCH);</span>
+<span class="fc" id="L271">		return null;</span>
+	}
+
+	/**
+	 * Return the default converter if no converter is found for the given sourceType/targetType pair.
+	 * &lt;p&gt;Returns a NO_OP Converter if the source type is assignable to the target type.
+	 * Returns {@code null} otherwise, indicating no suitable converter could be found.
+	 * @param sourceType the source type to convert from
+	 * @param targetType the target type to convert to
+	 * @return the default generic converter that will perform the conversion
+	 */
+	@Nullable
+	protected GenericConverter getDefaultConverter(TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc bfc" id="L284" title="All 2 branches covered.">		return (sourceType.isAssignableTo(targetType) ? NO_OP_CONVERTER : null);</span>
+	}
+
+
+	// Internal helpers
+
+	@Nullable
+	private ResolvableType[] getRequiredTypeInfo(Class&lt;?&gt; converterClass, Class&lt;?&gt; genericIfc) {
+<span class="fc" id="L292">		ResolvableType resolvableType = ResolvableType.forClass(converterClass).as(genericIfc);</span>
+<span class="fc" id="L293">		ResolvableType[] generics = resolvableType.getGenerics();</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">		if (generics.length &lt; 2) {</span>
+<span class="nc" id="L295">			return null;</span>
+		}
+<span class="fc" id="L297">		Class&lt;?&gt; sourceType = generics[0].resolve();</span>
+<span class="fc" id="L298">		Class&lt;?&gt; targetType = generics[1].resolve();</span>
+<span class="pc bpc" id="L299" title="1 of 4 branches missed.">		if (sourceType == null || targetType == null) {</span>
+<span class="fc" id="L300">			return null;</span>
+		}
+<span class="fc" id="L302">		return generics;</span>
+	}
+
+	private void invalidateCache() {
+<span class="fc" id="L306">		this.converterCache.clear();</span>
+<span class="fc" id="L307">	}</span>
+
+	@Nullable
+	private Object handleConverterNotFound(
+			@Nullable Object source, @Nullable TypeDescriptor sourceType, TypeDescriptor targetType) {
+
+<span class="fc bfc" id="L313" title="All 2 branches covered.">		if (source == null) {</span>
+<span class="nc" id="L314">			assertNotPrimitiveTargetType(sourceType, targetType);</span>
+<span class="nc" id="L315">			return null;</span>
+		}
+<span class="pc bpc" id="L317" title="2 of 4 branches missed.">		if ((sourceType == null || sourceType.isAssignableTo(targetType)) &amp;&amp;</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">				targetType.getObjectType().isInstance(source)) {</span>
+<span class="nc" id="L319">			return source;</span>
+		}
+<span class="fc" id="L321">		throw new ConverterNotFoundException(sourceType, targetType);</span>
+	}
+
+	@Nullable
+	private Object handleResult(@Nullable TypeDescriptor sourceType, TypeDescriptor targetType, @Nullable Object result) {
+<span class="fc bfc" id="L326" title="All 2 branches covered.">		if (result == null) {</span>
+<span class="fc" id="L327">			assertNotPrimitiveTargetType(sourceType, targetType);</span>
+		}
+<span class="fc" id="L329">		return result;</span>
+	}
+
+	private void assertNotPrimitiveTargetType(@Nullable TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc bfc" id="L333" title="All 2 branches covered.">		if (targetType.isPrimitive()) {</span>
+<span class="fc" id="L334">			throw new ConversionFailedException(sourceType, targetType, null,</span>
+					new IllegalArgumentException(&quot;A null value cannot be assigned to a primitive type&quot;));
+		}
+<span class="fc" id="L337">	}</span>
+
+
+	/**
+	 * Adapts a {@link Converter} to a {@link GenericConverter}.
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private final class ConverterAdapter implements ConditionalGenericConverter {
+
+		private final Converter&lt;Object, Object&gt; converter;
+
+		private final ConvertiblePair typeInfo;
+
+		private final ResolvableType targetType;
+
+<span class="fc" id="L352">		public ConverterAdapter(Converter&lt;?, ?&gt; converter, ResolvableType sourceType, ResolvableType targetType) {</span>
+<span class="fc" id="L353">			this.converter = (Converter&lt;Object, Object&gt;) converter;</span>
+<span class="fc" id="L354">			this.typeInfo = new ConvertiblePair(sourceType.toClass(), targetType.toClass());</span>
+<span class="fc" id="L355">			this.targetType = targetType;</span>
+<span class="fc" id="L356">		}</span>
+
+		@Override
+		public Set&lt;ConvertiblePair&gt; getConvertibleTypes() {
+<span class="fc" id="L360">			return Collections.singleton(this.typeInfo);</span>
+		}
+
+		@Override
+		public boolean matches(TypeDescriptor sourceType, TypeDescriptor targetType) {
+			// Check raw type first...
+<span class="fc bfc" id="L366" title="All 2 branches covered.">			if (this.typeInfo.getTargetType() != targetType.getObjectType()) {</span>
+<span class="fc" id="L367">				return false;</span>
+			}
+			// Full check for complex generic type match required?
+<span class="fc" id="L370">			ResolvableType rt = targetType.getResolvableType();</span>
+<span class="fc bfc" id="L371" title="All 4 branches covered.">			if (!(rt.getType() instanceof Class) &amp;&amp; !rt.isAssignableFrom(this.targetType) &amp;&amp;</span>
+<span class="fc bfc" id="L372" title="All 2 branches covered.">					!this.targetType.hasUnresolvableGenerics()) {</span>
+<span class="fc" id="L373">				return false;</span>
+			}
+<span class="fc bfc" id="L375" title="All 2 branches covered.">			return !(this.converter instanceof ConditionalConverter) ||</span>
+<span class="fc bfc" id="L376" title="All 2 branches covered.">					((ConditionalConverter) this.converter).matches(sourceType, targetType);</span>
+		}
+
+		@Override
+		@Nullable
+		public Object convert(@Nullable Object source, TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="pc bpc" id="L382" title="1 of 2 branches missed.">			if (source == null) {</span>
+<span class="nc" id="L383">				return convertNullSource(sourceType, targetType);</span>
+			}
+<span class="fc" id="L385">			return this.converter.convert(source);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L390">			return (this.typeInfo + &quot; : &quot; + this.converter);</span>
+		}
+	}
+
+
+	/**
+	 * Adapts a {@link ConverterFactory} to a {@link GenericConverter}.
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private final class ConverterFactoryAdapter implements ConditionalGenericConverter {
+
+		private final ConverterFactory&lt;Object, Object&gt; converterFactory;
+
+		private final ConvertiblePair typeInfo;
+
+<span class="fc" id="L405">		public ConverterFactoryAdapter(ConverterFactory&lt;?, ?&gt; converterFactory, ConvertiblePair typeInfo) {</span>
+<span class="fc" id="L406">			this.converterFactory = (ConverterFactory&lt;Object, Object&gt;) converterFactory;</span>
+<span class="fc" id="L407">			this.typeInfo = typeInfo;</span>
+<span class="fc" id="L408">		}</span>
+
+		@Override
+		public Set&lt;ConvertiblePair&gt; getConvertibleTypes() {
+<span class="fc" id="L412">			return Collections.singleton(this.typeInfo);</span>
+		}
+
+		@Override
+		public boolean matches(TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc" id="L417">			boolean matches = true;</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">			if (this.converterFactory instanceof ConditionalConverter) {</span>
+<span class="fc" id="L419">				matches = ((ConditionalConverter) this.converterFactory).matches(sourceType, targetType);</span>
+			}
+<span class="fc bfc" id="L421" title="All 2 branches covered.">			if (matches) {</span>
+<span class="fc" id="L422">				Converter&lt;?, ?&gt; converter = this.converterFactory.getConverter(targetType.getType());</span>
+<span class="fc bfc" id="L423" title="All 2 branches covered.">				if (converter instanceof ConditionalConverter) {</span>
+<span class="fc" id="L424">					matches = ((ConditionalConverter) converter).matches(sourceType, targetType);</span>
+				}
+			}
+<span class="fc" id="L427">			return matches;</span>
+		}
+
+		@Override
+		@Nullable
+		public Object convert(@Nullable Object source, TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">			if (source == null) {</span>
+<span class="nc" id="L434">				return convertNullSource(sourceType, targetType);</span>
+			}
+<span class="fc" id="L436">			return this.converterFactory.getConverter(targetType.getObjectType()).convert(source);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L441">			return (this.typeInfo + &quot; : &quot; + this.converterFactory);</span>
+		}
+	}
+
+
+	/**
+	 * Key for use with the converter cache.
+	 */
+	private static final class ConverterCacheKey implements Comparable&lt;ConverterCacheKey&gt; {
+
+		private final TypeDescriptor sourceType;
+
+		private final TypeDescriptor targetType;
+
+<span class="fc" id="L455">		public ConverterCacheKey(TypeDescriptor sourceType, TypeDescriptor targetType) {</span>
+<span class="fc" id="L456">			this.sourceType = sourceType;</span>
+<span class="fc" id="L457">			this.targetType = targetType;</span>
+<span class="fc" id="L458">		}</span>
+
+		@Override
+		public boolean equals(Object other) {
+<span class="pc bpc" id="L462" title="1 of 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L463">				return true;</span>
+			}
+<span class="pc bpc" id="L465" title="1 of 2 branches missed.">			if (!(other instanceof ConverterCacheKey)) {</span>
+<span class="nc" id="L466">				return false;</span>
+			}
+<span class="fc" id="L468">			ConverterCacheKey otherKey = (ConverterCacheKey) other;</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">			return (this.sourceType.equals(otherKey.sourceType)) &amp;&amp;</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">					this.targetType.equals(otherKey.targetType);</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L475">			return (this.sourceType.hashCode() * 29 + this.targetType.hashCode());</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L480">			return (&quot;ConverterCacheKey [sourceType = &quot; + this.sourceType +</span>
+					&quot;, targetType = &quot; + this.targetType + &quot;]&quot;);
+		}
+
+		@Override
+		public int compareTo(ConverterCacheKey other) {
+<span class="nc" id="L486">			int result = this.sourceType.getResolvableType().toString().compareTo(</span>
+<span class="nc" id="L487">					other.sourceType.getResolvableType().toString());</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">			if (result == 0) {</span>
+<span class="nc" id="L489">				result = this.targetType.getResolvableType().toString().compareTo(</span>
+<span class="nc" id="L490">						other.targetType.getResolvableType().toString());</span>
+			}
+<span class="nc" id="L492">			return result;</span>
+		}
+	}
+
+
+	/**
+	 * Manages all converters registered with the service.
+	 */
+<span class="fc" id="L500">	private static class Converters {</span>
+
+<span class="fc" id="L502">		private final Set&lt;GenericConverter&gt; globalConverters = new LinkedHashSet&lt;&gt;();</span>
+
+<span class="fc" id="L504">		private final Map&lt;ConvertiblePair, ConvertersForPair&gt; converters = new LinkedHashMap&lt;&gt;(36);</span>
+
+		public void add(GenericConverter converter) {
+<span class="fc" id="L507">			Set&lt;ConvertiblePair&gt; convertibleTypes = converter.getConvertibleTypes();</span>
+<span class="fc bfc" id="L508" title="All 2 branches covered.">			if (convertibleTypes == null) {</span>
+<span class="fc" id="L509">				Assert.state(converter instanceof ConditionalConverter,</span>
+						&quot;Only conditional converters may return null convertible types&quot;);
+<span class="fc" id="L511">				this.globalConverters.add(converter);</span>
+			}
+			else {
+<span class="fc bfc" id="L514" title="All 2 branches covered.">				for (ConvertiblePair convertiblePair : convertibleTypes) {</span>
+<span class="fc" id="L515">					ConvertersForPair convertersForPair = getMatchableConverters(convertiblePair);</span>
+<span class="fc" id="L516">					convertersForPair.add(converter);</span>
+<span class="fc" id="L517">				}</span>
+			}
+<span class="fc" id="L519">		}</span>
+
+		private ConvertersForPair getMatchableConverters(ConvertiblePair convertiblePair) {
+<span class="fc" id="L522">			ConvertersForPair convertersForPair = this.converters.get(convertiblePair);</span>
+<span class="fc bfc" id="L523" title="All 2 branches covered.">			if (convertersForPair == null) {</span>
+<span class="fc" id="L524">				convertersForPair = new ConvertersForPair();</span>
+<span class="fc" id="L525">				this.converters.put(convertiblePair, convertersForPair);</span>
+			}
+<span class="fc" id="L527">			return convertersForPair;</span>
+		}
+
+		public void remove(Class&lt;?&gt; sourceType, Class&lt;?&gt; targetType) {
+<span class="fc" id="L531">			this.converters.remove(new ConvertiblePair(sourceType, targetType));</span>
+<span class="fc" id="L532">		}</span>
+
+		/**
+		 * Find a {@link GenericConverter} given a source and target type.
+		 * &lt;p&gt;This method will attempt to match all possible converters by working
+		 * through the class and interface hierarchy of the types.
+		 * @param sourceType the source type
+		 * @param targetType the target type
+		 * @return a matching {@link GenericConverter}, or {@code null} if none found
+		 */
+		@Nullable
+		public GenericConverter find(TypeDescriptor sourceType, TypeDescriptor targetType) {
+			// Search the full type hierarchy
+<span class="fc" id="L545">			List&lt;Class&lt;?&gt;&gt; sourceCandidates = getClassHierarchy(sourceType.getType());</span>
+<span class="fc" id="L546">			List&lt;Class&lt;?&gt;&gt; targetCandidates = getClassHierarchy(targetType.getType());</span>
+<span class="fc bfc" id="L547" title="All 2 branches covered.">			for (Class&lt;?&gt; sourceCandidate : sourceCandidates) {</span>
+<span class="fc bfc" id="L548" title="All 2 branches covered.">				for (Class&lt;?&gt; targetCandidate : targetCandidates) {</span>
+<span class="fc" id="L549">					ConvertiblePair convertiblePair = new ConvertiblePair(sourceCandidate, targetCandidate);</span>
+<span class="fc" id="L550">					GenericConverter converter = getRegisteredConverter(sourceType, targetType, convertiblePair);</span>
+<span class="fc bfc" id="L551" title="All 2 branches covered.">					if (converter != null) {</span>
+<span class="fc" id="L552">						return converter;</span>
+					}
+<span class="fc" id="L554">				}</span>
+<span class="fc" id="L555">			}</span>
+<span class="fc" id="L556">			return null;</span>
+		}
+
+		@Nullable
+		private GenericConverter getRegisteredConverter(TypeDescriptor sourceType,
+				TypeDescriptor targetType, ConvertiblePair convertiblePair) {
+
+			// Check specifically registered converters
+<span class="fc" id="L564">			ConvertersForPair convertersForPair = this.converters.get(convertiblePair);</span>
+<span class="fc bfc" id="L565" title="All 2 branches covered.">			if (convertersForPair != null) {</span>
+<span class="fc" id="L566">				GenericConverter converter = convertersForPair.getConverter(sourceType, targetType);</span>
+<span class="fc bfc" id="L567" title="All 2 branches covered.">				if (converter != null) {</span>
+<span class="fc" id="L568">					return converter;</span>
+				}
+			}
+			// Check ConditionalConverters for a dynamic match
+<span class="fc bfc" id="L572" title="All 2 branches covered.">			for (GenericConverter globalConverter : this.globalConverters) {</span>
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">				if (((ConditionalConverter) globalConverter).matches(sourceType, targetType)) {</span>
+<span class="nc" id="L574">					return globalConverter;</span>
+				}
+<span class="fc" id="L576">			}</span>
+<span class="fc" id="L577">			return null;</span>
+		}
+
+		/**
+		 * Returns an ordered class hierarchy for the given type.
+		 * @param type the type
+		 * @return an ordered list of all classes that the given type extends or implements
+		 */
+		private List&lt;Class&lt;?&gt;&gt; getClassHierarchy(Class&lt;?&gt; type) {
+<span class="fc" id="L586">			List&lt;Class&lt;?&gt;&gt; hierarchy = new ArrayList&lt;&gt;(20);</span>
+<span class="fc" id="L587">			Set&lt;Class&lt;?&gt;&gt; visited = new HashSet&lt;&gt;(20);</span>
+<span class="fc" id="L588">			addToClassHierarchy(0, ClassUtils.resolvePrimitiveIfNecessary(type), false, hierarchy, visited);</span>
+<span class="fc" id="L589">			boolean array = type.isArray();</span>
+
+<span class="fc" id="L591">			int i = 0;</span>
+<span class="fc bfc" id="L592" title="All 2 branches covered.">			while (i &lt; hierarchy.size()) {</span>
+<span class="fc" id="L593">				Class&lt;?&gt; candidate = hierarchy.get(i);</span>
+<span class="fc bfc" id="L594" title="All 2 branches covered.">				candidate = (array ? candidate.getComponentType() : ClassUtils.resolvePrimitiveIfNecessary(candidate));</span>
+<span class="fc" id="L595">				Class&lt;?&gt; superclass = candidate.getSuperclass();</span>
+<span class="fc bfc" id="L596" title="All 6 branches covered.">				if (superclass != null &amp;&amp; superclass != Object.class &amp;&amp; superclass != Enum.class) {</span>
+<span class="fc" id="L597">					addToClassHierarchy(i + 1, candidate.getSuperclass(), array, hierarchy, visited);</span>
+				}
+<span class="fc" id="L599">				addInterfacesToClassHierarchy(candidate, array, hierarchy, visited);</span>
+<span class="fc" id="L600">				i++;</span>
+<span class="fc" id="L601">			}</span>
+
+<span class="fc bfc" id="L603" title="All 2 branches covered.">			if (Enum.class.isAssignableFrom(type)) {</span>
+<span class="fc" id="L604">				addToClassHierarchy(hierarchy.size(), Enum.class, array, hierarchy, visited);</span>
+<span class="fc" id="L605">				addToClassHierarchy(hierarchy.size(), Enum.class, false, hierarchy, visited);</span>
+<span class="fc" id="L606">				addInterfacesToClassHierarchy(Enum.class, array, hierarchy, visited);</span>
+			}
+
+<span class="fc" id="L609">			addToClassHierarchy(hierarchy.size(), Object.class, array, hierarchy, visited);</span>
+<span class="fc" id="L610">			addToClassHierarchy(hierarchy.size(), Object.class, false, hierarchy, visited);</span>
+<span class="fc" id="L611">			return hierarchy;</span>
+		}
+
+		private void addInterfacesToClassHierarchy(Class&lt;?&gt; type, boolean asArray,
+				List&lt;Class&lt;?&gt;&gt; hierarchy, Set&lt;Class&lt;?&gt;&gt; visited) {
+
+<span class="fc bfc" id="L617" title="All 2 branches covered.">			for (Class&lt;?&gt; implementedInterface : type.getInterfaces()) {</span>
+<span class="fc" id="L618">				addToClassHierarchy(hierarchy.size(), implementedInterface, asArray, hierarchy, visited);</span>
+			}
+<span class="fc" id="L620">		}</span>
+
+		private void addToClassHierarchy(int index, Class&lt;?&gt; type, boolean asArray,
+				List&lt;Class&lt;?&gt;&gt; hierarchy, Set&lt;Class&lt;?&gt;&gt; visited) {
+
+<span class="fc bfc" id="L625" title="All 2 branches covered.">			if (asArray) {</span>
+<span class="fc" id="L626">				type = Array.newInstance(type, 0).getClass();</span>
+			}
+<span class="fc bfc" id="L628" title="All 2 branches covered.">			if (visited.add(type)) {</span>
+<span class="fc" id="L629">				hierarchy.add(index, type);</span>
+			}
+<span class="fc" id="L631">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L635">			StringBuilder builder = new StringBuilder();</span>
+<span class="nc" id="L636">			builder.append(&quot;ConversionService converters =\n&quot;);</span>
+<span class="nc bnc" id="L637" title="All 2 branches missed.">			for (String converterString : getConverterStrings()) {</span>
+<span class="nc" id="L638">				builder.append('\t').append(converterString).append('\n');</span>
+<span class="nc" id="L639">			}</span>
+<span class="nc" id="L640">			return builder.toString();</span>
+		}
+
+		private List&lt;String&gt; getConverterStrings() {
+<span class="nc" id="L644">			List&lt;String&gt; converterStrings = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">			for (ConvertersForPair convertersForPair : this.converters.values()) {</span>
+<span class="nc" id="L646">				converterStrings.add(convertersForPair.toString());</span>
+<span class="nc" id="L647">			}</span>
+<span class="nc" id="L648">			Collections.sort(converterStrings);</span>
+<span class="nc" id="L649">			return converterStrings;</span>
+		}
+	}
+
+
+	/**
+	 * Manages converters registered with a specific {@link ConvertiblePair}.
+	 */
+<span class="fc" id="L657">	private static class ConvertersForPair {</span>
+
+<span class="fc" id="L659">		private final LinkedList&lt;GenericConverter&gt; converters = new LinkedList&lt;&gt;();</span>
+
+		public void add(GenericConverter converter) {
+<span class="fc" id="L662">			this.converters.addFirst(converter);</span>
+<span class="fc" id="L663">		}</span>
+
+		@Nullable
+		public GenericConverter getConverter(TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc bfc" id="L667" title="All 2 branches covered.">			for (GenericConverter converter : this.converters) {</span>
+<span class="pc bpc" id="L668" title="1 of 2 branches missed.">				if (!(converter instanceof ConditionalGenericConverter) ||</span>
+<span class="fc bfc" id="L669" title="All 2 branches covered.">						((ConditionalGenericConverter) converter).matches(sourceType, targetType)) {</span>
+<span class="fc" id="L670">					return converter;</span>
+				}
+<span class="fc" id="L672">			}</span>
+<span class="fc" id="L673">			return null;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L678">			return StringUtils.collectionToCommaDelimitedString(this.converters);</span>
+		}
+	}
+
+
+	/**
+	 * Internal converter that performs no operation.
+	 */
+	private static class NoOpConverter implements GenericConverter {
+
+		private final String name;
+
+<span class="fc" id="L690">		public NoOpConverter(String name) {</span>
+<span class="fc" id="L691">			this.name = name;</span>
+<span class="fc" id="L692">		}</span>
+
+		@Override
+		public Set&lt;ConvertiblePair&gt; getConvertibleTypes() {
+<span class="nc" id="L696">			return null;</span>
+		}
+
+		@Override
+		@Nullable
+		public Object convert(@Nullable Object source, TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc" id="L702">			return source;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L707">			return this.name;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

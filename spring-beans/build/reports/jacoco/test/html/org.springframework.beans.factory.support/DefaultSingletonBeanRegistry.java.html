@@ -1,0 +1,620 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultSingletonBeanRegistry.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">DefaultSingletonBeanRegistry.java</span></div><h1>DefaultSingletonBeanRegistry.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanCreationNotAllowedException;
+import org.springframework.beans.factory.BeanCurrentlyInCreationException;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.ObjectFactory;
+import org.springframework.beans.factory.config.SingletonBeanRegistry;
+import org.springframework.core.SimpleAliasRegistry;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+/**
+ * Generic registry for shared bean instances, implementing the
+ * {@link org.springframework.beans.factory.config.SingletonBeanRegistry}.
+ * Allows for registering singleton instances that should be shared
+ * for all callers of the registry, to be obtained via bean name.
+ *
+ * &lt;p&gt;Also supports registration of
+ * {@link org.springframework.beans.factory.DisposableBean} instances,
+ * (which might or might not correspond to registered singletons),
+ * to be destroyed on shutdown of the registry. Dependencies between
+ * beans can be registered to enforce an appropriate shutdown order.
+ *
+ * &lt;p&gt;This class mainly serves as base class for
+ * {@link org.springframework.beans.factory.BeanFactory} implementations,
+ * factoring out the common management of singleton bean instances. Note that
+ * the {@link org.springframework.beans.factory.config.ConfigurableBeanFactory}
+ * interface extends the {@link SingletonBeanRegistry} interface.
+ *
+ * &lt;p&gt;Note that this class assumes neither a bean definition concept
+ * nor a specific creation process for bean instances, in contrast to
+ * {@link AbstractBeanFactory} and {@link DefaultListableBeanFactory}
+ * (which inherit from it). Can alternatively also be used as a nested
+ * helper to delegate to.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see #registerSingleton
+ * @see #registerDisposableBean
+ * @see org.springframework.beans.factory.DisposableBean
+ * @see org.springframework.beans.factory.config.ConfigurableBeanFactory
+ */
+<span class="fc" id="L71">public class DefaultSingletonBeanRegistry extends SimpleAliasRegistry implements SingletonBeanRegistry {</span>
+
+	/** Cache of singleton objects: bean name to bean instance. */
+<span class="fc" id="L74">	private final Map&lt;String, Object&gt; singletonObjects = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+	/** Cache of singleton factories: bean name to ObjectFactory. */
+<span class="fc" id="L77">	private final Map&lt;String, ObjectFactory&lt;?&gt;&gt; singletonFactories = new HashMap&lt;&gt;(16);</span>
+
+	/** Cache of early singleton objects: bean name to bean instance. */
+<span class="fc" id="L80">	private final Map&lt;String, Object&gt; earlySingletonObjects = new HashMap&lt;&gt;(16);</span>
+
+	/** Set of registered singletons, containing the bean names in registration order. */
+<span class="fc" id="L83">	private final Set&lt;String&gt; registeredSingletons = new LinkedHashSet&lt;&gt;(256);</span>
+
+	/** Names of beans that are currently in creation. */
+<span class="fc" id="L86">	private final Set&lt;String&gt; singletonsCurrentlyInCreation =</span>
+<span class="fc" id="L87">			Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(16));</span>
+
+	/** Names of beans currently excluded from in creation checks. */
+<span class="fc" id="L90">	private final Set&lt;String&gt; inCreationCheckExclusions =</span>
+<span class="fc" id="L91">			Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;(16));</span>
+
+	/** List of suppressed Exceptions, available for associating related causes. */
+	@Nullable
+	private Set&lt;Exception&gt; suppressedExceptions;
+
+	/** Flag that indicates whether we're currently within destroySingletons. */
+<span class="fc" id="L98">	private boolean singletonsCurrentlyInDestruction = false;</span>
+
+	/** Disposable bean instances: bean name to disposable instance. */
+<span class="fc" id="L101">	private final Map&lt;String, Object&gt; disposableBeans = new LinkedHashMap&lt;&gt;();</span>
+
+	/** Map between containing bean names: bean name to Set of bean names that the bean contains. */
+<span class="fc" id="L104">	private final Map&lt;String, Set&lt;String&gt;&gt; containedBeanMap = new ConcurrentHashMap&lt;&gt;(16);</span>
+
+	/** Map between dependent bean names: bean name to Set of dependent bean names. */
+<span class="fc" id="L107">	private final Map&lt;String, Set&lt;String&gt;&gt; dependentBeanMap = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+	/** Map between depending bean names: bean name to Set of bean names for the bean's dependencies. */
+<span class="fc" id="L110">	private final Map&lt;String, Set&lt;String&gt;&gt; dependenciesForBeanMap = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+
+	@Override
+	public void registerSingleton(String beanName, Object singletonObject) throws IllegalStateException {
+<span class="fc" id="L115">		Assert.notNull(beanName, &quot;Bean name must not be null&quot;);</span>
+<span class="fc" id="L116">		Assert.notNull(singletonObject, &quot;Singleton object must not be null&quot;);</span>
+<span class="fc" id="L117">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L118">			Object oldObject = this.singletonObjects.get(beanName);</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">			if (oldObject != null) {</span>
+<span class="fc" id="L120">				throw new IllegalStateException(&quot;Could not register object [&quot; + singletonObject +</span>
+						&quot;] under bean name '&quot; + beanName + &quot;': there is already object [&quot; + oldObject + &quot;] bound&quot;);
+			}
+<span class="fc" id="L123">			addSingleton(beanName, singletonObject);</span>
+<span class="fc" id="L124">		}</span>
+<span class="fc" id="L125">	}</span>
+
+	/**
+	 * Add the given singleton object to the singleton cache of this factory.
+	 * &lt;p&gt;To be called for eager registration of singletons.
+	 * @param beanName the name of the bean
+	 * @param singletonObject the singleton object
+	 */
+	protected void addSingleton(String beanName, Object singletonObject) {
+<span class="fc" id="L134">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L135">			this.singletonObjects.put(beanName, singletonObject);</span>
+<span class="fc" id="L136">			this.singletonFactories.remove(beanName);</span>
+<span class="fc" id="L137">			this.earlySingletonObjects.remove(beanName);</span>
+<span class="fc" id="L138">			this.registeredSingletons.add(beanName);</span>
+<span class="fc" id="L139">		}</span>
+<span class="fc" id="L140">	}</span>
+
+	/**
+	 * Add the given singleton factory for building the specified singleton
+	 * if necessary.
+	 * &lt;p&gt;To be called for eager registration of singletons, e.g. to be able to
+	 * resolve circular references.
+	 * @param beanName the name of the bean
+	 * @param singletonFactory the factory for the singleton object
+	 */
+	protected void addSingletonFactory(String beanName, ObjectFactory&lt;?&gt; singletonFactory) {
+<span class="fc" id="L151">		Assert.notNull(singletonFactory, &quot;Singleton factory must not be null&quot;);</span>
+<span class="fc" id="L152">		synchronized (this.singletonObjects) {</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">			if (!this.singletonObjects.containsKey(beanName)) {</span>
+<span class="fc" id="L154">				this.singletonFactories.put(beanName, singletonFactory);</span>
+<span class="fc" id="L155">				this.earlySingletonObjects.remove(beanName);</span>
+<span class="fc" id="L156">				this.registeredSingletons.add(beanName);</span>
+			}
+<span class="fc" id="L158">		}</span>
+<span class="fc" id="L159">	}</span>
+
+	@Override
+	@Nullable
+	public Object getSingleton(String beanName) {
+<span class="fc" id="L164">		return getSingleton(beanName, true);</span>
+	}
+
+	/**
+	 * Return the (raw) singleton object registered under the given name.
+	 * &lt;p&gt;Checks already instantiated singletons and also allows for an early
+	 * reference to a currently created singleton (resolving a circular reference).
+	 * @param beanName the name of the bean to look for
+	 * @param allowEarlyReference whether early references should be created or not
+	 * @return the registered singleton object, or {@code null} if none found
+	 */
+	@Nullable
+	protected Object getSingleton(String beanName, boolean allowEarlyReference) {
+<span class="fc" id="L177">		Object singletonObject = this.singletonObjects.get(beanName);</span>
+<span class="fc bfc" id="L178" title="All 4 branches covered.">		if (singletonObject == null &amp;&amp; isSingletonCurrentlyInCreation(beanName)) {</span>
+<span class="fc" id="L179">			synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L180">				singletonObject = this.earlySingletonObjects.get(beanName);</span>
+<span class="fc bfc" id="L181" title="All 4 branches covered.">				if (singletonObject == null &amp;&amp; allowEarlyReference) {</span>
+<span class="fc" id="L182">					ObjectFactory&lt;?&gt; singletonFactory = this.singletonFactories.get(beanName);</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">					if (singletonFactory != null) {</span>
+<span class="fc" id="L184">						singletonObject = singletonFactory.getObject();</span>
+<span class="fc" id="L185">						this.earlySingletonObjects.put(beanName, singletonObject);</span>
+<span class="fc" id="L186">						this.singletonFactories.remove(beanName);</span>
+					}
+				}
+<span class="fc" id="L189">			}</span>
+		}
+<span class="fc" id="L191">		return singletonObject;</span>
+	}
+
+	/**
+	 * Return the (raw) singleton object registered under the given name,
+	 * creating and registering a new one if none registered yet.
+	 * @param beanName the name of the bean
+	 * @param singletonFactory the ObjectFactory to lazily create the singleton
+	 * with, if necessary
+	 * @return the registered singleton object
+	 */
+	public Object getSingleton(String beanName, ObjectFactory&lt;?&gt; singletonFactory) {
+<span class="fc" id="L203">		Assert.notNull(beanName, &quot;Bean name must not be null&quot;);</span>
+<span class="fc" id="L204">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L205">			Object singletonObject = this.singletonObjects.get(beanName);</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">			if (singletonObject == null) {</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">				if (this.singletonsCurrentlyInDestruction) {</span>
+<span class="nc" id="L208">					throw new BeanCreationNotAllowedException(beanName,</span>
+							&quot;Singleton bean creation not allowed while singletons of this factory are in destruction &quot; +
+							&quot;(Do not request a bean from a BeanFactory in a destroy method implementation!)&quot;);
+				}
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L213">					logger.debug(&quot;Creating shared instance of singleton bean '&quot; + beanName + &quot;'&quot;);</span>
+				}
+<span class="fc" id="L215">				beforeSingletonCreation(beanName);</span>
+<span class="fc" id="L216">				boolean newSingleton = false;</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">				boolean recordSuppressedExceptions = (this.suppressedExceptions == null);</span>
+<span class="fc bfc" id="L218" title="All 2 branches covered.">				if (recordSuppressedExceptions) {</span>
+<span class="fc" id="L219">					this.suppressedExceptions = new LinkedHashSet&lt;&gt;();</span>
+				}
+				try {
+<span class="fc" id="L222">					singletonObject = singletonFactory.getObject();</span>
+<span class="fc" id="L223">					newSingleton = true;</span>
+				}
+<span class="nc" id="L225">				catch (IllegalStateException ex) {</span>
+					// Has the singleton object implicitly appeared in the meantime -&gt;
+					// if yes, proceed with it since the exception indicates that state.
+<span class="nc" id="L228">					singletonObject = this.singletonObjects.get(beanName);</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">					if (singletonObject == null) {</span>
+<span class="nc" id="L230">						throw ex;</span>
+					}
+				}
+<span class="fc" id="L233">				catch (BeanCreationException ex) {</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">					if (recordSuppressedExceptions) {</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">						for (Exception suppressedException : this.suppressedExceptions) {</span>
+<span class="nc" id="L236">							ex.addRelatedCause(suppressedException);</span>
+<span class="nc" id="L237">						}</span>
+					}
+<span class="fc" id="L239">					throw ex;</span>
+				}
+				finally {
+<span class="fc bfc" id="L242" title="All 2 branches covered.">					if (recordSuppressedExceptions) {</span>
+<span class="fc" id="L243">						this.suppressedExceptions = null;</span>
+					}
+<span class="fc" id="L245">					afterSingletonCreation(beanName);</span>
+				}
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">				if (newSingleton) {</span>
+<span class="fc" id="L248">					addSingleton(beanName, singletonObject);</span>
+				}
+			}
+<span class="fc" id="L251">			return singletonObject;</span>
+		}
+	}
+
+	/**
+	 * Register an Exception that happened to get suppressed during the creation of a
+	 * singleton bean instance, e.g. a temporary circular reference resolution problem.
+	 * @param ex the Exception to register
+	 */
+	protected void onSuppressedException(Exception ex) {
+<span class="fc" id="L261">		synchronized (this.singletonObjects) {</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">			if (this.suppressedExceptions != null) {</span>
+<span class="nc" id="L263">				this.suppressedExceptions.add(ex);</span>
+			}
+<span class="fc" id="L265">		}</span>
+<span class="fc" id="L266">	}</span>
+
+	/**
+	 * Remove the bean with the given name from the singleton cache of this factory,
+	 * to be able to clean up eager registration of a singleton if creation failed.
+	 * @param beanName the name of the bean
+	 * @see #getSingletonMutex()
+	 */
+	protected void removeSingleton(String beanName) {
+<span class="fc" id="L275">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L276">			this.singletonObjects.remove(beanName);</span>
+<span class="fc" id="L277">			this.singletonFactories.remove(beanName);</span>
+<span class="fc" id="L278">			this.earlySingletonObjects.remove(beanName);</span>
+<span class="fc" id="L279">			this.registeredSingletons.remove(beanName);</span>
+<span class="fc" id="L280">		}</span>
+<span class="fc" id="L281">	}</span>
+
+	@Override
+	public boolean containsSingleton(String beanName) {
+<span class="fc" id="L285">		return this.singletonObjects.containsKey(beanName);</span>
+	}
+
+	@Override
+	public String[] getSingletonNames() {
+<span class="fc" id="L290">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L291">			return StringUtils.toStringArray(this.registeredSingletons);</span>
+		}
+	}
+
+	@Override
+	public int getSingletonCount() {
+<span class="fc" id="L297">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L298">			return this.registeredSingletons.size();</span>
+		}
+	}
+
+
+	public void setCurrentlyInCreation(String beanName, boolean inCreation) {
+<span class="nc" id="L304">		Assert.notNull(beanName, &quot;Bean name must not be null&quot;);</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">		if (!inCreation) {</span>
+<span class="nc" id="L306">			this.inCreationCheckExclusions.add(beanName);</span>
+		}
+		else {
+<span class="nc" id="L309">			this.inCreationCheckExclusions.remove(beanName);</span>
+		}
+<span class="nc" id="L311">	}</span>
+
+	public boolean isCurrentlyInCreation(String beanName) {
+<span class="fc" id="L314">		Assert.notNull(beanName, &quot;Bean name must not be null&quot;);</span>
+<span class="pc bpc" id="L315" title="2 of 4 branches missed.">		return (!this.inCreationCheckExclusions.contains(beanName) &amp;&amp; isActuallyInCreation(beanName));</span>
+	}
+
+	protected boolean isActuallyInCreation(String beanName) {
+<span class="nc" id="L319">		return isSingletonCurrentlyInCreation(beanName);</span>
+	}
+
+	/**
+	 * Return whether the specified singleton bean is currently in creation
+	 * (within the entire factory).
+	 * @param beanName the name of the bean
+	 */
+	public boolean isSingletonCurrentlyInCreation(String beanName) {
+<span class="fc" id="L328">		return this.singletonsCurrentlyInCreation.contains(beanName);</span>
+	}
+
+	/**
+	 * Callback before singleton creation.
+	 * &lt;p&gt;The default implementation register the singleton as currently in creation.
+	 * @param beanName the name of the singleton about to be created
+	 * @see #isSingletonCurrentlyInCreation
+	 */
+	protected void beforeSingletonCreation(String beanName) {
+<span class="pc bpc" id="L338" title="1 of 4 branches missed.">		if (!this.inCreationCheckExclusions.contains(beanName) &amp;&amp; !this.singletonsCurrentlyInCreation.add(beanName)) {</span>
+<span class="fc" id="L339">			throw new BeanCurrentlyInCreationException(beanName);</span>
+		}
+<span class="fc" id="L341">	}</span>
+
+	/**
+	 * Callback after singleton creation.
+	 * &lt;p&gt;The default implementation marks the singleton as not in creation anymore.
+	 * @param beanName the name of the singleton that has been created
+	 * @see #isSingletonCurrentlyInCreation
+	 */
+	protected void afterSingletonCreation(String beanName) {
+<span class="pc bpc" id="L350" title="2 of 4 branches missed.">		if (!this.inCreationCheckExclusions.contains(beanName) &amp;&amp; !this.singletonsCurrentlyInCreation.remove(beanName)) {</span>
+<span class="nc" id="L351">			throw new IllegalStateException(&quot;Singleton '&quot; + beanName + &quot;' isn't currently in creation&quot;);</span>
+		}
+<span class="fc" id="L353">	}</span>
+
+
+	/**
+	 * Add the given bean to the list of disposable beans in this registry.
+	 * &lt;p&gt;Disposable beans usually correspond to registered singletons,
+	 * matching the bean name but potentially being a different instance
+	 * (for example, a DisposableBean adapter for a singleton that does not
+	 * naturally implement Spring's DisposableBean interface).
+	 * @param beanName the name of the bean
+	 * @param bean the bean instance
+	 */
+	public void registerDisposableBean(String beanName, DisposableBean bean) {
+<span class="fc" id="L366">		synchronized (this.disposableBeans) {</span>
+<span class="fc" id="L367">			this.disposableBeans.put(beanName, bean);</span>
+<span class="fc" id="L368">		}</span>
+<span class="fc" id="L369">	}</span>
+
+	/**
+	 * Register a containment relationship between two beans,
+	 * e.g. between an inner bean and its containing outer bean.
+	 * &lt;p&gt;Also registers the containing bean as dependent on the contained bean
+	 * in terms of destruction order.
+	 * @param containedBeanName the name of the contained (inner) bean
+	 * @param containingBeanName the name of the containing (outer) bean
+	 * @see #registerDependentBean
+	 */
+	public void registerContainedBean(String containedBeanName, String containingBeanName) {
+<span class="fc" id="L381">		synchronized (this.containedBeanMap) {</span>
+<span class="fc" id="L382">			Set&lt;String&gt; containedBeans =</span>
+<span class="fc" id="L383">					this.containedBeanMap.computeIfAbsent(containingBeanName, k -&gt; new LinkedHashSet&lt;&gt;(8));</span>
+<span class="fc bfc" id="L384" title="All 2 branches covered.">			if (!containedBeans.add(containedBeanName)) {</span>
+<span class="fc" id="L385">				return;</span>
+			}
+<span class="fc" id="L387">		}</span>
+<span class="fc" id="L388">		registerDependentBean(containedBeanName, containingBeanName);</span>
+<span class="fc" id="L389">	}</span>
+
+	/**
+	 * Register a dependent bean for the given bean,
+	 * to be destroyed before the given bean is destroyed.
+	 * @param beanName the name of the bean
+	 * @param dependentBeanName the name of the dependent bean
+	 */
+	public void registerDependentBean(String beanName, String dependentBeanName) {
+<span class="fc" id="L398">		String canonicalName = canonicalName(beanName);</span>
+
+<span class="fc" id="L400">		synchronized (this.dependentBeanMap) {</span>
+<span class="fc" id="L401">			Set&lt;String&gt; dependentBeans =</span>
+<span class="fc" id="L402">					this.dependentBeanMap.computeIfAbsent(canonicalName, k -&gt; new LinkedHashSet&lt;&gt;(8));</span>
+<span class="fc bfc" id="L403" title="All 2 branches covered.">			if (!dependentBeans.add(dependentBeanName)) {</span>
+<span class="fc" id="L404">				return;</span>
+			}
+<span class="fc" id="L406">		}</span>
+
+<span class="fc" id="L408">		synchronized (this.dependenciesForBeanMap) {</span>
+<span class="fc" id="L409">			Set&lt;String&gt; dependenciesForBean =</span>
+<span class="fc" id="L410">					this.dependenciesForBeanMap.computeIfAbsent(dependentBeanName, k -&gt; new LinkedHashSet&lt;&gt;(8));</span>
+<span class="fc" id="L411">			dependenciesForBean.add(canonicalName);</span>
+<span class="fc" id="L412">		}</span>
+<span class="fc" id="L413">	}</span>
+
+	/**
+	 * Determine whether the specified dependent bean has been registered as
+	 * dependent on the given bean or on any of its transitive dependencies.
+	 * @param beanName the name of the bean to check
+	 * @param dependentBeanName the name of the dependent bean
+	 * @since 4.0
+	 */
+	protected boolean isDependent(String beanName, String dependentBeanName) {
+<span class="fc" id="L423">		synchronized (this.dependentBeanMap) {</span>
+<span class="fc" id="L424">			return isDependent(beanName, dependentBeanName, null);</span>
+		}
+	}
+
+	private boolean isDependent(String beanName, String dependentBeanName, @Nullable Set&lt;String&gt; alreadySeen) {
+<span class="fc bfc" id="L429" title="All 4 branches covered.">		if (alreadySeen != null &amp;&amp; alreadySeen.contains(beanName)) {</span>
+<span class="fc" id="L430">			return false;</span>
+		}
+<span class="fc" id="L432">		String canonicalName = canonicalName(beanName);</span>
+<span class="fc" id="L433">		Set&lt;String&gt; dependentBeans = this.dependentBeanMap.get(canonicalName);</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">		if (dependentBeans == null) {</span>
+<span class="fc" id="L435">			return false;</span>
+		}
+<span class="fc bfc" id="L437" title="All 2 branches covered.">		if (dependentBeans.contains(dependentBeanName)) {</span>
+<span class="fc" id="L438">			return true;</span>
+		}
+<span class="fc bfc" id="L440" title="All 2 branches covered.">		for (String transitiveDependency : dependentBeans) {</span>
+<span class="fc bfc" id="L441" title="All 2 branches covered.">			if (alreadySeen == null) {</span>
+<span class="fc" id="L442">				alreadySeen = new HashSet&lt;&gt;();</span>
+			}
+<span class="fc" id="L444">			alreadySeen.add(beanName);</span>
+<span class="fc bfc" id="L445" title="All 2 branches covered.">			if (isDependent(transitiveDependency, dependentBeanName, alreadySeen)) {</span>
+<span class="fc" id="L446">				return true;</span>
+			}
+<span class="fc" id="L448">		}</span>
+<span class="fc" id="L449">		return false;</span>
+	}
+
+	/**
+	 * Determine whether a dependent bean has been registered for the given name.
+	 * @param beanName the name of the bean to check
+	 */
+	protected boolean hasDependentBean(String beanName) {
+<span class="fc" id="L457">		return this.dependentBeanMap.containsKey(beanName);</span>
+	}
+
+	/**
+	 * Return the names of all beans which depend on the specified bean, if any.
+	 * @param beanName the name of the bean
+	 * @return the array of dependent bean names, or an empty array if none
+	 */
+	public String[] getDependentBeans(String beanName) {
+<span class="fc" id="L466">		Set&lt;String&gt; dependentBeans = this.dependentBeanMap.get(beanName);</span>
+<span class="fc bfc" id="L467" title="All 2 branches covered.">		if (dependentBeans == null) {</span>
+<span class="fc" id="L468">			return new String[0];</span>
+		}
+<span class="fc" id="L470">		synchronized (this.dependentBeanMap) {</span>
+<span class="fc" id="L471">			return StringUtils.toStringArray(dependentBeans);</span>
+		}
+	}
+
+	/**
+	 * Return the names of all beans that the specified bean depends on, if any.
+	 * @param beanName the name of the bean
+	 * @return the array of names of beans which the bean depends on,
+	 * or an empty array if none
+	 */
+	public String[] getDependenciesForBean(String beanName) {
+<span class="fc" id="L482">		Set&lt;String&gt; dependenciesForBean = this.dependenciesForBeanMap.get(beanName);</span>
+<span class="fc bfc" id="L483" title="All 2 branches covered.">		if (dependenciesForBean == null) {</span>
+<span class="fc" id="L484">			return new String[0];</span>
+		}
+<span class="fc" id="L486">		synchronized (this.dependenciesForBeanMap) {</span>
+<span class="fc" id="L487">			return StringUtils.toStringArray(dependenciesForBean);</span>
+		}
+	}
+
+	public void destroySingletons() {
+<span class="pc bpc" id="L492" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L493">			logger.trace(&quot;Destroying singletons in &quot; + this);</span>
+		}
+<span class="fc" id="L495">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L496">			this.singletonsCurrentlyInDestruction = true;</span>
+<span class="fc" id="L497">		}</span>
+
+		String[] disposableBeanNames;
+<span class="fc" id="L500">		synchronized (this.disposableBeans) {</span>
+<span class="fc" id="L501">			disposableBeanNames = StringUtils.toStringArray(this.disposableBeans.keySet());</span>
+<span class="fc" id="L502">		}</span>
+<span class="fc bfc" id="L503" title="All 2 branches covered.">		for (int i = disposableBeanNames.length - 1; i &gt;= 0; i--) {</span>
+<span class="fc" id="L504">			destroySingleton(disposableBeanNames[i]);</span>
+		}
+
+<span class="fc" id="L507">		this.containedBeanMap.clear();</span>
+<span class="fc" id="L508">		this.dependentBeanMap.clear();</span>
+<span class="fc" id="L509">		this.dependenciesForBeanMap.clear();</span>
+
+<span class="fc" id="L511">		clearSingletonCache();</span>
+<span class="fc" id="L512">	}</span>
+
+	/**
+	 * Clear all cached singleton instances in this registry.
+	 * @since 4.3.15
+	 */
+	protected void clearSingletonCache() {
+<span class="fc" id="L519">		synchronized (this.singletonObjects) {</span>
+<span class="fc" id="L520">			this.singletonObjects.clear();</span>
+<span class="fc" id="L521">			this.singletonFactories.clear();</span>
+<span class="fc" id="L522">			this.earlySingletonObjects.clear();</span>
+<span class="fc" id="L523">			this.registeredSingletons.clear();</span>
+<span class="fc" id="L524">			this.singletonsCurrentlyInDestruction = false;</span>
+<span class="fc" id="L525">		}</span>
+<span class="fc" id="L526">	}</span>
+
+	/**
+	 * Destroy the given bean. Delegates to {@code destroyBean}
+	 * if a corresponding disposable bean instance is found.
+	 * @param beanName the name of the bean
+	 * @see #destroyBean
+	 */
+	public void destroySingleton(String beanName) {
+		// Remove a registered singleton of the given name, if any.
+<span class="fc" id="L536">		removeSingleton(beanName);</span>
+
+		// Destroy the corresponding DisposableBean instance.
+		DisposableBean disposableBean;
+<span class="fc" id="L540">		synchronized (this.disposableBeans) {</span>
+<span class="fc" id="L541">			disposableBean = (DisposableBean) this.disposableBeans.remove(beanName);</span>
+<span class="fc" id="L542">		}</span>
+<span class="fc" id="L543">		destroyBean(beanName, disposableBean);</span>
+<span class="fc" id="L544">	}</span>
+
+	/**
+	 * Destroy the given bean. Must destroy beans that depend on the given
+	 * bean before the bean itself. Should not throw any exceptions.
+	 * @param beanName the name of the bean
+	 * @param bean the bean instance to destroy
+	 */
+	protected void destroyBean(String beanName, @Nullable DisposableBean bean) {
+		// Trigger destruction of dependent beans first...
+		Set&lt;String&gt; dependencies;
+<span class="fc" id="L555">		synchronized (this.dependentBeanMap) {</span>
+			// Within full synchronization in order to guarantee a disconnected Set
+<span class="fc" id="L557">			dependencies = this.dependentBeanMap.remove(beanName);</span>
+<span class="fc" id="L558">		}</span>
+<span class="fc bfc" id="L559" title="All 2 branches covered.">		if (dependencies != null) {</span>
+<span class="pc bpc" id="L560" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L561">				logger.trace(&quot;Retrieved dependent beans for bean '&quot; + beanName + &quot;': &quot; + dependencies);</span>
+			}
+<span class="fc bfc" id="L563" title="All 2 branches covered.">			for (String dependentBeanName : dependencies) {</span>
+<span class="fc" id="L564">				destroySingleton(dependentBeanName);</span>
+<span class="fc" id="L565">			}</span>
+		}
+
+		// Actually destroy the bean now...
+<span class="fc bfc" id="L569" title="All 2 branches covered.">		if (bean != null) {</span>
+			try {
+<span class="fc" id="L571">				bean.destroy();</span>
+			}
+<span class="nc" id="L573">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">				if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L575">					logger.info(&quot;Destroy method on bean with name '&quot; + beanName + &quot;' threw an exception&quot;, ex);</span>
+				}
+<span class="fc" id="L577">			}</span>
+		}
+
+		// Trigger destruction of contained beans...
+		Set&lt;String&gt; containedBeans;
+<span class="fc" id="L582">		synchronized (this.containedBeanMap) {</span>
+			// Within full synchronization in order to guarantee a disconnected Set
+<span class="fc" id="L584">			containedBeans = this.containedBeanMap.remove(beanName);</span>
+<span class="fc" id="L585">		}</span>
+<span class="fc bfc" id="L586" title="All 2 branches covered.">		if (containedBeans != null) {</span>
+<span class="fc bfc" id="L587" title="All 2 branches covered.">			for (String containedBeanName : containedBeans) {</span>
+<span class="fc" id="L588">				destroySingleton(containedBeanName);</span>
+<span class="fc" id="L589">			}</span>
+		}
+
+		// Remove destroyed bean from other beans' dependencies.
+<span class="fc" id="L593">		synchronized (this.dependentBeanMap) {</span>
+<span class="fc bfc" id="L594" title="All 2 branches covered.">			for (Iterator&lt;Map.Entry&lt;String, Set&lt;String&gt;&gt;&gt; it = this.dependentBeanMap.entrySet().iterator(); it.hasNext();) {</span>
+<span class="fc" id="L595">				Map.Entry&lt;String, Set&lt;String&gt;&gt; entry = it.next();</span>
+<span class="fc" id="L596">				Set&lt;String&gt; dependenciesToClean = entry.getValue();</span>
+<span class="fc" id="L597">				dependenciesToClean.remove(beanName);</span>
+<span class="fc bfc" id="L598" title="All 2 branches covered.">				if (dependenciesToClean.isEmpty()) {</span>
+<span class="fc" id="L599">					it.remove();</span>
+				}
+<span class="fc" id="L601">			}</span>
+<span class="fc" id="L602">		}</span>
+
+		// Remove destroyed bean's prepared dependency information.
+<span class="fc" id="L605">		this.dependenciesForBeanMap.remove(beanName);</span>
+<span class="fc" id="L606">	}</span>
+
+	/**
+	 * Exposes the singleton mutex to subclasses and external collaborators.
+	 * &lt;p&gt;Subclasses should synchronize on the given Object if they perform
+	 * any sort of extended singleton creation phase. In particular, subclasses
+	 * should &lt;i&gt;not&lt;/i&gt; have their own mutexes involved in singleton creation,
+	 * to avoid the potential for deadlocks in lazy-init situations.
+	 */
+	public final Object getSingletonMutex() {
+<span class="fc" id="L616">		return this.singletonObjects;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

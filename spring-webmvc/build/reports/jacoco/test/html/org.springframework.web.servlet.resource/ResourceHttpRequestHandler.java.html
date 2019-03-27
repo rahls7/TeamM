@@ -1,0 +1,728 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceHttpRequestHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.resource</a> &gt; <span class="el_source">ResourceHttpRequestHandler.java</span></div><h1>ResourceHttpRequestHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.resource;
+
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.EmbeddedValueResolverAware;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpRange;
+import org.springframework.http.MediaType;
+import org.springframework.http.converter.ResourceHttpMessageConverter;
+import org.springframework.http.converter.ResourceRegionHttpMessageConverter;
+import org.springframework.http.server.ServletServerHttpRequest;
+import org.springframework.http.server.ServletServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ResourceUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+import org.springframework.web.HttpRequestHandler;
+import org.springframework.web.accept.ContentNegotiationManager;
+import org.springframework.web.accept.PathExtensionContentNegotiationStrategy;
+import org.springframework.web.accept.ServletPathExtensionContentNegotiationStrategy;
+import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.servlet.HandlerMapping;
+import org.springframework.web.servlet.support.WebContentGenerator;
+import org.springframework.web.util.UrlPathHelper;
+
+/**
+ * {@code HttpRequestHandler} that serves static resources in an optimized way
+ * according to the guidelines of Page Speed, YSlow, etc.
+ *
+ * &lt;p&gt;The {@linkplain #setLocations &quot;locations&quot;} property takes a list of Spring
+ * {@link Resource} locations from which static resources are allowed to be served
+ * by this handler. Resources could be served from a classpath location, e.g.
+ * &quot;classpath:/META-INF/public-web-resources/&quot;, allowing convenient packaging
+ * and serving of resources such as .js, .css, and others in jar files.
+ *
+ * &lt;p&gt;This request handler may also be configured with a
+ * {@link #setResourceResolvers(List) resourcesResolver} and
+ * {@link #setResourceTransformers(List) resourceTransformer} chains to support
+ * arbitrary resolution and transformation of resources being served. By default
+ * a {@link PathResourceResolver} simply finds resources based on the configured
+ * &quot;locations&quot;. An application can configure additional resolvers and transformers
+ * such as the {@link VersionResourceResolver} which can resolve and prepare URLs
+ * for resources with a version in the URL.
+ *
+ * &lt;p&gt;This handler also properly evaluates the {@code Last-Modified} header
+ * (if present) so that a {@code 304} status code will be returned as appropriate,
+ * avoiding unnecessary overhead for resources that are already cached by the client.
+ *
+ * @author Keith Donald
+ * @author Jeremy Grelle
+ * @author Juergen Hoeller
+ * @author Arjen Poutsma
+ * @author Brian Clozel
+ * @author Rossen Stoyanchev
+ * @since 3.0.4
+ */
+public class ResourceHttpRequestHandler extends WebContentGenerator
+		implements HttpRequestHandler, EmbeddedValueResolverAware, InitializingBean, CorsConfigurationSource {
+
+<span class="fc" id="L101">	private static final Log logger = LogFactory.getLog(ResourceHttpRequestHandler.class);</span>
+
+	private static final String URL_RESOURCE_CHARSET_PREFIX = &quot;[charset=&quot;;
+
+
+<span class="fc" id="L106">	private final List&lt;String&gt; locationValues = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L108">	private final List&lt;Resource&gt; locations = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L110">	private final Map&lt;Resource, Charset&gt; locationCharsets = new HashMap&lt;&gt;(4);</span>
+
+<span class="fc" id="L112">	private final List&lt;ResourceResolver&gt; resourceResolvers = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L114">	private final List&lt;ResourceTransformer&gt; resourceTransformers = new ArrayList&lt;&gt;(4);</span>
+
+	@Nullable
+	private ResourceResolverChain resolverChain;
+
+	@Nullable
+	private ResourceTransformerChain transformerChain;
+
+	@Nullable
+	private ResourceHttpMessageConverter resourceHttpMessageConverter;
+
+	@Nullable
+	private ResourceRegionHttpMessageConverter resourceRegionHttpMessageConverter;
+
+	@Nullable
+	private ContentNegotiationManager contentNegotiationManager;
+
+	@Nullable
+	private PathExtensionContentNegotiationStrategy contentNegotiationStrategy;
+
+	@Nullable
+	private CorsConfiguration corsConfiguration;
+
+	@Nullable
+	private UrlPathHelper urlPathHelper;
+
+	@Nullable
+	private StringValueResolver embeddedValueResolver;
+
+
+	public ResourceHttpRequestHandler() {
+<span class="fc" id="L145">		super(HttpMethod.GET.name(), HttpMethod.HEAD.name());</span>
+<span class="fc" id="L146">	}</span>
+
+
+	/**
+	 * An alternative to {@link #setLocations(List)} that accepts a list of
+	 * String-based location values, with support for {@link UrlResource}'s
+	 * (e.g. files or HTTP URLs) with a special prefix to indicate the charset
+	 * to use when appending relative paths. For example
+	 * {@code &quot;[charset=Windows-31J]https://example.org/path&quot;}.
+	 * @since 4.3.13
+	 */
+	public void setLocationValues(List&lt;String&gt; locationValues) {
+<span class="fc" id="L158">		Assert.notNull(locationValues, &quot;Location values list must not be null&quot;);</span>
+<span class="fc" id="L159">		this.locationValues.clear();</span>
+<span class="fc" id="L160">		this.locationValues.addAll(locationValues);</span>
+<span class="fc" id="L161">	}</span>
+
+	/**
+	 * Set the {@code List} of {@code Resource} locations to use as sources
+	 * for serving static resources.
+	 * @see #setLocationValues(List)
+	 */
+	public void setLocations(List&lt;Resource&gt; locations) {
+<span class="fc" id="L169">		Assert.notNull(locations, &quot;Locations list must not be null&quot;);</span>
+<span class="fc" id="L170">		this.locations.clear();</span>
+<span class="fc" id="L171">		this.locations.addAll(locations);</span>
+<span class="fc" id="L172">	}</span>
+
+	/**
+	 * Return the configured {@code List} of {@code Resource} locations.
+	 * &lt;p&gt;Note that if {@link #setLocationValues(List) locationValues} are provided,
+	 * instead of loaded Resource-based locations, this method will return
+	 * empty until after initialization via {@link #afterPropertiesSet()}.
+	 * @see #setLocationValues
+	 * @see #setLocations
+	 */
+	public List&lt;Resource&gt; getLocations() {
+<span class="fc" id="L183">		return this.locations;</span>
+	}
+
+	/**
+	 * Configure the list of {@link ResourceResolver ResourceResolvers} to use.
+	 * &lt;p&gt;By default {@link PathResourceResolver} is configured. If using this property,
+	 * it is recommended to add {@link PathResourceResolver} as the last resolver.
+	 */
+	public void setResourceResolvers(@Nullable List&lt;ResourceResolver&gt; resourceResolvers) {
+<span class="fc" id="L192">		this.resourceResolvers.clear();</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">		if (resourceResolvers != null) {</span>
+<span class="fc" id="L194">			this.resourceResolvers.addAll(resourceResolvers);</span>
+		}
+<span class="fc" id="L196">	}</span>
+
+	/**
+	 * Return the list of configured resource resolvers.
+	 */
+	public List&lt;ResourceResolver&gt; getResourceResolvers() {
+<span class="fc" id="L202">		return this.resourceResolvers;</span>
+	}
+
+	/**
+	 * Configure the list of {@link ResourceTransformer ResourceTransformers} to use.
+	 * &lt;p&gt;By default no transformers are configured for use.
+	 */
+	public void setResourceTransformers(@Nullable List&lt;ResourceTransformer&gt; resourceTransformers) {
+<span class="fc" id="L210">		this.resourceTransformers.clear();</span>
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">		if (resourceTransformers != null) {</span>
+<span class="fc" id="L212">			this.resourceTransformers.addAll(resourceTransformers);</span>
+		}
+<span class="fc" id="L214">	}</span>
+
+	/**
+	 * Return the list of configured resource transformers.
+	 */
+	public List&lt;ResourceTransformer&gt; getResourceTransformers() {
+<span class="fc" id="L220">		return this.resourceTransformers;</span>
+	}
+
+	/**
+	 * Configure the {@link ResourceHttpMessageConverter} to use.
+	 * &lt;p&gt;By default a {@link ResourceHttpMessageConverter} will be configured.
+	 * @since 4.3
+	 */
+	public void setResourceHttpMessageConverter(@Nullable ResourceHttpMessageConverter messageConverter) {
+<span class="nc" id="L229">		this.resourceHttpMessageConverter = messageConverter;</span>
+<span class="nc" id="L230">	}</span>
+
+	/**
+	 * Return the configured resource converter.
+	 * @since 4.3
+	 */
+	@Nullable
+	public ResourceHttpMessageConverter getResourceHttpMessageConverter() {
+<span class="nc" id="L238">		return this.resourceHttpMessageConverter;</span>
+	}
+
+	/**
+	 * Configure the {@link ResourceRegionHttpMessageConverter} to use.
+	 * &lt;p&gt;By default a {@link ResourceRegionHttpMessageConverter} will be configured.
+	 * @since 4.3
+	 */
+	public void setResourceRegionHttpMessageConverter(@Nullable ResourceRegionHttpMessageConverter messageConverter) {
+<span class="nc" id="L247">		this.resourceRegionHttpMessageConverter = messageConverter;</span>
+<span class="nc" id="L248">	}</span>
+
+	/**
+	 * Return the configured resource region converter.
+	 * @since 4.3
+	 */
+	@Nullable
+	public ResourceRegionHttpMessageConverter getResourceRegionHttpMessageConverter() {
+<span class="nc" id="L256">		return this.resourceRegionHttpMessageConverter;</span>
+	}
+
+	/**
+	 * Configure a {@code ContentNegotiationManager} to help determine the
+	 * media types for resources being served. If the manager contains a path
+	 * extension strategy it will be checked for registered file extension.
+	 * @since 4.3
+	 */
+	public void setContentNegotiationManager(@Nullable ContentNegotiationManager contentNegotiationManager) {
+<span class="fc" id="L266">		this.contentNegotiationManager = contentNegotiationManager;</span>
+<span class="fc" id="L267">	}</span>
+
+	/**
+	 * Return the configured content negotiation manager.
+	 * @since 4.3
+	 */
+	@Nullable
+	public ContentNegotiationManager getContentNegotiationManager() {
+<span class="fc" id="L275">		return this.contentNegotiationManager;</span>
+	}
+
+	/**
+	 * Specify the CORS configuration for resources served by this handler.
+	 * &lt;p&gt;By default this is not set in which allows cross-origin requests.
+	 */
+	public void setCorsConfiguration(CorsConfiguration corsConfiguration) {
+<span class="nc" id="L283">		this.corsConfiguration = corsConfiguration;</span>
+<span class="nc" id="L284">	}</span>
+
+	/**
+	 * Return the specified CORS configuration.
+	 */
+	@Override
+	@Nullable
+	public CorsConfiguration getCorsConfiguration(HttpServletRequest request) {
+<span class="nc" id="L292">		return this.corsConfiguration;</span>
+	}
+
+	/**
+	 * Provide a reference to the {@link UrlPathHelper} used to map requests to
+	 * static resources. This helps to derive information about the lookup path
+	 * such as whether it is decoded or not.
+	 * @since 4.3.13
+	 */
+	public void setUrlPathHelper(@Nullable UrlPathHelper urlPathHelper) {
+<span class="fc" id="L302">		this.urlPathHelper = urlPathHelper;</span>
+<span class="fc" id="L303">	}</span>
+
+	/**
+	 * The configured {@link UrlPathHelper}.
+	 * @since 4.3.13
+	 */
+	@Nullable
+	public UrlPathHelper getUrlPathHelper() {
+<span class="fc" id="L311">		return this.urlPathHelper;</span>
+	}
+
+	@Override
+	public void setEmbeddedValueResolver(StringValueResolver resolver) {
+<span class="fc" id="L316">		this.embeddedValueResolver = resolver;</span>
+<span class="fc" id="L317">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() throws Exception {
+<span class="fc" id="L322">		resolveResourceLocations();</span>
+
+<span class="pc bpc" id="L324" title="2 of 4 branches missed.">		if (logger.isWarnEnabled() &amp;&amp; CollectionUtils.isEmpty(this.locations)) {</span>
+<span class="nc" id="L325">			logger.warn(&quot;Locations list is empty. No resources will be served unless a &quot; +</span>
+					&quot;custom ResourceResolver is configured as an alternative to PathResourceResolver.&quot;);
+		}
+
+<span class="fc bfc" id="L329" title="All 2 branches covered.">		if (this.resourceResolvers.isEmpty()) {</span>
+<span class="fc" id="L330">			this.resourceResolvers.add(new PathResourceResolver());</span>
+		}
+
+<span class="fc" id="L333">		initAllowedLocations();</span>
+
+		// Initialize immutable resolver and transformer chains
+<span class="fc" id="L336">		this.resolverChain = new DefaultResourceResolverChain(this.resourceResolvers);</span>
+<span class="fc" id="L337">		this.transformerChain = new DefaultResourceTransformerChain(this.resolverChain, this.resourceTransformers);</span>
+
+<span class="fc bfc" id="L339" title="All 2 branches covered.">		if (this.resourceHttpMessageConverter == null) {</span>
+<span class="fc" id="L340">			this.resourceHttpMessageConverter = new ResourceHttpMessageConverter();</span>
+		}
+<span class="fc bfc" id="L342" title="All 2 branches covered.">		if (this.resourceRegionHttpMessageConverter == null) {</span>
+<span class="fc" id="L343">			this.resourceRegionHttpMessageConverter = new ResourceRegionHttpMessageConverter();</span>
+		}
+
+<span class="fc" id="L346">		this.contentNegotiationStrategy = initContentNegotiationStrategy();</span>
+<span class="fc" id="L347">	}</span>
+
+	private void resolveResourceLocations() {
+<span class="fc bfc" id="L350" title="All 2 branches covered.">		if (CollectionUtils.isEmpty(this.locationValues)) {</span>
+<span class="fc" id="L351">			return;</span>
+		}
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">		else if (!CollectionUtils.isEmpty(this.locations)) {</span>
+<span class="nc" id="L354">			throw new IllegalArgumentException(&quot;Please set either Resource-based \&quot;locations\&quot; or &quot; +</span>
+					&quot;String-based \&quot;locationValues\&quot;, but not both.&quot;);
+		}
+
+<span class="fc" id="L358">		ApplicationContext applicationContext = obtainApplicationContext();</span>
+<span class="fc bfc" id="L359" title="All 2 branches covered.">		for (String location : this.locationValues) {</span>
+<span class="fc bfc" id="L360" title="All 2 branches covered.">			if (this.embeddedValueResolver != null) {</span>
+<span class="fc" id="L361">				String resolvedLocation = this.embeddedValueResolver.resolveStringValue(location);</span>
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">				if (resolvedLocation == null) {</span>
+<span class="nc" id="L363">					throw new IllegalArgumentException(&quot;Location resolved to null: &quot; + location);</span>
+				}
+<span class="fc" id="L365">				location = resolvedLocation;</span>
+			}
+<span class="fc" id="L367">			Charset charset = null;</span>
+<span class="fc" id="L368">			location = location.trim();</span>
+<span class="fc bfc" id="L369" title="All 2 branches covered.">			if (location.startsWith(URL_RESOURCE_CHARSET_PREFIX)) {</span>
+<span class="fc" id="L370">				int endIndex = location.indexOf(']', URL_RESOURCE_CHARSET_PREFIX.length());</span>
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">				if (endIndex == -1) {</span>
+<span class="nc" id="L372">					throw new IllegalArgumentException(&quot;Invalid charset syntax in location: &quot; + location);</span>
+				}
+<span class="fc" id="L374">				String value = location.substring(URL_RESOURCE_CHARSET_PREFIX.length(), endIndex);</span>
+<span class="fc" id="L375">				charset = Charset.forName(value);</span>
+<span class="fc" id="L376">				location = location.substring(endIndex + 1);</span>
+			}
+<span class="fc" id="L378">			Resource resource = applicationContext.getResource(location);</span>
+<span class="fc" id="L379">			this.locations.add(resource);</span>
+<span class="fc bfc" id="L380" title="All 2 branches covered.">			if (charset != null) {</span>
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">				if (!(resource instanceof UrlResource)) {</span>
+<span class="nc" id="L382">					throw new IllegalArgumentException(&quot;Unexpected charset for non-UrlResource: &quot; + resource);</span>
+				}
+<span class="fc" id="L384">				this.locationCharsets.put(resource, charset);</span>
+			}
+<span class="fc" id="L386">		}</span>
+<span class="fc" id="L387">	}</span>
+
+	/**
+	 * Look for a {@code PathResourceResolver} among the configured resource
+	 * resolvers and set its {@code allowedLocations} property (if empty) to
+	 * match the {@link #setLocations locations} configured on this class.
+	 */
+	protected void initAllowedLocations() {
+<span class="pc bpc" id="L395" title="1 of 2 branches missed.">		if (CollectionUtils.isEmpty(this.locations)) {</span>
+<span class="nc" id="L396">			return;</span>
+		}
+<span class="fc bfc" id="L398" title="All 2 branches covered.">		for (int i = getResourceResolvers().size() - 1; i &gt;= 0; i--) {</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">			if (getResourceResolvers().get(i) instanceof PathResourceResolver) {</span>
+<span class="fc" id="L400">				PathResourceResolver pathResolver = (PathResourceResolver) getResourceResolvers().get(i);</span>
+<span class="fc bfc" id="L401" title="All 2 branches covered.">				if (ObjectUtils.isEmpty(pathResolver.getAllowedLocations())) {</span>
+<span class="fc" id="L402">					pathResolver.setAllowedLocations(getLocations().toArray(new Resource[0]));</span>
+				}
+<span class="fc bfc" id="L404" title="All 2 branches covered.">				if (this.urlPathHelper != null) {</span>
+<span class="fc" id="L405">					pathResolver.setLocationCharsets(this.locationCharsets);</span>
+<span class="fc" id="L406">					pathResolver.setUrlPathHelper(this.urlPathHelper);</span>
+				}
+				break;
+			}
+		}
+<span class="fc" id="L411">	}</span>
+
+	/**
+	 * Initialize the content negotiation strategy depending on the {@code ContentNegotiationManager}
+	 * setup and the availability of a {@code ServletContext}.
+	 * @see ServletPathExtensionContentNegotiationStrategy
+	 * @see PathExtensionContentNegotiationStrategy
+	 */
+	protected PathExtensionContentNegotiationStrategy initContentNegotiationStrategy() {
+<span class="fc" id="L420">		Map&lt;String, MediaType&gt; mediaTypes = null;</span>
+<span class="fc bfc" id="L421" title="All 2 branches covered.">		if (getContentNegotiationManager() != null) {</span>
+<span class="fc" id="L422">			PathExtensionContentNegotiationStrategy strategy =</span>
+<span class="fc" id="L423">					getContentNegotiationManager().getStrategy(PathExtensionContentNegotiationStrategy.class);</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">			if (strategy != null) {</span>
+<span class="fc" id="L425">				mediaTypes = new HashMap&lt;&gt;(strategy.getMediaTypes());</span>
+			}
+		}
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">		return (getServletContext() != null ?</span>
+<span class="pc" id="L429">				new ServletPathExtensionContentNegotiationStrategy(getServletContext(), mediaTypes) :</span>
+				new PathExtensionContentNegotiationStrategy(mediaTypes));
+	}
+
+
+	/**
+	 * Processes a resource request.
+	 * &lt;p&gt;Checks for the existence of the requested resource in the configured list of locations.
+	 * If the resource does not exist, a {@code 404} response will be returned to the client.
+	 * If the resource exists, the request will be checked for the presence of the
+	 * {@code Last-Modified} header, and its value will be compared against the last-modified
+	 * timestamp of the given resource, returning a {@code 304} status code if the
+	 * {@code Last-Modified} value  is greater. If the resource is newer than the
+	 * {@code Last-Modified} value, or the header is not present, the content resource
+	 * of the resource will be written to the response with caching headers
+	 * set to expire one year in the future.
+	 */
+	@Override
+	public void handleRequest(HttpServletRequest request, HttpServletResponse response)
+			throws ServletException, IOException {
+
+		// For very general mappings (e.g. &quot;/&quot;) we need to check 404 first
+<span class="fc" id="L451">		Resource resource = getResource(request);</span>
+<span class="fc bfc" id="L452" title="All 2 branches covered.">		if (resource == null) {</span>
+<span class="fc" id="L453">			logger.debug(&quot;Resource not found&quot;);</span>
+<span class="fc" id="L454">			response.sendError(HttpServletResponse.SC_NOT_FOUND);</span>
+<span class="fc" id="L455">			return;</span>
+		}
+
+<span class="fc bfc" id="L458" title="All 2 branches covered.">		if (HttpMethod.OPTIONS.matches(request.getMethod())) {</span>
+<span class="fc" id="L459">			response.setHeader(&quot;Allow&quot;, getAllowHeader());</span>
+<span class="fc" id="L460">			return;</span>
+		}
+
+		// Supported methods and required session
+<span class="fc" id="L464">		checkRequest(request);</span>
+
+		// Header phase
+<span class="fc bfc" id="L467" title="All 2 branches covered.">		if (new ServletWebRequest(request, response).checkNotModified(resource.lastModified())) {</span>
+<span class="fc" id="L468">			logger.trace(&quot;Resource not modified&quot;);</span>
+<span class="fc" id="L469">			return;</span>
+		}
+
+		// Apply cache settings, if any
+<span class="fc" id="L473">		prepareResponse(response);</span>
+
+		// Check the media type for the resource
+<span class="fc" id="L476">		MediaType mediaType = getMediaType(request, resource);</span>
+
+		// Content phase
+<span class="fc bfc" id="L479" title="All 2 branches covered.">		if (METHOD_HEAD.equals(request.getMethod())) {</span>
+<span class="fc" id="L480">			setHeaders(response, resource, mediaType);</span>
+<span class="fc" id="L481">			return;</span>
+		}
+
+<span class="fc" id="L484">		ServletServerHttpResponse outputMessage = new ServletServerHttpResponse(response);</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">		if (request.getHeader(HttpHeaders.RANGE) == null) {</span>
+<span class="pc bpc" id="L486" title="1 of 2 branches missed.">			Assert.state(this.resourceHttpMessageConverter != null, &quot;Not initialized&quot;);</span>
+<span class="fc" id="L487">			setHeaders(response, resource, mediaType);</span>
+<span class="fc" id="L488">			this.resourceHttpMessageConverter.write(resource, mediaType, outputMessage);</span>
+		}
+		else {
+<span class="pc bpc" id="L491" title="1 of 2 branches missed.">			Assert.state(this.resourceRegionHttpMessageConverter != null, &quot;Not initialized&quot;);</span>
+<span class="fc" id="L492">			response.setHeader(HttpHeaders.ACCEPT_RANGES, &quot;bytes&quot;);</span>
+<span class="fc" id="L493">			ServletServerHttpRequest inputMessage = new ServletServerHttpRequest(request);</span>
+			try {
+<span class="fc" id="L495">				List&lt;HttpRange&gt; httpRanges = inputMessage.getHeaders().getRange();</span>
+<span class="fc" id="L496">				response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);</span>
+<span class="fc" id="L497">				this.resourceRegionHttpMessageConverter.write(</span>
+<span class="fc" id="L498">						HttpRange.toResourceRegions(httpRanges, resource), mediaType, outputMessage);</span>
+			}
+<span class="fc" id="L500">			catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L501">				response.setHeader(&quot;Content-Range&quot;, &quot;bytes */&quot; + resource.contentLength());</span>
+<span class="fc" id="L502">				response.sendError(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);</span>
+<span class="fc" id="L503">			}</span>
+		}
+<span class="fc" id="L505">	}</span>
+
+	@Nullable
+	protected Resource getResource(HttpServletRequest request) throws IOException {
+<span class="fc" id="L509">		String path = (String) request.getAttribute(HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE);</span>
+<span class="fc bfc" id="L510" title="All 2 branches covered.">		if (path == null) {</span>
+<span class="fc" id="L511">			throw new IllegalStateException(&quot;Required request attribute '&quot; +</span>
+					HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE + &quot;' is not set&quot;);
+		}
+
+<span class="fc" id="L515">		path = processPath(path);</span>
+<span class="fc bfc" id="L516" title="All 4 branches covered.">		if (!StringUtils.hasText(path) || isInvalidPath(path)) {</span>
+<span class="fc" id="L517">			return null;</span>
+		}
+<span class="fc bfc" id="L519" title="All 2 branches covered.">		if (isInvalidEncodedPath(path)) {</span>
+<span class="fc" id="L520">			return null;</span>
+		}
+
+<span class="fc" id="L523">		Assert.notNull(this.resolverChain, &quot;ResourceResolverChain not initialized.&quot;);</span>
+<span class="fc" id="L524">		Assert.notNull(this.transformerChain, &quot;ResourceTransformerChain not initialized.&quot;);</span>
+
+<span class="fc" id="L526">		Resource resource = this.resolverChain.resolveResource(request, path, getLocations());</span>
+<span class="fc bfc" id="L527" title="All 2 branches covered.">		if (resource != null) {</span>
+<span class="fc" id="L528">			resource = this.transformerChain.transform(request, resource);</span>
+		}
+<span class="fc" id="L530">		return resource;</span>
+	}
+
+	/**
+	 * Process the given resource path.
+	 * &lt;p&gt;The default implementation replaces:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Backslash with forward slash.
+	 * &lt;li&gt;Duplicate occurrences of slash with a single slash.
+	 * &lt;li&gt;Any combination of leading slash and control characters (00-1F and 7F)
+	 * with a single &quot;/&quot; or &quot;&quot;. For example {@code &quot;  / // foo/bar&quot;}
+	 * becomes {@code &quot;/foo/bar&quot;}.
+	 * &lt;/ul&gt;
+	 * @since 3.2.12
+	 */
+	protected String processPath(String path) {
+<span class="fc" id="L546">		path = StringUtils.replace(path, &quot;\\&quot;, &quot;/&quot;);</span>
+<span class="fc" id="L547">		path = cleanDuplicateSlashes(path);</span>
+<span class="fc" id="L548">		return cleanLeadingSlash(path);</span>
+	}
+
+	private String cleanDuplicateSlashes(String path) {
+<span class="fc" id="L552">		StringBuilder sb = null;</span>
+<span class="fc" id="L553">		char prev = 0;</span>
+<span class="fc bfc" id="L554" title="All 2 branches covered.">		for (int i = 0; i &lt; path.length(); i++) {</span>
+<span class="fc" id="L555">			char curr = path.charAt(i);</span>
+			try {
+<span class="fc bfc" id="L557" title="All 4 branches covered.">				if ((curr == '/') &amp;&amp; (prev == '/')) {</span>
+<span class="fc bfc" id="L558" title="All 2 branches covered.">					if (sb == null) {</span>
+<span class="fc" id="L559">						sb = new StringBuilder(path.substring(0, i));</span>
+					}
+					continue;
+				}
+<span class="fc bfc" id="L563" title="All 2 branches covered.">				if (sb != null) {</span>
+<span class="fc" id="L564">					sb.append(path.charAt(i));</span>
+				}
+			}
+			finally {
+<span class="fc" id="L568">				prev = curr;</span>
+			}
+		}
+<span class="fc bfc" id="L571" title="All 2 branches covered.">		return sb != null ? sb.toString() : path;</span>
+	}
+
+	private String cleanLeadingSlash(String path) {
+<span class="fc" id="L575">		boolean slash = false;</span>
+<span class="fc bfc" id="L576" title="All 2 branches covered.">		for (int i = 0; i &lt; path.length(); i++) {</span>
+<span class="fc bfc" id="L577" title="All 2 branches covered.">			if (path.charAt(i) == '/') {</span>
+<span class="fc" id="L578">				slash = true;</span>
+			}
+<span class="fc bfc" id="L580" title="All 4 branches covered.">			else if (path.charAt(i) &gt; ' ' &amp;&amp; path.charAt(i) != 127) {</span>
+<span class="fc bfc" id="L581" title="All 6 branches covered.">				if (i == 0 || (i == 1 &amp;&amp; slash)) {</span>
+<span class="fc" id="L582">					return path;</span>
+				}
+<span class="fc bfc" id="L584" title="All 2 branches covered.">				return (slash ? &quot;/&quot; + path.substring(i) : path.substring(i));</span>
+			}
+		}
+<span class="fc bfc" id="L587" title="All 2 branches covered.">		return (slash ? &quot;/&quot; : &quot;&quot;);</span>
+	}
+
+	/**
+	 * Check whether the given path contains invalid escape sequences.
+	 * @param path the path to validate
+	 * @return {@code true} if the path is invalid, {@code false} otherwise
+	 */
+	private boolean isInvalidEncodedPath(String path) {
+<span class="fc bfc" id="L596" title="All 2 branches covered.">		if (path.contains(&quot;%&quot;)) {</span>
+			try {
+				// Use URLDecoder (vs UriUtils) to preserve potentially decoded UTF-8 chars
+<span class="fc" id="L599">				String decodedPath = URLDecoder.decode(path, &quot;UTF-8&quot;);</span>
+<span class="fc bfc" id="L600" title="All 2 branches covered.">				if (isInvalidPath(decodedPath)) {</span>
+<span class="fc" id="L601">					return true;</span>
+				}
+<span class="fc" id="L603">				decodedPath = processPath(decodedPath);</span>
+<span class="pc bpc" id="L604" title="1 of 2 branches missed.">				if (isInvalidPath(decodedPath)) {</span>
+<span class="fc" id="L605">					return true;</span>
+				}
+			}
+<span class="fc" id="L608">			catch (IllegalArgumentException | UnsupportedEncodingException ex) {</span>
+				// Should never happen...
+<span class="nc" id="L610">			}</span>
+		}
+<span class="fc" id="L612">		return false;</span>
+	}
+
+	/**
+	 * Identifies invalid resource paths. By default rejects:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Paths that contain &quot;WEB-INF&quot; or &quot;META-INF&quot;
+	 * &lt;li&gt;Paths that contain &quot;../&quot; after a call to
+	 * {@link org.springframework.util.StringUtils#cleanPath}.
+	 * &lt;li&gt;Paths that represent a {@link org.springframework.util.ResourceUtils#isUrl
+	 * valid URL} or would represent one after the leading slash is removed.
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; this method assumes that leading, duplicate '/'
+	 * or control characters (e.g. white space) have been trimmed so that the
+	 * path starts predictably with a single '/' or does not have one.
+	 * @param path the path to validate
+	 * @return {@code true} if the path is invalid, {@code false} otherwise
+	 * @since 3.0.6
+	 */
+	protected boolean isInvalidPath(String path) {
+<span class="pc bpc" id="L632" title="2 of 4 branches missed.">		if (path.contains(&quot;WEB-INF&quot;) || path.contains(&quot;META-INF&quot;)) {</span>
+<span class="nc bnc" id="L633" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L634">				logger.warn(&quot;Path with \&quot;WEB-INF\&quot; or \&quot;META-INF\&quot;: [&quot; + path + &quot;]&quot;);</span>
+			}
+<span class="nc" id="L636">			return true;</span>
+		}
+<span class="fc bfc" id="L638" title="All 2 branches covered.">		if (path.contains(&quot;:/&quot;)) {</span>
+<span class="fc bfc" id="L639" title="All 2 branches covered.">			String relativePath = (path.charAt(0) == '/' ? path.substring(1) : path);</span>
+<span class="fc bfc" id="L640" title="All 4 branches covered.">			if (ResourceUtils.isUrl(relativePath) || relativePath.startsWith(&quot;url:&quot;)) {</span>
+<span class="pc bpc" id="L641" title="1 of 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L642">					logger.warn(&quot;Path represents URL or has \&quot;url:\&quot; prefix: [&quot; + path + &quot;]&quot;);</span>
+				}
+<span class="fc" id="L644">				return true;</span>
+			}
+		}
+<span class="fc bfc" id="L647" title="All 4 branches covered.">		if (path.contains(&quot;..&quot;) &amp;&amp; StringUtils.cleanPath(path).contains(&quot;../&quot;)) {</span>
+<span class="pc bpc" id="L648" title="1 of 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L649">				logger.warn(&quot;Path contains \&quot;../\&quot; after call to StringUtils#cleanPath: [&quot; + path + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L651">			return true;</span>
+		}
+<span class="fc" id="L653">		return false;</span>
+	}
+
+	/**
+	 * Determine the media type for the given request and the resource matched
+	 * to it. This implementation tries to determine the MediaType based on the
+	 * file extension of the Resource via
+	 * {@link ServletPathExtensionContentNegotiationStrategy#getMediaTypeForResource}.
+	 * @param request the current request
+	 * @param resource the resource to check
+	 * @return the corresponding media type, or {@code null} if none found
+	 */
+	@Nullable
+	protected MediaType getMediaType(HttpServletRequest request, Resource resource) {
+<span class="pc bpc" id="L667" title="1 of 2 branches missed.">		return (this.contentNegotiationStrategy != null ?</span>
+<span class="pc" id="L668">				this.contentNegotiationStrategy.getMediaTypeForResource(resource) : null);</span>
+	}
+
+	/**
+	 * Set headers on the given servlet response.
+	 * Called for GET requests as well as HEAD requests.
+	 * @param response current servlet response
+	 * @param resource the identified resource (never {@code null})
+	 * @param mediaType the resource's media type (never {@code null})
+	 * @throws IOException in case of errors while setting the headers
+	 */
+	protected void setHeaders(HttpServletResponse response, Resource resource, @Nullable MediaType mediaType)
+			throws IOException {
+
+<span class="fc" id="L682">		long length = resource.contentLength();</span>
+<span class="pc bpc" id="L683" title="1 of 2 branches missed.">		if (length &gt; Integer.MAX_VALUE) {</span>
+<span class="nc" id="L684">			response.setContentLengthLong(length);</span>
+		}
+		else {
+<span class="fc" id="L687">			response.setContentLength((int) length);</span>
+		}
+
+<span class="pc bpc" id="L690" title="1 of 2 branches missed.">		if (mediaType != null) {</span>
+<span class="fc" id="L691">			response.setContentType(mediaType.toString());</span>
+		}
+<span class="fc bfc" id="L693" title="All 2 branches covered.">		if (resource instanceof HttpResource) {</span>
+<span class="fc" id="L694">			HttpHeaders resourceHeaders = ((HttpResource) resource).getResponseHeaders();</span>
+<span class="fc" id="L695">			resourceHeaders.forEach((headerName, headerValues) -&gt; {</span>
+<span class="fc" id="L696">				boolean first = true;</span>
+<span class="fc bfc" id="L697" title="All 2 branches covered.">				for (String headerValue : headerValues) {</span>
+<span class="pc bpc" id="L698" title="1 of 2 branches missed.">					if (first) {</span>
+<span class="fc" id="L699">						response.setHeader(headerName, headerValue);</span>
+					}
+					else {
+<span class="nc" id="L702">						response.addHeader(headerName, headerValue);</span>
+					}
+<span class="fc" id="L704">					first = false;</span>
+<span class="fc" id="L705">				}</span>
+<span class="fc" id="L706">			});</span>
+		}
+<span class="fc" id="L708">		response.setHeader(HttpHeaders.ACCEPT_RANGES, &quot;bytes&quot;);</span>
+<span class="fc" id="L709">	}</span>
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L714">		return &quot;ResourceHttpRequestHandler &quot; + formatLocations();</span>
+	}
+
+	private Object formatLocations() {
+<span class="nc bnc" id="L718" title="All 2 branches missed.">		if (!this.locationValues.isEmpty()) {</span>
+<span class="nc" id="L719">			return this.locationValues.stream().collect(Collectors.joining(&quot;\&quot;, \&quot;&quot;, &quot;[\&quot;&quot;, &quot;\&quot;]&quot;));</span>
+		}
+<span class="nc bnc" id="L721" title="All 2 branches missed.">		else if (!this.locations.isEmpty()) {</span>
+<span class="nc" id="L722">			return this.locations;</span>
+		}
+<span class="nc" id="L724">		return Collections.emptyList();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

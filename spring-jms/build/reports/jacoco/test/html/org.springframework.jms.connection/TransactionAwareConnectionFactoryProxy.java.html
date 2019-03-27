@@ -1,0 +1,364 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionAwareConnectionFactoryProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.connection</a> &gt; <span class="el_source">TransactionAwareConnectionFactoryProxy.java</span></div><h1>TransactionAwareConnectionFactoryProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.connection;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.List;
+import javax.jms.Connection;
+import javax.jms.ConnectionFactory;
+import javax.jms.JMSContext;
+import javax.jms.JMSException;
+import javax.jms.QueueConnection;
+import javax.jms.QueueConnectionFactory;
+import javax.jms.QueueSession;
+import javax.jms.Session;
+import javax.jms.TopicConnection;
+import javax.jms.TopicConnectionFactory;
+import javax.jms.TopicSession;
+import javax.jms.TransactionInProgressException;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Proxy for a target JMS {@link javax.jms.ConnectionFactory}, adding awareness of
+ * Spring-managed transactions. Similar to a transactional JNDI ConnectionFactory
+ * as provided by a Java EE application server.
+ *
+ * &lt;p&gt;Messaging code which should remain unaware of Spring's JMS support can work with
+ * this proxy to seamlessly participate in Spring-managed transactions. Note that the
+ * transaction manager, for example {@link JmsTransactionManager}, still needs to work
+ * with the underlying ConnectionFactory, &lt;i&gt;not&lt;/i&gt; with this proxy.
+ *
+ * &lt;p&gt;&lt;b&gt;Make sure that TransactionAwareConnectionFactoryProxy is the outermost
+ * ConnectionFactory of a chain of ConnectionFactory proxies/adapters.&lt;/b&gt;
+ * TransactionAwareConnectionFactoryProxy can delegate either directly to the
+ * target factory or to some intermediary adapter like
+ * {@link UserCredentialsConnectionFactoryAdapter}.
+ *
+ * &lt;p&gt;Delegates to {@link ConnectionFactoryUtils} for automatically participating
+ * in thread-bound transactions, for example managed by {@link JmsTransactionManager}.
+ * {@code createSession} calls and {@code close} calls on returned Sessions
+ * will behave properly within a transaction, that is, always work on the transactional
+ * Session. If not within a transaction, normal ConnectionFactory behavior applies.
+ *
+ * &lt;p&gt;Note that transactional JMS Sessions will be registered on a per-Connection
+ * basis. To share the same JMS Session across a transaction, make sure that you
+ * operate on the same JMS Connection handle - either through reusing the handle
+ * or through configuring a {@link SingleConnectionFactory} underneath.
+ *
+ * &lt;p&gt;Returned transactional Session proxies will implement the {@link SessionProxy}
+ * interface to allow for access to the underlying target Session. This is only
+ * intended for accessing vendor-specific Session API or for testing purposes
+ * (e.g. to perform manual transaction control). For typical application purposes,
+ * simply use the standard JMS Session interface.
+ *
+ * &lt;p&gt;As of Spring Framework 5, this class delegates JMS 2.0 {@code JMSContext}
+ * calls and therefore requires the JMS 2.0 API to be present at runtime.
+ * It may nevertheless run against a JMS 1.1 driver (bound to the JMS 2.0 API)
+ * as long as no actual JMS 2.0 calls are triggered by the application's setup.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see UserCredentialsConnectionFactoryAdapter
+ * @see SingleConnectionFactory
+ */
+public class TransactionAwareConnectionFactoryProxy
+		implements ConnectionFactory, QueueConnectionFactory, TopicConnectionFactory {
+
+	@Nullable
+	private ConnectionFactory targetConnectionFactory;
+
+<span class="pc" id="L91">	private boolean synchedLocalTransactionAllowed = false;</span>
+
+
+	/**
+	 * Create a new TransactionAwareConnectionFactoryProxy.
+	 */
+<span class="nc" id="L97">	public TransactionAwareConnectionFactoryProxy() {</span>
+<span class="nc" id="L98">	}</span>
+
+	/**
+	 * Create a new TransactionAwareConnectionFactoryProxy.
+	 * @param targetConnectionFactory the target ConnectionFactory
+	 */
+<span class="fc" id="L104">	public TransactionAwareConnectionFactoryProxy(ConnectionFactory targetConnectionFactory) {</span>
+<span class="fc" id="L105">		setTargetConnectionFactory(targetConnectionFactory);</span>
+<span class="fc" id="L106">	}</span>
+
+
+	/**
+	 * Set the target ConnectionFactory that this ConnectionFactory should delegate to.
+	 */
+	public final void setTargetConnectionFactory(ConnectionFactory targetConnectionFactory) {
+<span class="fc" id="L113">		Assert.notNull(targetConnectionFactory, &quot;'targetConnectionFactory' must not be null&quot;);</span>
+<span class="fc" id="L114">		this.targetConnectionFactory = targetConnectionFactory;</span>
+<span class="fc" id="L115">	}</span>
+
+	/**
+	 * Return the target ConnectionFactory that this ConnectionFactory should delegate to.
+	 */
+	protected ConnectionFactory getTargetConnectionFactory() {
+<span class="fc" id="L121">		ConnectionFactory target = this.targetConnectionFactory;</span>
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">		Assert.state(target != null, &quot;'targetConnectionFactory' is required&quot;);</span>
+<span class="fc" id="L123">		return target;</span>
+	}
+
+	/**
+	 * Set whether to allow for a local JMS transaction that is synchronized with a
+	 * Spring-managed transaction (where the main transaction might be a JDBC-based
+	 * one for a specific DataSource, for example), with the JMS transaction committing
+	 * right after the main transaction. If not allowed, the given ConnectionFactory
+	 * needs to handle transaction enlistment underneath the covers.
+	 * &lt;p&gt;Default is &quot;false&quot;: If not within a managed transaction that encompasses
+	 * the underlying JMS ConnectionFactory, standard Sessions will be returned.
+	 * Turn this flag on to allow participation in any Spring-managed transaction,
+	 * with a local JMS transaction synchronized with the main transaction.
+	 */
+	public void setSynchedLocalTransactionAllowed(boolean synchedLocalTransactionAllowed) {
+<span class="nc" id="L138">		this.synchedLocalTransactionAllowed = synchedLocalTransactionAllowed;</span>
+<span class="nc" id="L139">	}</span>
+
+	/**
+	 * Return whether to allow for a local JMS transaction that is synchronized
+	 * with a Spring-managed transaction.
+	 */
+	protected boolean isSynchedLocalTransactionAllowed() {
+<span class="fc" id="L146">		return this.synchedLocalTransactionAllowed;</span>
+	}
+
+
+	@Override
+	public Connection createConnection() throws JMSException {
+<span class="fc" id="L152">		Connection targetConnection = getTargetConnectionFactory().createConnection();</span>
+<span class="fc" id="L153">		return getTransactionAwareConnectionProxy(targetConnection);</span>
+	}
+
+	@Override
+	public Connection createConnection(String username, String password) throws JMSException {
+<span class="nc" id="L158">		Connection targetConnection = getTargetConnectionFactory().createConnection(username, password);</span>
+<span class="nc" id="L159">		return getTransactionAwareConnectionProxy(targetConnection);</span>
+	}
+
+	@Override
+	public QueueConnection createQueueConnection() throws JMSException {
+<span class="nc" id="L164">		ConnectionFactory target = getTargetConnectionFactory();</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">		if (!(target instanceof QueueConnectionFactory)) {</span>
+<span class="nc" id="L166">			throw new javax.jms.IllegalStateException(&quot;'targetConnectionFactory' is no QueueConnectionFactory&quot;);</span>
+		}
+<span class="nc" id="L168">		QueueConnection targetConnection = ((QueueConnectionFactory) target).createQueueConnection();</span>
+<span class="nc" id="L169">		return (QueueConnection) getTransactionAwareConnectionProxy(targetConnection);</span>
+	}
+
+	@Override
+	public QueueConnection createQueueConnection(String username, String password) throws JMSException {
+<span class="nc" id="L174">		ConnectionFactory target = getTargetConnectionFactory();</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">		if (!(target instanceof QueueConnectionFactory)) {</span>
+<span class="nc" id="L176">			throw new javax.jms.IllegalStateException(&quot;'targetConnectionFactory' is no QueueConnectionFactory&quot;);</span>
+		}
+<span class="nc" id="L178">		QueueConnection targetConnection = ((QueueConnectionFactory) target).createQueueConnection(username, password);</span>
+<span class="nc" id="L179">		return (QueueConnection) getTransactionAwareConnectionProxy(targetConnection);</span>
+	}
+
+	@Override
+	public TopicConnection createTopicConnection() throws JMSException {
+<span class="nc" id="L184">		ConnectionFactory target = getTargetConnectionFactory();</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">		if (!(target instanceof TopicConnectionFactory)) {</span>
+<span class="nc" id="L186">			throw new javax.jms.IllegalStateException(&quot;'targetConnectionFactory' is no TopicConnectionFactory&quot;);</span>
+		}
+<span class="nc" id="L188">		TopicConnection targetConnection = ((TopicConnectionFactory) target).createTopicConnection();</span>
+<span class="nc" id="L189">		return (TopicConnection) getTransactionAwareConnectionProxy(targetConnection);</span>
+	}
+
+	@Override
+	public TopicConnection createTopicConnection(String username, String password) throws JMSException {
+<span class="nc" id="L194">		ConnectionFactory target = getTargetConnectionFactory();</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">		if (!(target instanceof TopicConnectionFactory)) {</span>
+<span class="nc" id="L196">			throw new javax.jms.IllegalStateException(&quot;'targetConnectionFactory' is no TopicConnectionFactory&quot;);</span>
+		}
+<span class="nc" id="L198">		TopicConnection targetConnection = ((TopicConnectionFactory) target).createTopicConnection(username, password);</span>
+<span class="nc" id="L199">		return (TopicConnection) getTransactionAwareConnectionProxy(targetConnection);</span>
+	}
+
+	@Override
+	public JMSContext createContext() {
+<span class="nc" id="L204">		return getTargetConnectionFactory().createContext();</span>
+	}
+
+	@Override
+	public JMSContext createContext(String userName, String password) {
+<span class="nc" id="L209">		return getTargetConnectionFactory().createContext(userName, password);</span>
+	}
+
+	@Override
+	public JMSContext createContext(String userName, String password, int sessionMode) {
+<span class="nc" id="L214">		return getTargetConnectionFactory().createContext(userName, password, sessionMode);</span>
+	}
+
+	@Override
+	public JMSContext createContext(int sessionMode) {
+<span class="nc" id="L219">		return getTargetConnectionFactory().createContext(sessionMode);</span>
+	}
+
+
+	/**
+	 * Wrap the given Connection with a proxy that delegates every method call to it
+	 * but handles Session lookup in a transaction-aware fashion.
+	 * @param target the original Connection to wrap
+	 * @return the wrapped Connection
+	 */
+	protected Connection getTransactionAwareConnectionProxy(Connection target) {
+<span class="fc" id="L230">		List&lt;Class&lt;?&gt;&gt; classes = new ArrayList&lt;&gt;(3);</span>
+<span class="fc" id="L231">		classes.add(Connection.class);</span>
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">		if (target instanceof QueueConnection) {</span>
+<span class="nc" id="L233">			classes.add(QueueConnection.class);</span>
+		}
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		if (target instanceof TopicConnection) {</span>
+<span class="nc" id="L236">			classes.add(TopicConnection.class);</span>
+		}
+<span class="fc" id="L238">		return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(),</span>
+<span class="fc" id="L239">				ClassUtils.toClassArray(classes), new TransactionAwareConnectionInvocationHandler(target));</span>
+	}
+
+
+	/**
+	 * Invocation handler that exposes transactional Sessions for the underlying Connection.
+	 */
+	private class TransactionAwareConnectionInvocationHandler implements InvocationHandler {
+
+		private final Connection target;
+
+<span class="fc" id="L250">		public TransactionAwareConnectionInvocationHandler(Connection target) {</span>
+<span class="fc" id="L251">			this.target = target;</span>
+<span class="fc" id="L252">		}</span>
+
+		@Override
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on ConnectionProxy interface coming in...
+
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L260" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L264">				return System.identityHashCode(proxy);</span>
+			}
+<span class="fc bfc" id="L266" title="All 2 branches covered.">			else if (Session.class == method.getReturnType()) {</span>
+<span class="fc" id="L267">				Session session = ConnectionFactoryUtils.getTransactionalSession(</span>
+<span class="fc" id="L268">						getTargetConnectionFactory(), this.target, isSynchedLocalTransactionAllowed());</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">				if (session != null) {</span>
+<span class="fc" id="L270">					return getCloseSuppressingSessionProxy(session);</span>
+				}
+<span class="nc" id="L272">			}</span>
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">			else if (QueueSession.class == method.getReturnType()) {</span>
+<span class="nc" id="L274">				QueueSession session = ConnectionFactoryUtils.getTransactionalQueueSession(</span>
+<span class="nc" id="L275">						(QueueConnectionFactory) getTargetConnectionFactory(), (QueueConnection) this.target,</span>
+<span class="nc" id="L276">						isSynchedLocalTransactionAllowed());</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">				if (session != null) {</span>
+<span class="nc" id="L278">					return getCloseSuppressingSessionProxy(session);</span>
+				}
+<span class="nc" id="L280">			}</span>
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">			else if (TopicSession.class == method.getReturnType()) {</span>
+<span class="nc" id="L282">				TopicSession session = ConnectionFactoryUtils.getTransactionalTopicSession(</span>
+<span class="nc" id="L283">						(TopicConnectionFactory) getTargetConnectionFactory(), (TopicConnection) this.target,</span>
+<span class="nc" id="L284">						isSynchedLocalTransactionAllowed());</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">				if (session != null) {</span>
+<span class="nc" id="L286">					return getCloseSuppressingSessionProxy(session);</span>
+				}
+			}
+
+			// Invoke method on target Connection.
+			try {
+<span class="fc" id="L292">				return method.invoke(this.target, args);</span>
+			}
+<span class="nc" id="L294">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L295">				throw ex.getTargetException();</span>
+			}
+		}
+
+		private Session getCloseSuppressingSessionProxy(Session target) {
+<span class="fc" id="L300">			List&lt;Class&lt;?&gt;&gt; classes = new ArrayList&lt;&gt;(3);</span>
+<span class="fc" id="L301">			classes.add(SessionProxy.class);</span>
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">			if (target instanceof QueueSession) {</span>
+<span class="nc" id="L303">				classes.add(QueueSession.class);</span>
+			}
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">			if (target instanceof TopicSession) {</span>
+<span class="nc" id="L306">				classes.add(TopicSession.class);</span>
+			}
+<span class="fc" id="L308">			return (Session) Proxy.newProxyInstance(SessionProxy.class.getClassLoader(),</span>
+<span class="fc" id="L309">					ClassUtils.toClassArray(classes), new CloseSuppressingSessionInvocationHandler(target));</span>
+		}
+	}
+
+
+	/**
+	 * Invocation handler that suppresses close calls for a transactional JMS Session.
+	 */
+	private static class CloseSuppressingSessionInvocationHandler implements InvocationHandler {
+
+		private final Session target;
+
+<span class="fc" id="L321">		public CloseSuppressingSessionInvocationHandler(Session target) {</span>
+<span class="fc" id="L322">			this.target = target;</span>
+<span class="fc" id="L323">		}</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on SessionProxy interface coming in...
+
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L332" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L336">				return System.identityHashCode(proxy);</span>
+			}
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;commit&quot;)) {</span>
+<span class="nc" id="L339">				throw new TransactionInProgressException(&quot;Commit call not allowed within a managed transaction&quot;);</span>
+			}
+<span class="pc bpc" id="L341" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;rollback&quot;)) {</span>
+<span class="nc" id="L342">				throw new TransactionInProgressException(&quot;Rollback call not allowed within a managed transaction&quot;);</span>
+			}
+<span class="fc bfc" id="L344" title="All 2 branches covered.">			else if (method.getName().equals(&quot;close&quot;)) {</span>
+				// Handle close method: not to be closed within a transaction.
+<span class="fc" id="L346">				return null;</span>
+			}
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;getTargetSession&quot;)) {</span>
+				// Handle getTargetSession method: return underlying Session.
+<span class="nc" id="L350">				return this.target;</span>
+			}
+
+			// Invoke method on target Session.
+			try {
+<span class="fc" id="L355">				return method.invoke(this.target, args);</span>
+			}
+<span class="nc" id="L357">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L358">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

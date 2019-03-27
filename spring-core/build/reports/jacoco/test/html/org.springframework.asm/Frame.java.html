@@ -1,0 +1,1474 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Frame.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.asm</a> &gt; <span class="el_source">Frame.java</span></div><h1>Frame.java</h1><pre class="source lang-java linenums">// ASM: a very small and fast Java bytecode manipulation framework
+// Copyright (c) 2000-2011 INRIA, France Telecom
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+// 3. Neither the name of the copyright holders nor the names of its
+//    contributors may be used to endorse or promote products derived from
+//    this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+// THE POSSIBILITY OF SUCH DAMAGE.
+package org.springframework.asm;
+
+/**
+ * The input and output stack map frames of a basic block.
+ *
+ * &lt;p&gt;Stack map frames are computed in two steps:
+ *
+ * &lt;ul&gt;
+ *   &lt;li&gt;During the visit of each instruction in MethodWriter, the state of the frame at the end of
+ *       the current basic block is updated by simulating the action of the instruction on the
+ *       previous state of this so called &quot;output frame&quot;.
+ *   &lt;li&gt;After all instructions have been visited, a fix point algorithm is used in MethodWriter to
+ *       compute the &quot;input frame&quot; of each basic block (i.e. the stack map frame at the beginning of
+ *       the basic block). See {@link MethodWriter#computeAllFrames}.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Output stack map frames are computed relatively to the input frame of the basic block, which
+ * is not yet known when output frames are computed. It is therefore necessary to be able to
+ * represent abstract types such as &quot;the type at position x in the input frame locals&quot; or &quot;the type
+ * at position x from the top of the input frame stack&quot; or even &quot;the type at position x in the input
+ * frame, with y more (or less) array dimensions&quot;. This explains the rather complicated type format
+ * used in this class, explained below.
+ *
+ * &lt;p&gt;The local variables and the operand stack of input and output frames contain values called
+ * &quot;abstract types&quot; hereafter. An abstract type is represented with 4 fields named DIM, KIND, FLAGS
+ * and VALUE, packed in a single int value for better performance and memory efficiency:
+ *
+ * &lt;pre&gt;
+ *   =====================================
+ *   |...DIM|KIND|.F|...............VALUE|
+ *   =====================================
+ * &lt;/pre&gt;
+ *
+ * &lt;ul&gt;
+ *   &lt;li&gt;the DIM field, stored in the 6 most significant bits, is a signed number of array
+ *       dimensions (from -32 to 31, included). It can be retrieved with {@link #DIM_MASK} and a
+ *       right shift of {@link #DIM_SHIFT}.
+ *   &lt;li&gt;the KIND field, stored in 4 bits, indicates the kind of VALUE used. These 4 bits can be
+ *       retrieved with {@link #KIND_MASK} and, without any shift, must be equal to {@link
+ *       #CONSTANT_KIND}, {@link #REFERENCE_KIND}, {@link #UNINITIALIZED_KIND}, {@link #LOCAL_KIND}
+ *       or {@link #STACK_KIND}.
+ *   &lt;li&gt;the FLAGS field, stored in 2 bits, contains up to 2 boolean flags. Currently only one flag
+ *       is defined, namely {@link #TOP_IF_LONG_OR_DOUBLE_FLAG}.
+ *   &lt;li&gt;the VALUE field, stored in the remaining 20 bits, contains either
+ *       &lt;ul&gt;
+ *         &lt;li&gt;one of the constants {@link #ITEM_TOP}, {@link #ITEM_ASM_BOOLEAN}, {@link
+ *             #ITEM_ASM_BYTE}, {@link #ITEM_ASM_CHAR} or {@link #ITEM_ASM_SHORT}, {@link
+ *             #ITEM_INTEGER}, {@link #ITEM_FLOAT}, {@link #ITEM_LONG}, {@link #ITEM_DOUBLE}, {@link
+ *             #ITEM_NULL} or {@link #ITEM_UNINITIALIZED_THIS}, if KIND is equal to {@link
+ *             #CONSTANT_KIND}.
+ *         &lt;li&gt;the index of a {@link Symbol#TYPE_TAG} {@link Symbol} in the type table of a {@link
+ *             SymbolTable}, if KIND is equal to {@link #REFERENCE_KIND}.
+ *         &lt;li&gt;the index of an {@link Symbol#UNINITIALIZED_TYPE_TAG} {@link Symbol} in the type
+ *             table of a SymbolTable, if KIND is equal to {@link #UNINITIALIZED_KIND}.
+ *         &lt;li&gt;the index of a local variable in the input stack frame, if KIND is equal to {@link
+ *             #LOCAL_KIND}.
+ *         &lt;li&gt;a position relatively to the top of the stack of the input stack frame, if KIND is
+ *             equal to {@link #STACK_KIND},
+ *       &lt;/ul&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Output frames can contain abstract types of any kind and with a positive or negative array
+ * dimension (and even unassigned types, represented by 0 - which does not correspond to any valid
+ * abstract type value). Input frames can only contain CONSTANT_KIND, REFERENCE_KIND or
+ * UNINITIALIZED_KIND abstract types of positive or {@literal null} array dimension. In all cases
+ * the type table contains only internal type names (array type descriptors are forbidden - array
+ * dimensions must be represented through the DIM field).
+ *
+ * &lt;p&gt;The LONG and DOUBLE types are always represented by using two slots (LONG + TOP or DOUBLE +
+ * TOP), for local variables as well as in the operand stack. This is necessary to be able to
+ * simulate DUPx_y instructions, whose effect would be dependent on the concrete types represented
+ * by the abstract types in the stack (which are not always known).
+ *
+ * @author Eric Bruneton
+ */
+class Frame {
+
+  // Constants used in the StackMapTable attribute.
+  // See https://docs.oracle.com/javase/specs/jvms/se9/html/jvms-4.html#jvms-4.7.4.
+
+  static final int SAME_FRAME = 0;
+  static final int SAME_LOCALS_1_STACK_ITEM_FRAME = 64;
+  static final int RESERVED = 128;
+  static final int SAME_LOCALS_1_STACK_ITEM_FRAME_EXTENDED = 247;
+  static final int CHOP_FRAME = 248;
+  static final int SAME_FRAME_EXTENDED = 251;
+  static final int APPEND_FRAME = 252;
+  static final int FULL_FRAME = 255;
+
+  static final int ITEM_TOP = 0;
+  static final int ITEM_INTEGER = 1;
+  static final int ITEM_FLOAT = 2;
+  static final int ITEM_DOUBLE = 3;
+  static final int ITEM_LONG = 4;
+  static final int ITEM_NULL = 5;
+  static final int ITEM_UNINITIALIZED_THIS = 6;
+  static final int ITEM_OBJECT = 7;
+  static final int ITEM_UNINITIALIZED = 8;
+  // Additional, ASM specific constants used in abstract types below.
+  private static final int ITEM_ASM_BOOLEAN = 9;
+  private static final int ITEM_ASM_BYTE = 10;
+  private static final int ITEM_ASM_CHAR = 11;
+  private static final int ITEM_ASM_SHORT = 12;
+
+  // The size and offset in bits of each field of an abstract type.
+
+  private static final int DIM_SIZE = 6;
+  private static final int KIND_SIZE = 4;
+  private static final int FLAGS_SIZE = 2;
+  private static final int VALUE_SIZE = 32 - DIM_SIZE - KIND_SIZE - FLAGS_SIZE;
+
+  private static final int DIM_SHIFT = KIND_SIZE + FLAGS_SIZE + VALUE_SIZE;
+  private static final int KIND_SHIFT = FLAGS_SIZE + VALUE_SIZE;
+  private static final int FLAGS_SHIFT = VALUE_SIZE;
+
+  // Bitmasks to get each field of an abstract type.
+
+  private static final int DIM_MASK = ((1 &lt;&lt; DIM_SIZE) - 1) &lt;&lt; DIM_SHIFT;
+  private static final int KIND_MASK = ((1 &lt;&lt; KIND_SIZE) - 1) &lt;&lt; KIND_SHIFT;
+  private static final int VALUE_MASK = (1 &lt;&lt; VALUE_SIZE) - 1;
+
+  // Constants to manipulate the DIM field of an abstract type.
+
+  /** The constant to be added to an abstract type to get one with one more array dimension. */
+  private static final int ARRAY_OF = +1 &lt;&lt; DIM_SHIFT;
+
+  /** The constant to be added to an abstract type to get one with one less array dimension. */
+  private static final int ELEMENT_OF = -1 &lt;&lt; DIM_SHIFT;
+
+  // Possible values for the KIND field of an abstract type.
+
+  private static final int CONSTANT_KIND = 1 &lt;&lt; KIND_SHIFT;
+  private static final int REFERENCE_KIND = 2 &lt;&lt; KIND_SHIFT;
+  private static final int UNINITIALIZED_KIND = 3 &lt;&lt; KIND_SHIFT;
+  private static final int LOCAL_KIND = 4 &lt;&lt; KIND_SHIFT;
+  private static final int STACK_KIND = 5 &lt;&lt; KIND_SHIFT;
+
+  // Possible flags for the FLAGS field of an abstract type.
+
+  /**
+   * A flag used for LOCAL_KIND and STACK_KIND abstract types, indicating that if the resolved,
+   * concrete type is LONG or DOUBLE, TOP should be used instead (because the value has been
+   * partially overridden with an xSTORE instruction).
+   */
+  private static final int TOP_IF_LONG_OR_DOUBLE_FLAG = 1 &lt;&lt; FLAGS_SHIFT;
+
+  // Useful predefined abstract types (all the possible CONSTANT_KIND types).
+
+  private static final int TOP = CONSTANT_KIND | ITEM_TOP;
+  private static final int BOOLEAN = CONSTANT_KIND | ITEM_ASM_BOOLEAN;
+  private static final int BYTE = CONSTANT_KIND | ITEM_ASM_BYTE;
+  private static final int CHAR = CONSTANT_KIND | ITEM_ASM_CHAR;
+  private static final int SHORT = CONSTANT_KIND | ITEM_ASM_SHORT;
+  private static final int INTEGER = CONSTANT_KIND | ITEM_INTEGER;
+  private static final int FLOAT = CONSTANT_KIND | ITEM_FLOAT;
+  private static final int LONG = CONSTANT_KIND | ITEM_LONG;
+  private static final int DOUBLE = CONSTANT_KIND | ITEM_DOUBLE;
+  private static final int NULL = CONSTANT_KIND | ITEM_NULL;
+  private static final int UNINITIALIZED_THIS = CONSTANT_KIND | ITEM_UNINITIALIZED_THIS;
+
+  // -----------------------------------------------------------------------------------------------
+  // Instance fields
+  // -----------------------------------------------------------------------------------------------
+
+  /** The basic block to which these input and output stack map frames correspond. */
+  Label owner;
+
+  /** The input stack map frame locals. This is an array of abstract types. */
+  private int[] inputLocals;
+
+  /** The input stack map frame stack. This is an array of abstract types. */
+  private int[] inputStack;
+
+  /** The output stack map frame locals. This is an array of abstract types. */
+  private int[] outputLocals;
+
+  /** The output stack map frame stack. This is an array of abstract types. */
+  private int[] outputStack;
+
+  /**
+   * The start of the output stack, relatively to the input stack. This offset is always negative or
+   * null. A null offset means that the output stack must be appended to the input stack. A -n
+   * offset means that the first n output stack elements must replace the top n input stack
+   * elements, and that the other elements must be appended to the input stack.
+   */
+  private short outputStackStart;
+
+  /** The index of the top stack element in {@link #outputStack}. */
+  private short outputStackTop;
+
+  /** The number of types that are initialized in the basic block. See {@link #initializations}. */
+  private int initializationCount;
+
+  /**
+   * The abstract types that are initialized in the basic block. A constructor invocation on an
+   * UNINITIALIZED or UNINITIALIZED_THIS abstract type must replace &lt;i&gt;every occurrence&lt;/i&gt; of this
+   * type in the local variables and in the operand stack. This cannot be done during the first step
+   * of the algorithm since, during this step, the local variables and the operand stack types are
+   * still abstract. It is therefore necessary to store the abstract types of the constructors which
+   * are invoked in the basic block, in order to do this replacement during the second step of the
+   * algorithm, where the frames are fully computed. Note that this array can contain abstract types
+   * that are relative to the input locals or to the input stack.
+   */
+  private int[] initializations;
+
+  // -----------------------------------------------------------------------------------------------
+  // Constructor
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Constructs a new Frame.
+   *
+   * @param owner the basic block to which these input and output stack map frames correspond.
+   */
+<span class="nc" id="L242">  Frame(final Label owner) {</span>
+<span class="nc" id="L243">    this.owner = owner;</span>
+<span class="nc" id="L244">  }</span>
+
+  /**
+   * Sets this frame to the value of the given frame.
+   *
+   * &lt;p&gt;WARNING: after this method is called the two frames share the same data structures. It is
+   * recommended to discard the given frame to avoid unexpected side effects.
+   *
+   * @param frame The new frame value.
+   */
+  final void copyFrom(final Frame frame) {
+<span class="nc" id="L255">    inputLocals = frame.inputLocals;</span>
+<span class="nc" id="L256">    inputStack = frame.inputStack;</span>
+<span class="nc" id="L257">    outputStackStart = 0;</span>
+<span class="nc" id="L258">    outputLocals = frame.outputLocals;</span>
+<span class="nc" id="L259">    outputStack = frame.outputStack;</span>
+<span class="nc" id="L260">    outputStackTop = frame.outputStackTop;</span>
+<span class="nc" id="L261">    initializationCount = frame.initializationCount;</span>
+<span class="nc" id="L262">    initializations = frame.initializations;</span>
+<span class="nc" id="L263">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Static methods to get abstract types from other type formats
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Returns the abstract type corresponding to the given public API frame element type.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param type a frame element type described using the same format as in {@link
+   *     MethodVisitor#visitFrame}, i.e. either {@link Opcodes#TOP}, {@link Opcodes#INTEGER}, {@link
+   *     Opcodes#FLOAT}, {@link Opcodes#LONG}, {@link Opcodes#DOUBLE}, {@link Opcodes#NULL}, or
+   *     {@link Opcodes#UNINITIALIZED_THIS}, or the internal name of a class, or a Label designating
+   *     a NEW instruction (for uninitialized types).
+   * @return the abstract type corresponding to the given frame element type.
+   */
+  static int getAbstractTypeFromApiFormat(final SymbolTable symbolTable, final Object type) {
+<span class="nc bnc" id="L281" title="All 2 branches missed.">    if (type instanceof Integer) {</span>
+<span class="nc" id="L282">      return CONSTANT_KIND | ((Integer) type).intValue();</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">    } else if (type instanceof String) {</span>
+<span class="nc" id="L284">      String descriptor = Type.getObjectType((String) type).getDescriptor();</span>
+<span class="nc" id="L285">      return getAbstractTypeFromDescriptor(symbolTable, descriptor, 0);</span>
+    } else {
+<span class="nc" id="L287">      return UNINITIALIZED_KIND</span>
+<span class="nc" id="L288">          | symbolTable.addUninitializedType(&quot;&quot;, ((Label) type).bytecodeOffset);</span>
+    }
+  }
+
+  /**
+   * Returns the abstract type corresponding to the internal name of a class.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param internalName the internal name of a class. This must &lt;i&gt;not&lt;/i&gt; be an array type
+   *     descriptor.
+   * @return the abstract type value corresponding to the given internal name.
+   */
+  static int getAbstractTypeFromInternalName(
+      final SymbolTable symbolTable, final String internalName) {
+<span class="nc" id="L302">    return REFERENCE_KIND | symbolTable.addType(internalName);</span>
+  }
+
+  /**
+   * Returns the abstract type corresponding to the given type descriptor.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param buffer a string ending with a type descriptor.
+   * @param offset the start offset of the type descriptor in buffer.
+   * @return the abstract type corresponding to the given type descriptor.
+   */
+  private static int getAbstractTypeFromDescriptor(
+      final SymbolTable symbolTable, final String buffer, final int offset) {
+    String internalName;
+<span class="nc bnc" id="L316" title="All 8 branches missed.">    switch (buffer.charAt(offset)) {</span>
+      case 'V':
+<span class="nc" id="L318">        return 0;</span>
+      case 'Z':
+      case 'C':
+      case 'B':
+      case 'S':
+      case 'I':
+<span class="nc" id="L324">        return INTEGER;</span>
+      case 'F':
+<span class="nc" id="L326">        return FLOAT;</span>
+      case 'J':
+<span class="nc" id="L328">        return LONG;</span>
+      case 'D':
+<span class="nc" id="L330">        return DOUBLE;</span>
+      case 'L':
+<span class="nc" id="L332">        internalName = buffer.substring(offset + 1, buffer.length() - 1);</span>
+<span class="nc" id="L333">        return REFERENCE_KIND | symbolTable.addType(internalName);</span>
+      case '[':
+<span class="nc" id="L335">        int elementDescriptorOffset = offset + 1;</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        while (buffer.charAt(elementDescriptorOffset) == '[') {</span>
+<span class="nc" id="L337">          ++elementDescriptorOffset;</span>
+        }
+        int typeValue;
+<span class="nc bnc" id="L340" title="All 10 branches missed.">        switch (buffer.charAt(elementDescriptorOffset)) {</span>
+          case 'Z':
+<span class="nc" id="L342">            typeValue = BOOLEAN;</span>
+<span class="nc" id="L343">            break;</span>
+          case 'C':
+<span class="nc" id="L345">            typeValue = CHAR;</span>
+<span class="nc" id="L346">            break;</span>
+          case 'B':
+<span class="nc" id="L348">            typeValue = BYTE;</span>
+<span class="nc" id="L349">            break;</span>
+          case 'S':
+<span class="nc" id="L351">            typeValue = SHORT;</span>
+<span class="nc" id="L352">            break;</span>
+          case 'I':
+<span class="nc" id="L354">            typeValue = INTEGER;</span>
+<span class="nc" id="L355">            break;</span>
+          case 'F':
+<span class="nc" id="L357">            typeValue = FLOAT;</span>
+<span class="nc" id="L358">            break;</span>
+          case 'J':
+<span class="nc" id="L360">            typeValue = LONG;</span>
+<span class="nc" id="L361">            break;</span>
+          case 'D':
+<span class="nc" id="L363">            typeValue = DOUBLE;</span>
+<span class="nc" id="L364">            break;</span>
+          case 'L':
+<span class="nc" id="L366">            internalName = buffer.substring(elementDescriptorOffset + 1, buffer.length() - 1);</span>
+<span class="nc" id="L367">            typeValue = REFERENCE_KIND | symbolTable.addType(internalName);</span>
+<span class="nc" id="L368">            break;</span>
+          default:
+<span class="nc" id="L370">            throw new IllegalArgumentException();</span>
+        }
+<span class="nc" id="L372">        return ((elementDescriptorOffset - offset) &lt;&lt; DIM_SHIFT) | typeValue;</span>
+      default:
+<span class="nc" id="L374">        throw new IllegalArgumentException();</span>
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Methods related to the input frame
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Sets the input frame from the given method description. This method is used to initialize the
+   * first frame of a method, which is implicit (i.e. not stored explicitly in the StackMapTable
+   * attribute).
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param access the method's access flags.
+   * @param descriptor the method descriptor.
+   * @param maxLocals the maximum number of local variables of the method.
+   */
+  final void setInputFrameFromDescriptor(
+      final SymbolTable symbolTable,
+      final int access,
+      final String descriptor,
+      final int maxLocals) {
+<span class="nc" id="L397">    inputLocals = new int[maxLocals];</span>
+<span class="nc" id="L398">    inputStack = new int[0];</span>
+<span class="nc" id="L399">    int inputLocalIndex = 0;</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">    if ((access &amp; Opcodes.ACC_STATIC) == 0) {</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">      if ((access &amp; Constants.ACC_CONSTRUCTOR) == 0) {</span>
+<span class="nc" id="L402">        inputLocals[inputLocalIndex++] =</span>
+<span class="nc" id="L403">            REFERENCE_KIND | symbolTable.addType(symbolTable.getClassName());</span>
+      } else {
+<span class="nc" id="L405">        inputLocals[inputLocalIndex++] = UNINITIALIZED_THIS;</span>
+      }
+    }
+<span class="nc bnc" id="L408" title="All 2 branches missed.">    for (Type argumentType : Type.getArgumentTypes(descriptor)) {</span>
+<span class="nc" id="L409">      int abstractType =</span>
+<span class="nc" id="L410">          getAbstractTypeFromDescriptor(symbolTable, argumentType.getDescriptor(), 0);</span>
+<span class="nc" id="L411">      inputLocals[inputLocalIndex++] = abstractType;</span>
+<span class="nc bnc" id="L412" title="All 4 branches missed.">      if (abstractType == LONG || abstractType == DOUBLE) {</span>
+<span class="nc" id="L413">        inputLocals[inputLocalIndex++] = TOP;</span>
+      }
+    }
+<span class="nc bnc" id="L416" title="All 2 branches missed.">    while (inputLocalIndex &lt; maxLocals) {</span>
+<span class="nc" id="L417">      inputLocals[inputLocalIndex++] = TOP;</span>
+    }
+<span class="nc" id="L419">  }</span>
+
+  /**
+   * Sets the input frame from the given public API frame description.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param numLocal the number of local variables.
+   * @param local the local variable types, described using the same format as in {@link
+   *     MethodVisitor#visitFrame}.
+   * @param numStack the number of operand stack elements.
+   * @param stack the operand stack types, described using the same format as in {@link
+   *     MethodVisitor#visitFrame}.
+   */
+  final void setInputFrameFromApiFormat(
+      final SymbolTable symbolTable,
+      final int numLocal,
+      final Object[] local,
+      final int numStack,
+      final Object[] stack) {
+<span class="nc" id="L438">    int inputLocalIndex = 0;</span>
+<span class="nc bnc" id="L439" title="All 2 branches missed.">    for (int i = 0; i &lt; numLocal; ++i) {</span>
+<span class="nc" id="L440">      inputLocals[inputLocalIndex++] = getAbstractTypeFromApiFormat(symbolTable, local[i]);</span>
+<span class="nc bnc" id="L441" title="All 4 branches missed.">      if (local[i] == Opcodes.LONG || local[i] == Opcodes.DOUBLE) {</span>
+<span class="nc" id="L442">        inputLocals[inputLocalIndex++] = TOP;</span>
+      }
+    }
+<span class="nc bnc" id="L445" title="All 2 branches missed.">    while (inputLocalIndex &lt; inputLocals.length) {</span>
+<span class="nc" id="L446">      inputLocals[inputLocalIndex++] = TOP;</span>
+    }
+<span class="nc" id="L448">    int numStackTop = 0;</span>
+<span class="nc bnc" id="L449" title="All 2 branches missed.">    for (int i = 0; i &lt; numStack; ++i) {</span>
+<span class="nc bnc" id="L450" title="All 4 branches missed.">      if (stack[i] == Opcodes.LONG || stack[i] == Opcodes.DOUBLE) {</span>
+<span class="nc" id="L451">        ++numStackTop;</span>
+      }
+    }
+<span class="nc" id="L454">    inputStack = new int[numStack + numStackTop];</span>
+<span class="nc" id="L455">    int inputStackIndex = 0;</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">    for (int i = 0; i &lt; numStack; ++i) {</span>
+<span class="nc" id="L457">      inputStack[inputStackIndex++] = getAbstractTypeFromApiFormat(symbolTable, stack[i]);</span>
+<span class="nc bnc" id="L458" title="All 4 branches missed.">      if (stack[i] == Opcodes.LONG || stack[i] == Opcodes.DOUBLE) {</span>
+<span class="nc" id="L459">        inputStack[inputStackIndex++] = TOP;</span>
+      }
+    }
+<span class="nc" id="L462">    outputStackTop = 0;</span>
+<span class="nc" id="L463">    initializationCount = 0;</span>
+<span class="nc" id="L464">  }</span>
+
+  final int getInputStackSize() {
+<span class="nc" id="L467">    return inputStack.length;</span>
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Methods related to the output frame
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Returns the abstract type stored at the given local variable index in the output frame.
+   *
+   * @param localIndex the index of the local variable whose value must be returned.
+   * @return the abstract type stored at the given local variable index in the output frame.
+   */
+  private int getLocal(final int localIndex) {
+<span class="nc bnc" id="L481" title="All 4 branches missed.">    if (outputLocals == null || localIndex &gt;= outputLocals.length) {</span>
+      // If this local has never been assigned in this basic block, it is still equal to its value
+      // in the input frame.
+<span class="nc" id="L484">      return LOCAL_KIND | localIndex;</span>
+    } else {
+<span class="nc" id="L486">      int abstractType = outputLocals[localIndex];</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">      if (abstractType == 0) {</span>
+        // If this local has never been assigned in this basic block, so it is still equal to its
+        // value in the input frame.
+<span class="nc" id="L490">        abstractType = outputLocals[localIndex] = LOCAL_KIND | localIndex;</span>
+      }
+<span class="nc" id="L492">      return abstractType;</span>
+    }
+  }
+
+  /**
+   * Replaces the abstract type stored at the given local variable index in the output frame.
+   *
+   * @param localIndex the index of the output frame local variable that must be set.
+   * @param abstractType the value that must be set.
+   */
+  private void setLocal(final int localIndex, final int abstractType) {
+    // Create and/or resize the output local variables array if necessary.
+<span class="nc bnc" id="L504" title="All 2 branches missed.">    if (outputLocals == null) {</span>
+<span class="nc" id="L505">      outputLocals = new int[10];</span>
+    }
+<span class="nc" id="L507">    int outputLocalsLength = outputLocals.length;</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">    if (localIndex &gt;= outputLocalsLength) {</span>
+<span class="nc" id="L509">      int[] newOutputLocals = new int[Math.max(localIndex + 1, 2 * outputLocalsLength)];</span>
+<span class="nc" id="L510">      System.arraycopy(outputLocals, 0, newOutputLocals, 0, outputLocalsLength);</span>
+<span class="nc" id="L511">      outputLocals = newOutputLocals;</span>
+    }
+    // Set the local variable.
+<span class="nc" id="L514">    outputLocals[localIndex] = abstractType;</span>
+<span class="nc" id="L515">  }</span>
+
+  /**
+   * Pushes the given abstract type on the output frame stack.
+   *
+   * @param abstractType an abstract type.
+   */
+  private void push(final int abstractType) {
+    // Create and/or resize the output stack array if necessary.
+<span class="nc bnc" id="L524" title="All 2 branches missed.">    if (outputStack == null) {</span>
+<span class="nc" id="L525">      outputStack = new int[10];</span>
+    }
+<span class="nc" id="L527">    int outputStackLength = outputStack.length;</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">    if (outputStackTop &gt;= outputStackLength) {</span>
+<span class="nc" id="L529">      int[] newOutputStack = new int[Math.max(outputStackTop + 1, 2 * outputStackLength)];</span>
+<span class="nc" id="L530">      System.arraycopy(outputStack, 0, newOutputStack, 0, outputStackLength);</span>
+<span class="nc" id="L531">      outputStack = newOutputStack;</span>
+    }
+    // Pushes the abstract type on the output stack.
+<span class="nc" id="L534">    outputStack[outputStackTop++] = abstractType;</span>
+    // Updates the maximum size reached by the output stack, if needed (note that this size is
+    // relative to the input stack size, which is not known yet).
+<span class="nc" id="L537">    short outputStackSize = (short) (outputStackStart + outputStackTop);</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">    if (outputStackSize &gt; owner.outputStackMax) {</span>
+<span class="nc" id="L539">      owner.outputStackMax = outputStackSize;</span>
+    }
+<span class="nc" id="L541">  }</span>
+
+  /**
+   * Pushes the abstract type corresponding to the given descriptor on the output frame stack.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param descriptor a type or method descriptor (in which case its return type is pushed).
+   */
+  private void push(final SymbolTable symbolTable, final String descriptor) {
+<span class="nc" id="L550">    int typeDescriptorOffset =</span>
+<span class="nc bnc" id="L551" title="All 2 branches missed.">        descriptor.charAt(0) == '(' ? Type.getReturnTypeOffset(descriptor) : 0;</span>
+<span class="nc" id="L552">    int abstractType = getAbstractTypeFromDescriptor(symbolTable, descriptor, typeDescriptorOffset);</span>
+<span class="nc bnc" id="L553" title="All 2 branches missed.">    if (abstractType != 0) {</span>
+<span class="nc" id="L554">      push(abstractType);</span>
+<span class="nc bnc" id="L555" title="All 4 branches missed.">      if (abstractType == LONG || abstractType == DOUBLE) {</span>
+<span class="nc" id="L556">        push(TOP);</span>
+      }
+    }
+<span class="nc" id="L559">  }</span>
+
+  /**
+   * Pops an abstract type from the output frame stack and returns its value.
+   *
+   * @return the abstract type that has been popped from the output frame stack.
+   */
+  private int pop() {
+<span class="nc bnc" id="L567" title="All 2 branches missed.">    if (outputStackTop &gt; 0) {</span>
+<span class="nc" id="L568">      return outputStack[--outputStackTop];</span>
+    } else {
+      // If the output frame stack is empty, pop from the input stack.
+<span class="nc" id="L571">      return STACK_KIND | -(--outputStackStart);</span>
+    }
+  }
+
+  /**
+   * Pops the given number of abstract types from the output frame stack.
+   *
+   * @param elements the number of abstract types that must be popped.
+   */
+  private void pop(final int elements) {
+<span class="nc bnc" id="L581" title="All 2 branches missed.">    if (outputStackTop &gt;= elements) {</span>
+<span class="nc" id="L582">      outputStackTop -= elements;</span>
+    } else {
+      // If the number of elements to be popped is greater than the number of elements in the output
+      // stack, clear it, and pop the remaining elements from the input stack.
+<span class="nc" id="L586">      outputStackStart -= elements - outputStackTop;</span>
+<span class="nc" id="L587">      outputStackTop = 0;</span>
+    }
+<span class="nc" id="L589">  }</span>
+
+  /**
+   * Pops as many abstract types from the output frame stack as described by the given descriptor.
+   *
+   * @param descriptor a type or method descriptor (in which case its argument types are popped).
+   */
+  private void pop(final String descriptor) {
+<span class="nc" id="L597">    char firstDescriptorChar = descriptor.charAt(0);</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">    if (firstDescriptorChar == '(') {</span>
+<span class="nc" id="L599">      pop((Type.getArgumentsAndReturnSizes(descriptor) &gt;&gt; 2) - 1);</span>
+<span class="nc bnc" id="L600" title="All 4 branches missed.">    } else if (firstDescriptorChar == 'J' || firstDescriptorChar == 'D') {</span>
+<span class="nc" id="L601">      pop(2);</span>
+    } else {
+<span class="nc" id="L603">      pop(1);</span>
+    }
+<span class="nc" id="L605">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Methods to handle uninitialized types
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Adds an abstract type to the list of types on which a constructor is invoked in the basic
+   * block.
+   *
+   * @param abstractType an abstract type on a which a constructor is invoked.
+   */
+  private void addInitializedType(final int abstractType) {
+    // Create and/or resize the initializations array if necessary.
+<span class="nc bnc" id="L619" title="All 2 branches missed.">    if (initializations == null) {</span>
+<span class="nc" id="L620">      initializations = new int[2];</span>
+    }
+<span class="nc" id="L622">    int initializationsLength = initializations.length;</span>
+<span class="nc bnc" id="L623" title="All 2 branches missed.">    if (initializationCount &gt;= initializationsLength) {</span>
+<span class="nc" id="L624">      int[] newInitializations =</span>
+<span class="nc" id="L625">          new int[Math.max(initializationCount + 1, 2 * initializationsLength)];</span>
+<span class="nc" id="L626">      System.arraycopy(initializations, 0, newInitializations, 0, initializationsLength);</span>
+<span class="nc" id="L627">      initializations = newInitializations;</span>
+    }
+    // Store the abstract type.
+<span class="nc" id="L630">    initializations[initializationCount++] = abstractType;</span>
+<span class="nc" id="L631">  }</span>
+
+  /**
+   * Returns the &quot;initialized&quot; abstract type corresponding to the given abstract type.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param abstractType an abstract type.
+   * @return the REFERENCE_KIND abstract type corresponding to abstractType if it is
+   *     UNINITIALIZED_THIS or an UNINITIALIZED_KIND abstract type for one of the types on which a
+   *     constructor is invoked in the basic block. Otherwise returns abstractType.
+   */
+  private int getInitializedType(final SymbolTable symbolTable, final int abstractType) {
+<span class="nc bnc" id="L643" title="All 4 branches missed.">    if (abstractType == UNINITIALIZED_THIS</span>
+        || (abstractType &amp; (DIM_MASK | KIND_MASK)) == UNINITIALIZED_KIND) {
+<span class="nc bnc" id="L645" title="All 2 branches missed.">      for (int i = 0; i &lt; initializationCount; ++i) {</span>
+<span class="nc" id="L646">        int initializedType = initializations[i];</span>
+<span class="nc" id="L647">        int dim = initializedType &amp; DIM_MASK;</span>
+<span class="nc" id="L648">        int kind = initializedType &amp; KIND_MASK;</span>
+<span class="nc" id="L649">        int value = initializedType &amp; VALUE_MASK;</span>
+<span class="nc bnc" id="L650" title="All 2 branches missed.">        if (kind == LOCAL_KIND) {</span>
+<span class="nc" id="L651">          initializedType = dim + inputLocals[value];</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">        } else if (kind == STACK_KIND) {</span>
+<span class="nc" id="L653">          initializedType = dim + inputStack[inputStack.length - value];</span>
+        }
+<span class="nc bnc" id="L655" title="All 2 branches missed.">        if (abstractType == initializedType) {</span>
+<span class="nc bnc" id="L656" title="All 2 branches missed.">          if (abstractType == UNINITIALIZED_THIS) {</span>
+<span class="nc" id="L657">            return REFERENCE_KIND | symbolTable.addType(symbolTable.getClassName());</span>
+          } else {
+<span class="nc" id="L659">            return REFERENCE_KIND</span>
+<span class="nc" id="L660">                | symbolTable.addType(symbolTable.getType(abstractType &amp; VALUE_MASK).value);</span>
+          }
+        }
+      }
+    }
+<span class="nc" id="L665">    return abstractType;</span>
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Main method, to simulate the execution of each instruction on the output frame
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Simulates the action of the given instruction on the output stack frame.
+   *
+   * @param opcode the opcode of the instruction.
+   * @param arg the numeric operand of the instruction, if any.
+   * @param argSymbol the Symbol operand of the instruction, if any.
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   */
+  void execute(
+      final int opcode, final int arg, final Symbol argSymbol, final SymbolTable symbolTable) {
+    // Abstract types popped from the stack or read from local variables.
+    int abstractType1;
+    int abstractType2;
+    int abstractType3;
+    int abstractType4;
+<span class="nc bnc" id="L687" title="All 48 branches missed.">    switch (opcode) {</span>
+      case Opcodes.NOP:
+      case Opcodes.INEG:
+      case Opcodes.LNEG:
+      case Opcodes.FNEG:
+      case Opcodes.DNEG:
+      case Opcodes.I2B:
+      case Opcodes.I2C:
+      case Opcodes.I2S:
+      case Opcodes.GOTO:
+      case Opcodes.RETURN:
+<span class="nc" id="L698">        break;</span>
+      case Opcodes.ACONST_NULL:
+<span class="nc" id="L700">        push(NULL);</span>
+<span class="nc" id="L701">        break;</span>
+      case Opcodes.ICONST_M1:
+      case Opcodes.ICONST_0:
+      case Opcodes.ICONST_1:
+      case Opcodes.ICONST_2:
+      case Opcodes.ICONST_3:
+      case Opcodes.ICONST_4:
+      case Opcodes.ICONST_5:
+      case Opcodes.BIPUSH:
+      case Opcodes.SIPUSH:
+      case Opcodes.ILOAD:
+<span class="nc" id="L712">        push(INTEGER);</span>
+<span class="nc" id="L713">        break;</span>
+      case Opcodes.LCONST_0:
+      case Opcodes.LCONST_1:
+      case Opcodes.LLOAD:
+<span class="nc" id="L717">        push(LONG);</span>
+<span class="nc" id="L718">        push(TOP);</span>
+<span class="nc" id="L719">        break;</span>
+      case Opcodes.FCONST_0:
+      case Opcodes.FCONST_1:
+      case Opcodes.FCONST_2:
+      case Opcodes.FLOAD:
+<span class="nc" id="L724">        push(FLOAT);</span>
+<span class="nc" id="L725">        break;</span>
+      case Opcodes.DCONST_0:
+      case Opcodes.DCONST_1:
+      case Opcodes.DLOAD:
+<span class="nc" id="L729">        push(DOUBLE);</span>
+<span class="nc" id="L730">        push(TOP);</span>
+<span class="nc" id="L731">        break;</span>
+      case Opcodes.LDC:
+<span class="nc bnc" id="L733" title="All 10 branches missed.">        switch (argSymbol.tag) {</span>
+          case Symbol.CONSTANT_INTEGER_TAG:
+<span class="nc" id="L735">            push(INTEGER);</span>
+<span class="nc" id="L736">            break;</span>
+          case Symbol.CONSTANT_LONG_TAG:
+<span class="nc" id="L738">            push(LONG);</span>
+<span class="nc" id="L739">            push(TOP);</span>
+<span class="nc" id="L740">            break;</span>
+          case Symbol.CONSTANT_FLOAT_TAG:
+<span class="nc" id="L742">            push(FLOAT);</span>
+<span class="nc" id="L743">            break;</span>
+          case Symbol.CONSTANT_DOUBLE_TAG:
+<span class="nc" id="L745">            push(DOUBLE);</span>
+<span class="nc" id="L746">            push(TOP);</span>
+<span class="nc" id="L747">            break;</span>
+          case Symbol.CONSTANT_CLASS_TAG:
+<span class="nc" id="L749">            push(REFERENCE_KIND | symbolTable.addType(&quot;java/lang/Class&quot;));</span>
+<span class="nc" id="L750">            break;</span>
+          case Symbol.CONSTANT_STRING_TAG:
+<span class="nc" id="L752">            push(REFERENCE_KIND | symbolTable.addType(&quot;java/lang/String&quot;));</span>
+<span class="nc" id="L753">            break;</span>
+          case Symbol.CONSTANT_METHOD_TYPE_TAG:
+<span class="nc" id="L755">            push(REFERENCE_KIND | symbolTable.addType(&quot;java/lang/invoke/MethodType&quot;));</span>
+<span class="nc" id="L756">            break;</span>
+          case Symbol.CONSTANT_METHOD_HANDLE_TAG:
+<span class="nc" id="L758">            push(REFERENCE_KIND | symbolTable.addType(&quot;java/lang/invoke/MethodHandle&quot;));</span>
+<span class="nc" id="L759">            break;</span>
+          case Symbol.CONSTANT_DYNAMIC_TAG:
+<span class="nc" id="L761">            push(symbolTable, argSymbol.value);</span>
+<span class="nc" id="L762">            break;</span>
+          default:
+<span class="nc" id="L764">            throw new AssertionError();</span>
+        }
+        break;
+      case Opcodes.ALOAD:
+<span class="nc" id="L768">        push(getLocal(arg));</span>
+<span class="nc" id="L769">        break;</span>
+      case Opcodes.LALOAD:
+      case Opcodes.D2L:
+<span class="nc" id="L772">        pop(2);</span>
+<span class="nc" id="L773">        push(LONG);</span>
+<span class="nc" id="L774">        push(TOP);</span>
+<span class="nc" id="L775">        break;</span>
+      case Opcodes.DALOAD:
+      case Opcodes.L2D:
+<span class="nc" id="L778">        pop(2);</span>
+<span class="nc" id="L779">        push(DOUBLE);</span>
+<span class="nc" id="L780">        push(TOP);</span>
+<span class="nc" id="L781">        break;</span>
+      case Opcodes.AALOAD:
+<span class="nc" id="L783">        pop(1);</span>
+<span class="nc" id="L784">        abstractType1 = pop();</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">        push(abstractType1 == NULL ? abstractType1 : ELEMENT_OF + abstractType1);</span>
+<span class="nc" id="L786">        break;</span>
+      case Opcodes.ISTORE:
+      case Opcodes.FSTORE:
+      case Opcodes.ASTORE:
+<span class="nc" id="L790">        abstractType1 = pop();</span>
+<span class="nc" id="L791">        setLocal(arg, abstractType1);</span>
+<span class="nc bnc" id="L792" title="All 2 branches missed.">        if (arg &gt; 0) {</span>
+<span class="nc" id="L793">          int previousLocalType = getLocal(arg - 1);</span>
+<span class="nc bnc" id="L794" title="All 4 branches missed.">          if (previousLocalType == LONG || previousLocalType == DOUBLE) {</span>
+<span class="nc" id="L795">            setLocal(arg - 1, TOP);</span>
+<span class="nc bnc" id="L796" title="All 4 branches missed.">          } else if ((previousLocalType &amp; KIND_MASK) == LOCAL_KIND</span>
+              || (previousLocalType &amp; KIND_MASK) == STACK_KIND) {
+            // The type of the previous local variable is not known yet, but if it later appears
+            // to be LONG or DOUBLE, we should then use TOP instead.
+<span class="nc" id="L800">            setLocal(arg - 1, previousLocalType | TOP_IF_LONG_OR_DOUBLE_FLAG);</span>
+          }
+<span class="nc" id="L802">        }</span>
+        break;
+      case Opcodes.LSTORE:
+      case Opcodes.DSTORE:
+<span class="nc" id="L806">        pop(1);</span>
+<span class="nc" id="L807">        abstractType1 = pop();</span>
+<span class="nc" id="L808">        setLocal(arg, abstractType1);</span>
+<span class="nc" id="L809">        setLocal(arg + 1, TOP);</span>
+<span class="nc bnc" id="L810" title="All 2 branches missed.">        if (arg &gt; 0) {</span>
+<span class="nc" id="L811">          int previousLocalType = getLocal(arg - 1);</span>
+<span class="nc bnc" id="L812" title="All 4 branches missed.">          if (previousLocalType == LONG || previousLocalType == DOUBLE) {</span>
+<span class="nc" id="L813">            setLocal(arg - 1, TOP);</span>
+<span class="nc bnc" id="L814" title="All 4 branches missed.">          } else if ((previousLocalType &amp; KIND_MASK) == LOCAL_KIND</span>
+              || (previousLocalType &amp; KIND_MASK) == STACK_KIND) {
+            // The type of the previous local variable is not known yet, but if it later appears
+            // to be LONG or DOUBLE, we should then use TOP instead.
+<span class="nc" id="L818">            setLocal(arg - 1, previousLocalType | TOP_IF_LONG_OR_DOUBLE_FLAG);</span>
+          }
+<span class="nc" id="L820">        }</span>
+        break;
+      case Opcodes.IASTORE:
+      case Opcodes.BASTORE:
+      case Opcodes.CASTORE:
+      case Opcodes.SASTORE:
+      case Opcodes.FASTORE:
+      case Opcodes.AASTORE:
+<span class="nc" id="L828">        pop(3);</span>
+<span class="nc" id="L829">        break;</span>
+      case Opcodes.LASTORE:
+      case Opcodes.DASTORE:
+<span class="nc" id="L832">        pop(4);</span>
+<span class="nc" id="L833">        break;</span>
+      case Opcodes.POP:
+      case Opcodes.IFEQ:
+      case Opcodes.IFNE:
+      case Opcodes.IFLT:
+      case Opcodes.IFGE:
+      case Opcodes.IFGT:
+      case Opcodes.IFLE:
+      case Opcodes.IRETURN:
+      case Opcodes.FRETURN:
+      case Opcodes.ARETURN:
+      case Opcodes.TABLESWITCH:
+      case Opcodes.LOOKUPSWITCH:
+      case Opcodes.ATHROW:
+      case Opcodes.MONITORENTER:
+      case Opcodes.MONITOREXIT:
+      case Opcodes.IFNULL:
+      case Opcodes.IFNONNULL:
+<span class="nc" id="L851">        pop(1);</span>
+<span class="nc" id="L852">        break;</span>
+      case Opcodes.POP2:
+      case Opcodes.IF_ICMPEQ:
+      case Opcodes.IF_ICMPNE:
+      case Opcodes.IF_ICMPLT:
+      case Opcodes.IF_ICMPGE:
+      case Opcodes.IF_ICMPGT:
+      case Opcodes.IF_ICMPLE:
+      case Opcodes.IF_ACMPEQ:
+      case Opcodes.IF_ACMPNE:
+      case Opcodes.LRETURN:
+      case Opcodes.DRETURN:
+<span class="nc" id="L864">        pop(2);</span>
+<span class="nc" id="L865">        break;</span>
+      case Opcodes.DUP:
+<span class="nc" id="L867">        abstractType1 = pop();</span>
+<span class="nc" id="L868">        push(abstractType1);</span>
+<span class="nc" id="L869">        push(abstractType1);</span>
+<span class="nc" id="L870">        break;</span>
+      case Opcodes.DUP_X1:
+<span class="nc" id="L872">        abstractType1 = pop();</span>
+<span class="nc" id="L873">        abstractType2 = pop();</span>
+<span class="nc" id="L874">        push(abstractType1);</span>
+<span class="nc" id="L875">        push(abstractType2);</span>
+<span class="nc" id="L876">        push(abstractType1);</span>
+<span class="nc" id="L877">        break;</span>
+      case Opcodes.DUP_X2:
+<span class="nc" id="L879">        abstractType1 = pop();</span>
+<span class="nc" id="L880">        abstractType2 = pop();</span>
+<span class="nc" id="L881">        abstractType3 = pop();</span>
+<span class="nc" id="L882">        push(abstractType1);</span>
+<span class="nc" id="L883">        push(abstractType3);</span>
+<span class="nc" id="L884">        push(abstractType2);</span>
+<span class="nc" id="L885">        push(abstractType1);</span>
+<span class="nc" id="L886">        break;</span>
+      case Opcodes.DUP2:
+<span class="nc" id="L888">        abstractType1 = pop();</span>
+<span class="nc" id="L889">        abstractType2 = pop();</span>
+<span class="nc" id="L890">        push(abstractType2);</span>
+<span class="nc" id="L891">        push(abstractType1);</span>
+<span class="nc" id="L892">        push(abstractType2);</span>
+<span class="nc" id="L893">        push(abstractType1);</span>
+<span class="nc" id="L894">        break;</span>
+      case Opcodes.DUP2_X1:
+<span class="nc" id="L896">        abstractType1 = pop();</span>
+<span class="nc" id="L897">        abstractType2 = pop();</span>
+<span class="nc" id="L898">        abstractType3 = pop();</span>
+<span class="nc" id="L899">        push(abstractType2);</span>
+<span class="nc" id="L900">        push(abstractType1);</span>
+<span class="nc" id="L901">        push(abstractType3);</span>
+<span class="nc" id="L902">        push(abstractType2);</span>
+<span class="nc" id="L903">        push(abstractType1);</span>
+<span class="nc" id="L904">        break;</span>
+      case Opcodes.DUP2_X2:
+<span class="nc" id="L906">        abstractType1 = pop();</span>
+<span class="nc" id="L907">        abstractType2 = pop();</span>
+<span class="nc" id="L908">        abstractType3 = pop();</span>
+<span class="nc" id="L909">        abstractType4 = pop();</span>
+<span class="nc" id="L910">        push(abstractType2);</span>
+<span class="nc" id="L911">        push(abstractType1);</span>
+<span class="nc" id="L912">        push(abstractType4);</span>
+<span class="nc" id="L913">        push(abstractType3);</span>
+<span class="nc" id="L914">        push(abstractType2);</span>
+<span class="nc" id="L915">        push(abstractType1);</span>
+<span class="nc" id="L916">        break;</span>
+      case Opcodes.SWAP:
+<span class="nc" id="L918">        abstractType1 = pop();</span>
+<span class="nc" id="L919">        abstractType2 = pop();</span>
+<span class="nc" id="L920">        push(abstractType1);</span>
+<span class="nc" id="L921">        push(abstractType2);</span>
+<span class="nc" id="L922">        break;</span>
+      case Opcodes.IALOAD:
+      case Opcodes.BALOAD:
+      case Opcodes.CALOAD:
+      case Opcodes.SALOAD:
+      case Opcodes.IADD:
+      case Opcodes.ISUB:
+      case Opcodes.IMUL:
+      case Opcodes.IDIV:
+      case Opcodes.IREM:
+      case Opcodes.IAND:
+      case Opcodes.IOR:
+      case Opcodes.IXOR:
+      case Opcodes.ISHL:
+      case Opcodes.ISHR:
+      case Opcodes.IUSHR:
+      case Opcodes.L2I:
+      case Opcodes.D2I:
+      case Opcodes.FCMPL:
+      case Opcodes.FCMPG:
+<span class="nc" id="L942">        pop(2);</span>
+<span class="nc" id="L943">        push(INTEGER);</span>
+<span class="nc" id="L944">        break;</span>
+      case Opcodes.LADD:
+      case Opcodes.LSUB:
+      case Opcodes.LMUL:
+      case Opcodes.LDIV:
+      case Opcodes.LREM:
+      case Opcodes.LAND:
+      case Opcodes.LOR:
+      case Opcodes.LXOR:
+<span class="nc" id="L953">        pop(4);</span>
+<span class="nc" id="L954">        push(LONG);</span>
+<span class="nc" id="L955">        push(TOP);</span>
+<span class="nc" id="L956">        break;</span>
+      case Opcodes.FALOAD:
+      case Opcodes.FADD:
+      case Opcodes.FSUB:
+      case Opcodes.FMUL:
+      case Opcodes.FDIV:
+      case Opcodes.FREM:
+      case Opcodes.L2F:
+      case Opcodes.D2F:
+<span class="nc" id="L965">        pop(2);</span>
+<span class="nc" id="L966">        push(FLOAT);</span>
+<span class="nc" id="L967">        break;</span>
+      case Opcodes.DADD:
+      case Opcodes.DSUB:
+      case Opcodes.DMUL:
+      case Opcodes.DDIV:
+      case Opcodes.DREM:
+<span class="nc" id="L973">        pop(4);</span>
+<span class="nc" id="L974">        push(DOUBLE);</span>
+<span class="nc" id="L975">        push(TOP);</span>
+<span class="nc" id="L976">        break;</span>
+      case Opcodes.LSHL:
+      case Opcodes.LSHR:
+      case Opcodes.LUSHR:
+<span class="nc" id="L980">        pop(3);</span>
+<span class="nc" id="L981">        push(LONG);</span>
+<span class="nc" id="L982">        push(TOP);</span>
+<span class="nc" id="L983">        break;</span>
+      case Opcodes.IINC:
+<span class="nc" id="L985">        setLocal(arg, INTEGER);</span>
+<span class="nc" id="L986">        break;</span>
+      case Opcodes.I2L:
+      case Opcodes.F2L:
+<span class="nc" id="L989">        pop(1);</span>
+<span class="nc" id="L990">        push(LONG);</span>
+<span class="nc" id="L991">        push(TOP);</span>
+<span class="nc" id="L992">        break;</span>
+      case Opcodes.I2F:
+<span class="nc" id="L994">        pop(1);</span>
+<span class="nc" id="L995">        push(FLOAT);</span>
+<span class="nc" id="L996">        break;</span>
+      case Opcodes.I2D:
+      case Opcodes.F2D:
+<span class="nc" id="L999">        pop(1);</span>
+<span class="nc" id="L1000">        push(DOUBLE);</span>
+<span class="nc" id="L1001">        push(TOP);</span>
+<span class="nc" id="L1002">        break;</span>
+      case Opcodes.F2I:
+      case Opcodes.ARRAYLENGTH:
+      case Opcodes.INSTANCEOF:
+<span class="nc" id="L1006">        pop(1);</span>
+<span class="nc" id="L1007">        push(INTEGER);</span>
+<span class="nc" id="L1008">        break;</span>
+      case Opcodes.LCMP:
+      case Opcodes.DCMPL:
+      case Opcodes.DCMPG:
+<span class="nc" id="L1012">        pop(4);</span>
+<span class="nc" id="L1013">        push(INTEGER);</span>
+<span class="nc" id="L1014">        break;</span>
+      case Opcodes.JSR:
+      case Opcodes.RET:
+<span class="nc" id="L1017">        throw new IllegalArgumentException(&quot;JSR/RET are not supported with computeFrames option&quot;);</span>
+      case Opcodes.GETSTATIC:
+<span class="nc" id="L1019">        push(symbolTable, argSymbol.value);</span>
+<span class="nc" id="L1020">        break;</span>
+      case Opcodes.PUTSTATIC:
+<span class="nc" id="L1022">        pop(argSymbol.value);</span>
+<span class="nc" id="L1023">        break;</span>
+      case Opcodes.GETFIELD:
+<span class="nc" id="L1025">        pop(1);</span>
+<span class="nc" id="L1026">        push(symbolTable, argSymbol.value);</span>
+<span class="nc" id="L1027">        break;</span>
+      case Opcodes.PUTFIELD:
+<span class="nc" id="L1029">        pop(argSymbol.value);</span>
+<span class="nc" id="L1030">        pop();</span>
+<span class="nc" id="L1031">        break;</span>
+      case Opcodes.INVOKEVIRTUAL:
+      case Opcodes.INVOKESPECIAL:
+      case Opcodes.INVOKESTATIC:
+      case Opcodes.INVOKEINTERFACE:
+<span class="nc" id="L1036">        pop(argSymbol.value);</span>
+<span class="nc bnc" id="L1037" title="All 2 branches missed.">        if (opcode != Opcodes.INVOKESTATIC) {</span>
+<span class="nc" id="L1038">          abstractType1 = pop();</span>
+<span class="nc bnc" id="L1039" title="All 4 branches missed.">          if (opcode == Opcodes.INVOKESPECIAL &amp;&amp; argSymbol.name.charAt(0) == '&lt;') {</span>
+<span class="nc" id="L1040">            addInitializedType(abstractType1);</span>
+          }
+        }
+<span class="nc" id="L1043">        push(symbolTable, argSymbol.value);</span>
+<span class="nc" id="L1044">        break;</span>
+      case Opcodes.INVOKEDYNAMIC:
+<span class="nc" id="L1046">        pop(argSymbol.value);</span>
+<span class="nc" id="L1047">        push(symbolTable, argSymbol.value);</span>
+<span class="nc" id="L1048">        break;</span>
+      case Opcodes.NEW:
+<span class="nc" id="L1050">        push(UNINITIALIZED_KIND | symbolTable.addUninitializedType(argSymbol.value, arg));</span>
+<span class="nc" id="L1051">        break;</span>
+      case Opcodes.NEWARRAY:
+<span class="nc" id="L1053">        pop();</span>
+<span class="nc bnc" id="L1054" title="All 9 branches missed.">        switch (arg) {</span>
+          case Opcodes.T_BOOLEAN:
+<span class="nc" id="L1056">            push(ARRAY_OF | BOOLEAN);</span>
+<span class="nc" id="L1057">            break;</span>
+          case Opcodes.T_CHAR:
+<span class="nc" id="L1059">            push(ARRAY_OF | CHAR);</span>
+<span class="nc" id="L1060">            break;</span>
+          case Opcodes.T_BYTE:
+<span class="nc" id="L1062">            push(ARRAY_OF | BYTE);</span>
+<span class="nc" id="L1063">            break;</span>
+          case Opcodes.T_SHORT:
+<span class="nc" id="L1065">            push(ARRAY_OF | SHORT);</span>
+<span class="nc" id="L1066">            break;</span>
+          case Opcodes.T_INT:
+<span class="nc" id="L1068">            push(ARRAY_OF | INTEGER);</span>
+<span class="nc" id="L1069">            break;</span>
+          case Opcodes.T_FLOAT:
+<span class="nc" id="L1071">            push(ARRAY_OF | FLOAT);</span>
+<span class="nc" id="L1072">            break;</span>
+          case Opcodes.T_DOUBLE:
+<span class="nc" id="L1074">            push(ARRAY_OF | DOUBLE);</span>
+<span class="nc" id="L1075">            break;</span>
+          case Opcodes.T_LONG:
+<span class="nc" id="L1077">            push(ARRAY_OF | LONG);</span>
+<span class="nc" id="L1078">            break;</span>
+          default:
+<span class="nc" id="L1080">            throw new IllegalArgumentException();</span>
+        }
+        break;
+      case Opcodes.ANEWARRAY:
+<span class="nc" id="L1084">        String arrayElementType = argSymbol.value;</span>
+<span class="nc" id="L1085">        pop();</span>
+<span class="nc bnc" id="L1086" title="All 2 branches missed.">        if (arrayElementType.charAt(0) == '[') {</span>
+<span class="nc" id="L1087">          push(symbolTable, '[' + arrayElementType);</span>
+        } else {
+<span class="nc" id="L1089">          push(ARRAY_OF | REFERENCE_KIND | symbolTable.addType(arrayElementType));</span>
+        }
+<span class="nc" id="L1091">        break;</span>
+      case Opcodes.CHECKCAST:
+<span class="nc" id="L1093">        String castType = argSymbol.value;</span>
+<span class="nc" id="L1094">        pop();</span>
+<span class="nc bnc" id="L1095" title="All 2 branches missed.">        if (castType.charAt(0) == '[') {</span>
+<span class="nc" id="L1096">          push(symbolTable, castType);</span>
+        } else {
+<span class="nc" id="L1098">          push(REFERENCE_KIND | symbolTable.addType(castType));</span>
+        }
+<span class="nc" id="L1100">        break;</span>
+      case Opcodes.MULTIANEWARRAY:
+<span class="nc" id="L1102">        pop(arg);</span>
+<span class="nc" id="L1103">        push(symbolTable, argSymbol.value);</span>
+<span class="nc" id="L1104">        break;</span>
+      default:
+<span class="nc" id="L1106">        throw new IllegalArgumentException();</span>
+    }
+<span class="nc" id="L1108">  }</span>
+
+  // -----------------------------------------------------------------------------------------------
+  // Frame merging methods, used in the second step of the stack map frame computation algorithm
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Computes the concrete output type corresponding to a given abstract output type.
+   *
+   * @param abstractOutputType an abstract output type.
+   * @param numStack the size of the input stack, used to resolve abstract output types of
+   *     STACK_KIND kind.
+   * @return the concrete output type corresponding to 'abstractOutputType'.
+   */
+  private int getConcreteOutputType(final int abstractOutputType, final int numStack) {
+<span class="nc" id="L1123">    int dim = abstractOutputType &amp; DIM_MASK;</span>
+<span class="nc" id="L1124">    int kind = abstractOutputType &amp; KIND_MASK;</span>
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">    if (kind == LOCAL_KIND) {</span>
+      // By definition, a LOCAL_KIND type designates the concrete type of a local variable at
+      // the beginning of the basic block corresponding to this frame (which is known when
+      // this method is called, but was not when the abstract type was computed).
+<span class="nc" id="L1129">      int concreteOutputType = dim + inputLocals[abstractOutputType &amp; VALUE_MASK];</span>
+<span class="nc bnc" id="L1130" title="All 6 branches missed.">      if ((abstractOutputType &amp; TOP_IF_LONG_OR_DOUBLE_FLAG) != 0</span>
+          &amp;&amp; (concreteOutputType == LONG || concreteOutputType == DOUBLE)) {
+<span class="nc" id="L1132">        concreteOutputType = TOP;</span>
+      }
+<span class="nc" id="L1134">      return concreteOutputType;</span>
+<span class="nc bnc" id="L1135" title="All 2 branches missed.">    } else if (kind == STACK_KIND) {</span>
+      // By definition, a STACK_KIND type designates the concrete type of a local variable at
+      // the beginning of the basic block corresponding to this frame (which is known when
+      // this method is called, but was not when the abstract type was computed).
+<span class="nc" id="L1139">      int concreteOutputType = dim + inputStack[numStack - (abstractOutputType &amp; VALUE_MASK)];</span>
+<span class="nc bnc" id="L1140" title="All 6 branches missed.">      if ((abstractOutputType &amp; TOP_IF_LONG_OR_DOUBLE_FLAG) != 0</span>
+          &amp;&amp; (concreteOutputType == LONG || concreteOutputType == DOUBLE)) {
+<span class="nc" id="L1142">        concreteOutputType = TOP;</span>
+      }
+<span class="nc" id="L1144">      return concreteOutputType;</span>
+    } else {
+<span class="nc" id="L1146">      return abstractOutputType;</span>
+    }
+  }
+
+  /**
+   * Merges the input frame of the given {@link Frame} with the input and output frames of this
+   * {@link Frame}. Returns {@literal true} if the given frame has been changed by this operation
+   * (the input and output frames of this {@link Frame} are never changed).
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param dstFrame the {@link Frame} whose input frame must be updated. This should be the frame
+   *     of a successor, in the control flow graph, of the basic block corresponding to this frame.
+   * @param catchTypeIndex if 'frame' corresponds to an exception handler basic block, the type
+   *     table index of the caught exception type, otherwise 0.
+   * @return {@literal true} if the input frame of 'frame' has been changed by this operation.
+   */
+  final boolean merge(
+      final SymbolTable symbolTable, final Frame dstFrame, final int catchTypeIndex) {
+<span class="nc" id="L1164">    boolean frameChanged = false;</span>
+
+    // Compute the concrete types of the local variables at the end of the basic block corresponding
+    // to this frame, by resolving its abstract output types, and merge these concrete types with
+    // those of the local variables in the input frame of dstFrame.
+<span class="nc" id="L1169">    int numLocal = inputLocals.length;</span>
+<span class="nc" id="L1170">    int numStack = inputStack.length;</span>
+<span class="nc bnc" id="L1171" title="All 2 branches missed.">    if (dstFrame.inputLocals == null) {</span>
+<span class="nc" id="L1172">      dstFrame.inputLocals = new int[numLocal];</span>
+<span class="nc" id="L1173">      frameChanged = true;</span>
+    }
+<span class="nc bnc" id="L1175" title="All 2 branches missed.">    for (int i = 0; i &lt; numLocal; ++i) {</span>
+      int concreteOutputType;
+<span class="nc bnc" id="L1177" title="All 4 branches missed.">      if (outputLocals != null &amp;&amp; i &lt; outputLocals.length) {</span>
+<span class="nc" id="L1178">        int abstractOutputType = outputLocals[i];</span>
+<span class="nc bnc" id="L1179" title="All 2 branches missed.">        if (abstractOutputType == 0) {</span>
+          // If the local variable has never been assigned in this basic block, it is equal to its
+          // value at the beginning of the block.
+<span class="nc" id="L1182">          concreteOutputType = inputLocals[i];</span>
+        } else {
+<span class="nc" id="L1184">          concreteOutputType = getConcreteOutputType(abstractOutputType, numStack);</span>
+        }
+<span class="nc" id="L1186">      } else {</span>
+        // If the local variable has never been assigned in this basic block, it is equal to its
+        // value at the beginning of the block.
+<span class="nc" id="L1189">        concreteOutputType = inputLocals[i];</span>
+      }
+      // concreteOutputType might be an uninitialized type from the input locals or from the input
+      // stack. However, if a constructor has been called for this class type in the basic block,
+      // then this type is no longer uninitialized at the end of basic block.
+<span class="nc bnc" id="L1194" title="All 2 branches missed.">      if (initializations != null) {</span>
+<span class="nc" id="L1195">        concreteOutputType = getInitializedType(symbolTable, concreteOutputType);</span>
+      }
+<span class="nc" id="L1197">      frameChanged |= merge(symbolTable, concreteOutputType, dstFrame.inputLocals, i);</span>
+    }
+
+    // If dstFrame is an exception handler block, it can be reached from any instruction of the
+    // basic block corresponding to this frame, in particular from the first one. Therefore, the
+    // input locals of dstFrame should be compatible (i.e. merged) with the input locals of this
+    // frame (and the input stack of dstFrame should be compatible, i.e. merged, with a one
+    // element stack containing the caught exception type).
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">    if (catchTypeIndex &gt; 0) {</span>
+<span class="nc bnc" id="L1206" title="All 2 branches missed.">      for (int i = 0; i &lt; numLocal; ++i) {</span>
+<span class="nc" id="L1207">        frameChanged |= merge(symbolTable, inputLocals[i], dstFrame.inputLocals, i);</span>
+      }
+<span class="nc bnc" id="L1209" title="All 2 branches missed.">      if (dstFrame.inputStack == null) {</span>
+<span class="nc" id="L1210">        dstFrame.inputStack = new int[1];</span>
+<span class="nc" id="L1211">        frameChanged = true;</span>
+      }
+<span class="nc" id="L1213">      frameChanged |= merge(symbolTable, catchTypeIndex, dstFrame.inputStack, 0);</span>
+<span class="nc" id="L1214">      return frameChanged;</span>
+    }
+
+    // Compute the concrete types of the stack operands at the end of the basic block corresponding
+    // to this frame, by resolving its abstract output types, and merge these concrete types with
+    // those of the stack operands in the input frame of dstFrame.
+<span class="nc" id="L1220">    int numInputStack = inputStack.length + outputStackStart;</span>
+<span class="nc bnc" id="L1221" title="All 2 branches missed.">    if (dstFrame.inputStack == null) {</span>
+<span class="nc" id="L1222">      dstFrame.inputStack = new int[numInputStack + outputStackTop];</span>
+<span class="nc" id="L1223">      frameChanged = true;</span>
+    }
+    // First, do this for the stack operands that have not been popped in the basic block
+    // corresponding to this frame, and which are therefore equal to their value in the input
+    // frame (except for uninitialized types, which may have been initialized).
+<span class="nc bnc" id="L1228" title="All 2 branches missed.">    for (int i = 0; i &lt; numInputStack; ++i) {</span>
+<span class="nc" id="L1229">      int concreteOutputType = inputStack[i];</span>
+<span class="nc bnc" id="L1230" title="All 2 branches missed.">      if (initializations != null) {</span>
+<span class="nc" id="L1231">        concreteOutputType = getInitializedType(symbolTable, concreteOutputType);</span>
+      }
+<span class="nc" id="L1233">      frameChanged |= merge(symbolTable, concreteOutputType, dstFrame.inputStack, i);</span>
+    }
+    // Then, do this for the stack operands that have pushed in the basic block (this code is the
+    // same as the one above for local variables).
+<span class="nc bnc" id="L1237" title="All 2 branches missed.">    for (int i = 0; i &lt; outputStackTop; ++i) {</span>
+<span class="nc" id="L1238">      int abstractOutputType = outputStack[i];</span>
+<span class="nc" id="L1239">      int concreteOutputType = getConcreteOutputType(abstractOutputType, numStack);</span>
+<span class="nc bnc" id="L1240" title="All 2 branches missed.">      if (initializations != null) {</span>
+<span class="nc" id="L1241">        concreteOutputType = getInitializedType(symbolTable, concreteOutputType);</span>
+      }
+<span class="nc" id="L1243">      frameChanged |=</span>
+<span class="nc" id="L1244">          merge(symbolTable, concreteOutputType, dstFrame.inputStack, numInputStack + i);</span>
+    }
+<span class="nc" id="L1246">    return frameChanged;</span>
+  }
+
+  /**
+   * Merges the type at the given index in the given abstract type array with the given type.
+   * Returns {@literal true} if the type array has been modified by this operation.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param sourceType the abstract type with which the abstract type array element must be merged.
+   *     This type should be of {@link #CONSTANT_KIND}, {@link #REFERENCE_KIND} or {@link
+   *     #UNINITIALIZED_KIND} kind, with positive or {@literal null} array dimensions.
+   * @param dstTypes an array of abstract types. These types should be of {@link #CONSTANT_KIND},
+   *     {@link #REFERENCE_KIND} or {@link #UNINITIALIZED_KIND} kind, with positive or {@literal
+   *     null} array dimensions.
+   * @param dstIndex the index of the type that must be merged in dstTypes.
+   * @return {@literal true} if the type array has been modified by this operation.
+   */
+  private static boolean merge(
+      final SymbolTable symbolTable,
+      final int sourceType,
+      final int[] dstTypes,
+      final int dstIndex) {
+<span class="nc" id="L1268">    int dstType = dstTypes[dstIndex];</span>
+<span class="nc bnc" id="L1269" title="All 2 branches missed.">    if (dstType == sourceType) {</span>
+      // If the types are equal, merge(sourceType, dstType) = dstType, so there is no change.
+<span class="nc" id="L1271">      return false;</span>
+    }
+<span class="nc" id="L1273">    int srcType = sourceType;</span>
+<span class="nc bnc" id="L1274" title="All 2 branches missed.">    if ((sourceType &amp; ~DIM_MASK) == NULL) {</span>
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">      if (dstType == NULL) {</span>
+<span class="nc" id="L1276">        return false;</span>
+      }
+<span class="nc" id="L1278">      srcType = NULL;</span>
+    }
+<span class="nc bnc" id="L1280" title="All 2 branches missed.">    if (dstType == 0) {</span>
+      // If dstTypes[dstIndex] has never been assigned, merge(srcType, dstType) = srcType.
+<span class="nc" id="L1282">      dstTypes[dstIndex] = srcType;</span>
+<span class="nc" id="L1283">      return true;</span>
+    }
+    int mergedType;
+<span class="nc bnc" id="L1286" title="All 4 branches missed.">    if ((dstType &amp; DIM_MASK) != 0 || (dstType &amp; KIND_MASK) == REFERENCE_KIND) {</span>
+      // If dstType is a reference type of any array dimension.
+<span class="nc bnc" id="L1288" title="All 2 branches missed.">      if (srcType == NULL) {</span>
+        // If srcType is the NULL type, merge(srcType, dstType) = dstType, so there is no change.
+<span class="nc" id="L1290">        return false;</span>
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">      } else if ((srcType &amp; (DIM_MASK | KIND_MASK)) == (dstType &amp; (DIM_MASK | KIND_MASK))) {</span>
+        // If srcType has the same array dimension and the same kind as dstType.
+<span class="nc bnc" id="L1293" title="All 2 branches missed.">        if ((dstType &amp; KIND_MASK) == REFERENCE_KIND) {</span>
+          // If srcType and dstType are reference types with the same array dimension,
+          // merge(srcType, dstType) = dim(srcType) | common super class of srcType and dstType.
+<span class="nc" id="L1296">          mergedType =</span>
+              (srcType &amp; DIM_MASK)
+                  | REFERENCE_KIND
+<span class="nc" id="L1299">                  | symbolTable.addMergedType(srcType &amp; VALUE_MASK, dstType &amp; VALUE_MASK);</span>
+        } else {
+          // If srcType and dstType are array types of equal dimension but different element types,
+          // merge(srcType, dstType) = dim(srcType) - 1 | java/lang/Object.
+<span class="nc" id="L1303">          int mergedDim = ELEMENT_OF + (srcType &amp; DIM_MASK);</span>
+<span class="nc" id="L1304">          mergedType = mergedDim | REFERENCE_KIND | symbolTable.addType(&quot;java/lang/Object&quot;);</span>
+<span class="nc" id="L1305">        }</span>
+<span class="nc bnc" id="L1306" title="All 4 branches missed.">      } else if ((srcType &amp; DIM_MASK) != 0 || (srcType &amp; KIND_MASK) == REFERENCE_KIND) {</span>
+        // If srcType is any other reference or array type,
+        // merge(srcType, dstType) = min(srcDdim, dstDim) | java/lang/Object
+        // where srcDim is the array dimension of srcType, minus 1 if srcType is an array type
+        // with a non reference element type (and similarly for dstDim).
+<span class="nc" id="L1311">        int srcDim = srcType &amp; DIM_MASK;</span>
+<span class="nc bnc" id="L1312" title="All 4 branches missed.">        if (srcDim != 0 &amp;&amp; (srcType &amp; KIND_MASK) != REFERENCE_KIND) {</span>
+<span class="nc" id="L1313">          srcDim = ELEMENT_OF + srcDim;</span>
+        }
+<span class="nc" id="L1315">        int dstDim = dstType &amp; DIM_MASK;</span>
+<span class="nc bnc" id="L1316" title="All 4 branches missed.">        if (dstDim != 0 &amp;&amp; (dstType &amp; KIND_MASK) != REFERENCE_KIND) {</span>
+<span class="nc" id="L1317">          dstDim = ELEMENT_OF + dstDim;</span>
+        }
+<span class="nc" id="L1319">        mergedType =</span>
+<span class="nc" id="L1320">            Math.min(srcDim, dstDim) | REFERENCE_KIND | symbolTable.addType(&quot;java/lang/Object&quot;);</span>
+<span class="nc" id="L1321">      } else {</span>
+        // If srcType is any other type, merge(srcType, dstType) = TOP.
+<span class="nc" id="L1323">        mergedType = TOP;</span>
+      }
+<span class="nc bnc" id="L1325" title="All 2 branches missed.">    } else if (dstType == NULL) {</span>
+      // If dstType is the NULL type, merge(srcType, dstType) = srcType, or TOP if srcType is not a
+      // an array type or a reference type.
+<span class="nc bnc" id="L1328" title="All 4 branches missed.">      mergedType =</span>
+          (srcType &amp; DIM_MASK) != 0 || (srcType &amp; KIND_MASK) == REFERENCE_KIND ? srcType : TOP;
+    } else {
+      // If dstType is any other type, merge(srcType, dstType) = TOP whatever srcType.
+<span class="nc" id="L1332">      mergedType = TOP;</span>
+    }
+<span class="nc bnc" id="L1334" title="All 2 branches missed.">    if (mergedType != dstType) {</span>
+<span class="nc" id="L1335">      dstTypes[dstIndex] = mergedType;</span>
+<span class="nc" id="L1336">      return true;</span>
+    }
+<span class="nc" id="L1338">    return false;</span>
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // Frame output methods, to generate StackMapFrame attributes
+  // -----------------------------------------------------------------------------------------------
+
+  /**
+   * Makes the given {@link MethodWriter} visit the input frame of this {@link Frame}. The visit is
+   * done with the {@link MethodWriter#visitFrameStart}, {@link MethodWriter#visitAbstractType} and
+   * {@link MethodWriter#visitFrameEnd} methods.
+   *
+   * @param methodWriter the {@link MethodWriter} that should visit the input frame of this {@link
+   *     Frame}.
+   */
+  final void accept(final MethodWriter methodWriter) {
+    // Compute the number of locals, ignoring TOP types that are just after a LONG or a DOUBLE, and
+    // all trailing TOP types.
+<span class="nc" id="L1356">    int[] localTypes = inputLocals;</span>
+<span class="nc" id="L1357">    int numLocal = 0;</span>
+<span class="nc" id="L1358">    int numTrailingTop = 0;</span>
+<span class="nc" id="L1359">    int i = 0;</span>
+<span class="nc bnc" id="L1360" title="All 2 branches missed.">    while (i &lt; localTypes.length) {</span>
+<span class="nc" id="L1361">      int localType = localTypes[i];</span>
+<span class="nc bnc" id="L1362" title="All 4 branches missed.">      i += (localType == LONG || localType == DOUBLE) ? 2 : 1;</span>
+<span class="nc bnc" id="L1363" title="All 2 branches missed.">      if (localType == TOP) {</span>
+<span class="nc" id="L1364">        numTrailingTop++;</span>
+      } else {
+<span class="nc" id="L1366">        numLocal += numTrailingTop + 1;</span>
+<span class="nc" id="L1367">        numTrailingTop = 0;</span>
+      }
+<span class="nc" id="L1369">    }</span>
+    // Compute the stack size, ignoring TOP types that are just after a LONG or a DOUBLE.
+<span class="nc" id="L1371">    int[] stackTypes = inputStack;</span>
+<span class="nc" id="L1372">    int numStack = 0;</span>
+<span class="nc" id="L1373">    i = 0;</span>
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">    while (i &lt; stackTypes.length) {</span>
+<span class="nc" id="L1375">      int stackType = stackTypes[i];</span>
+<span class="nc bnc" id="L1376" title="All 4 branches missed.">      i += (stackType == LONG || stackType == DOUBLE) ? 2 : 1;</span>
+<span class="nc" id="L1377">      numStack++;</span>
+<span class="nc" id="L1378">    }</span>
+    // Visit the frame and its content.
+<span class="nc" id="L1380">    int frameIndex = methodWriter.visitFrameStart(owner.bytecodeOffset, numLocal, numStack);</span>
+<span class="nc" id="L1381">    i = 0;</span>
+<span class="nc bnc" id="L1382" title="All 2 branches missed.">    while (numLocal-- &gt; 0) {</span>
+<span class="nc" id="L1383">      int localType = localTypes[i];</span>
+<span class="nc bnc" id="L1384" title="All 4 branches missed.">      i += (localType == LONG || localType == DOUBLE) ? 2 : 1;</span>
+<span class="nc" id="L1385">      methodWriter.visitAbstractType(frameIndex++, localType);</span>
+<span class="nc" id="L1386">    }</span>
+<span class="nc" id="L1387">    i = 0;</span>
+<span class="nc bnc" id="L1388" title="All 2 branches missed.">    while (numStack-- &gt; 0) {</span>
+<span class="nc" id="L1389">      int stackType = stackTypes[i];</span>
+<span class="nc bnc" id="L1390" title="All 4 branches missed.">      i += (stackType == LONG || stackType == DOUBLE) ? 2 : 1;</span>
+<span class="nc" id="L1391">      methodWriter.visitAbstractType(frameIndex++, stackType);</span>
+<span class="nc" id="L1392">    }</span>
+<span class="nc" id="L1393">    methodWriter.visitFrameEnd();</span>
+<span class="nc" id="L1394">  }</span>
+
+  /**
+   * Put the given abstract type in the given ByteVector, using the JVMS verification_type_info
+   * format used in StackMapTable attributes.
+   *
+   * @param symbolTable the type table to use to lookup and store type {@link Symbol}.
+   * @param abstractType an abstract type, restricted to {@link Frame#CONSTANT_KIND}, {@link
+   *     Frame#REFERENCE_KIND} or {@link Frame#UNINITIALIZED_KIND} types.
+   * @param output where the abstract type must be put.
+   * @see &lt;a href=&quot;https://docs.oracle.com/javase/specs/jvms/se9/html/jvms-4.html#jvms-4.7.4&quot;&gt;JVMS
+   *     4.7.4&lt;/a&gt;
+   */
+  static void putAbstractType(
+      final SymbolTable symbolTable, final int abstractType, final ByteVector output) {
+<span class="nc" id="L1409">    int arrayDimensions = (abstractType &amp; Frame.DIM_MASK) &gt;&gt; DIM_SHIFT;</span>
+<span class="nc bnc" id="L1410" title="All 2 branches missed.">    if (arrayDimensions == 0) {</span>
+<span class="nc" id="L1411">      int typeValue = abstractType &amp; VALUE_MASK;</span>
+<span class="nc bnc" id="L1412" title="All 4 branches missed.">      switch (abstractType &amp; KIND_MASK) {</span>
+        case CONSTANT_KIND:
+<span class="nc" id="L1414">          output.putByte(typeValue);</span>
+<span class="nc" id="L1415">          break;</span>
+        case REFERENCE_KIND:
+<span class="nc" id="L1417">          output</span>
+<span class="nc" id="L1418">              .putByte(ITEM_OBJECT)</span>
+<span class="nc" id="L1419">              .putShort(symbolTable.addConstantClass(symbolTable.getType(typeValue).value).index);</span>
+<span class="nc" id="L1420">          break;</span>
+        case UNINITIALIZED_KIND:
+<span class="nc" id="L1422">          output.putByte(ITEM_UNINITIALIZED).putShort((int) symbolTable.getType(typeValue).data);</span>
+<span class="nc" id="L1423">          break;</span>
+        default:
+<span class="nc" id="L1425">          throw new AssertionError();</span>
+      }
+<span class="nc" id="L1427">    } else {</span>
+      // Case of an array type, we need to build its descriptor first.
+<span class="nc" id="L1429">      StringBuilder typeDescriptor = new StringBuilder(32);  // SPRING PATCH: larger initial size</span>
+<span class="nc bnc" id="L1430" title="All 2 branches missed.">      while (arrayDimensions-- &gt; 0) {</span>
+<span class="nc" id="L1431">        typeDescriptor.append('[');</span>
+      }
+<span class="nc bnc" id="L1433" title="All 2 branches missed.">      if ((abstractType &amp; KIND_MASK) == REFERENCE_KIND) {</span>
+<span class="nc" id="L1434">        typeDescriptor</span>
+<span class="nc" id="L1435">            .append('L')</span>
+<span class="nc" id="L1436">            .append(symbolTable.getType(abstractType &amp; VALUE_MASK).value)</span>
+<span class="nc" id="L1437">            .append(';');</span>
+      } else {
+<span class="nc bnc" id="L1439" title="All 9 branches missed.">        switch (abstractType &amp; VALUE_MASK) {</span>
+          case Frame.ITEM_ASM_BOOLEAN:
+<span class="nc" id="L1441">            typeDescriptor.append('Z');</span>
+<span class="nc" id="L1442">            break;</span>
+          case Frame.ITEM_ASM_BYTE:
+<span class="nc" id="L1444">            typeDescriptor.append('B');</span>
+<span class="nc" id="L1445">            break;</span>
+          case Frame.ITEM_ASM_CHAR:
+<span class="nc" id="L1447">            typeDescriptor.append('C');</span>
+<span class="nc" id="L1448">            break;</span>
+          case Frame.ITEM_ASM_SHORT:
+<span class="nc" id="L1450">            typeDescriptor.append('S');</span>
+<span class="nc" id="L1451">            break;</span>
+          case Frame.ITEM_INTEGER:
+<span class="nc" id="L1453">            typeDescriptor.append('I');</span>
+<span class="nc" id="L1454">            break;</span>
+          case Frame.ITEM_FLOAT:
+<span class="nc" id="L1456">            typeDescriptor.append('F');</span>
+<span class="nc" id="L1457">            break;</span>
+          case Frame.ITEM_LONG:
+<span class="nc" id="L1459">            typeDescriptor.append('J');</span>
+<span class="nc" id="L1460">            break;</span>
+          case Frame.ITEM_DOUBLE:
+<span class="nc" id="L1462">            typeDescriptor.append('D');</span>
+<span class="nc" id="L1463">            break;</span>
+          default:
+<span class="nc" id="L1465">            throw new AssertionError();</span>
+        }
+      }
+<span class="nc" id="L1468">      output</span>
+<span class="nc" id="L1469">          .putByte(ITEM_OBJECT)</span>
+<span class="nc" id="L1470">          .putShort(symbolTable.addConstantClass(typeDescriptor.toString()).index);</span>
+    }
+<span class="nc" id="L1472">  }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

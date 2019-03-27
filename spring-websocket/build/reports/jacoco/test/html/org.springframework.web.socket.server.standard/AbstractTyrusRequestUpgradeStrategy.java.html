@@ -1,0 +1,247 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractTyrusRequestUpgradeStrategy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-websocket</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.server.standard</a> &gt; <span class="el_source">AbstractTyrusRequestUpgradeStrategy.java</span></div><h1>AbstractTyrusRequestUpgradeStrategy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.server.standard;
+
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Random;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.websocket.DeploymentException;
+import javax.websocket.Endpoint;
+import javax.websocket.EndpointConfig;
+import javax.websocket.Extension;
+import javax.websocket.WebSocketContainer;
+
+import org.glassfish.tyrus.core.ComponentProviderService;
+import org.glassfish.tyrus.core.RequestContext;
+import org.glassfish.tyrus.core.TyrusEndpointWrapper;
+import org.glassfish.tyrus.core.TyrusUpgradeResponse;
+import org.glassfish.tyrus.core.TyrusWebSocketEngine;
+import org.glassfish.tyrus.core.Version;
+import org.glassfish.tyrus.server.TyrusServerContainer;
+import org.glassfish.tyrus.spi.WebSocketEngine.UpgradeInfo;
+
+import org.springframework.beans.DirectFieldAccessor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.server.ServerHttpRequest;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.socket.WebSocketExtension;
+import org.springframework.web.socket.server.HandshakeFailureException;
+
+import static org.glassfish.tyrus.spi.WebSocketEngine.UpgradeStatus.SUCCESS;
+
+/**
+ * A base class for {@code RequestUpgradeStrategy} implementations on top of
+ * JSR-356 based servers which include Tyrus as their WebSocket engine.
+ *
+ * &lt;p&gt;Works with Tyrus 1.11 (WebLogic 12.2.1) and Tyrus 1.12 (GlassFish 4.1.1).
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Juergen Hoeller
+ * @since 4.1
+ * @see &lt;a href=&quot;https://tyrus.java.net/&quot;&gt;Project Tyrus&lt;/a&gt;
+ */
+<span class="nc" id="L69">public abstract class AbstractTyrusRequestUpgradeStrategy extends AbstractStandardUpgradeStrategy {</span>
+
+<span class="nc" id="L71">	private static final Random random = new Random();</span>
+
+	private static final Constructor&lt;?&gt; constructor;
+
+	private static boolean constructorWithBooleanArgument;
+
+	private static final Method registerMethod;
+
+	private static final Method unRegisterMethod;
+
+	static {
+		try {
+<span class="nc" id="L83">			constructor = getEndpointConstructor();</span>
+<span class="nc" id="L84">			int parameterCount = constructor.getParameterCount();</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">			constructorWithBooleanArgument = (parameterCount == 10);</span>
+<span class="nc bnc" id="L86" title="All 4 branches missed.">			if (!constructorWithBooleanArgument &amp;&amp; parameterCount != 9) {</span>
+<span class="nc" id="L87">				throw new IllegalStateException(&quot;Expected TyrusEndpointWrapper constructor with 9 or 10 arguments&quot;);</span>
+			}
+<span class="nc" id="L89">			registerMethod = TyrusWebSocketEngine.class.getDeclaredMethod(&quot;register&quot;, TyrusEndpointWrapper.class);</span>
+<span class="nc" id="L90">			unRegisterMethod = TyrusWebSocketEngine.class.getDeclaredMethod(&quot;unregister&quot;, TyrusEndpointWrapper.class);</span>
+<span class="nc" id="L91">			ReflectionUtils.makeAccessible(registerMethod);</span>
+		}
+<span class="nc" id="L93">		catch (Exception ex) {</span>
+<span class="nc" id="L94">			throw new IllegalStateException(&quot;No compatible Tyrus version found&quot;, ex);</span>
+<span class="nc" id="L95">		}</span>
+<span class="nc" id="L96">	}</span>
+
+	private static Constructor&lt;?&gt; getEndpointConstructor() {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">		for (Constructor&lt;?&gt; current : TyrusEndpointWrapper.class.getConstructors()) {</span>
+<span class="nc" id="L100">			Class&lt;?&gt;[] types = current.getParameterTypes();</span>
+<span class="nc bnc" id="L101" title="All 4 branches missed.">			if (Endpoint.class == types[0] &amp;&amp; EndpointConfig.class == types[1]) {</span>
+<span class="nc" id="L102">				return current;</span>
+			}
+		}
+<span class="nc" id="L105">		throw new IllegalStateException(&quot;No compatible Tyrus version found&quot;);</span>
+	}
+
+
+<span class="nc" id="L109">	private final ComponentProviderService componentProvider = ComponentProviderService.create();</span>
+
+
+	@Override
+	public String[] getSupportedVersions() {
+<span class="nc" id="L114">		return StringUtils.tokenizeToStringArray(Version.getSupportedWireProtocolVersions(), &quot;,&quot;);</span>
+	}
+
+	@Override
+	protected List&lt;WebSocketExtension&gt; getInstalledExtensions(WebSocketContainer container) {
+		try {
+<span class="nc" id="L120">			return super.getInstalledExtensions(container);</span>
+		}
+<span class="nc" id="L122">		catch (UnsupportedOperationException ex) {</span>
+<span class="nc" id="L123">			return new ArrayList&lt;&gt;(0);</span>
+		}
+	}
+
+	@Override
+	public void upgradeInternal(ServerHttpRequest request, ServerHttpResponse response,
+			@Nullable String selectedProtocol, List&lt;Extension&gt; extensions, Endpoint endpoint)
+			throws HandshakeFailureException {
+
+<span class="nc" id="L132">		HttpServletRequest servletRequest = getHttpServletRequest(request);</span>
+<span class="nc" id="L133">		HttpServletResponse servletResponse = getHttpServletResponse(response);</span>
+
+<span class="nc" id="L135">		TyrusServerContainer serverContainer = (TyrusServerContainer) getContainer(servletRequest);</span>
+<span class="nc" id="L136">		TyrusWebSocketEngine engine = (TyrusWebSocketEngine) serverContainer.getWebSocketEngine();</span>
+<span class="nc" id="L137">		Object tyrusEndpoint = null;</span>
+		boolean success;
+
+		try {
+			// Shouldn't matter for processing but must be unique
+<span class="nc" id="L142">			String path = &quot;/&quot; + random.nextLong();</span>
+<span class="nc" id="L143">			tyrusEndpoint = createTyrusEndpoint(endpoint, path, selectedProtocol, extensions, serverContainer, engine);</span>
+<span class="nc" id="L144">			register(engine, tyrusEndpoint);</span>
+
+<span class="nc" id="L146">			HttpHeaders headers = request.getHeaders();</span>
+<span class="nc" id="L147">			RequestContext requestContext = createRequestContext(servletRequest, path, headers);</span>
+<span class="nc" id="L148">			TyrusUpgradeResponse upgradeResponse = new TyrusUpgradeResponse();</span>
+<span class="nc" id="L149">			UpgradeInfo upgradeInfo = engine.upgrade(requestContext, upgradeResponse);</span>
+<span class="nc" id="L150">			success = SUCCESS.equals(upgradeInfo.getStatus());</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">			if (success) {</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L153">					logger.trace(&quot;Successful request upgrade: &quot; + upgradeResponse.getHeaders());</span>
+				}
+<span class="nc" id="L155">				handleSuccess(servletRequest, servletResponse, upgradeInfo, upgradeResponse);</span>
+			}
+		}
+<span class="nc" id="L158">		catch (Exception ex) {</span>
+<span class="nc" id="L159">			unregisterTyrusEndpoint(engine, tyrusEndpoint);</span>
+<span class="nc" id="L160">			throw new HandshakeFailureException(&quot;Error during handshake: &quot; + request.getURI(), ex);</span>
+<span class="nc" id="L161">		}</span>
+
+<span class="nc" id="L163">		unregisterTyrusEndpoint(engine, tyrusEndpoint);</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">		if (!success) {</span>
+<span class="nc" id="L165">			throw new HandshakeFailureException(&quot;Unexpected handshake failure: &quot; + request.getURI());</span>
+		}
+<span class="nc" id="L167">	}</span>
+
+	private Object createTyrusEndpoint(Endpoint endpoint, String endpointPath, @Nullable String protocol,
+			List&lt;Extension&gt; extensions, WebSocketContainer container, TyrusWebSocketEngine engine)
+			throws DeploymentException {
+
+<span class="nc" id="L173">		ServerEndpointRegistration endpointConfig = new ServerEndpointRegistration(endpointPath, endpoint);</span>
+<span class="nc" id="L174">		endpointConfig.setSubprotocols(Collections.singletonList(protocol));</span>
+<span class="nc" id="L175">		endpointConfig.setExtensions(extensions);</span>
+<span class="nc" id="L176">		return createEndpoint(endpointConfig, this.componentProvider, container, engine);</span>
+	}
+
+	private RequestContext createRequestContext(HttpServletRequest request, String endpointPath, HttpHeaders headers) {
+		RequestContext context =
+<span class="nc" id="L181">				RequestContext.Builder.create()</span>
+<span class="nc" id="L182">						.requestURI(URI.create(endpointPath))</span>
+<span class="nc" id="L183">						.userPrincipal(request.getUserPrincipal())</span>
+<span class="nc" id="L184">						.secure(request.isSecure())</span>
+<span class="nc" id="L185">						.remoteAddr(request.getRemoteAddr())</span>
+<span class="nc" id="L186">						.build();</span>
+<span class="nc" id="L187">		headers.forEach((header, value) -&gt; context.getHeaders().put(header, value));</span>
+<span class="nc" id="L188">		return context;</span>
+	}
+
+	private void unregisterTyrusEndpoint(TyrusWebSocketEngine engine, @Nullable Object tyrusEndpoint) {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">		if (tyrusEndpoint != null) {</span>
+			try {
+<span class="nc" id="L194">				unregister(engine, tyrusEndpoint);</span>
+			}
+<span class="nc" id="L196">			catch (Throwable ex) {</span>
+				// ignore
+<span class="nc" id="L198">			}</span>
+		}
+<span class="nc" id="L200">	}</span>
+
+	private Object createEndpoint(ServerEndpointRegistration registration, ComponentProviderService provider,
+			WebSocketContainer container, TyrusWebSocketEngine engine) throws DeploymentException {
+
+<span class="nc" id="L205">		DirectFieldAccessor accessor = new DirectFieldAccessor(engine);</span>
+<span class="nc" id="L206">		Object sessionListener = accessor.getPropertyValue(&quot;sessionListener&quot;);</span>
+<span class="nc" id="L207">		Object clusterContext = accessor.getPropertyValue(&quot;clusterContext&quot;);</span>
+		try {
+<span class="nc bnc" id="L209" title="All 2 branches missed.">			if (constructorWithBooleanArgument) {</span>
+				// Tyrus 1.11+
+<span class="nc" id="L211">				return constructor.newInstance(registration.getEndpoint(), registration, provider, container,</span>
+<span class="nc" id="L212">						&quot;/&quot;, registration.getConfigurator(), sessionListener, clusterContext, null, Boolean.TRUE);</span>
+			}
+			else {
+<span class="nc" id="L215">				return constructor.newInstance(registration.getEndpoint(), registration, provider, container,</span>
+<span class="nc" id="L216">						&quot;/&quot;, registration.getConfigurator(), sessionListener, clusterContext, null);</span>
+			}
+		}
+<span class="nc" id="L219">		catch (Exception ex) {</span>
+<span class="nc" id="L220">			throw new HandshakeFailureException(&quot;Failed to register &quot; + registration, ex);</span>
+		}
+	}
+
+	private void register(TyrusWebSocketEngine engine, Object endpoint) {
+		try {
+<span class="nc" id="L226">			registerMethod.invoke(engine, endpoint);</span>
+		}
+<span class="nc" id="L228">		catch (Exception ex) {</span>
+<span class="nc" id="L229">			throw new HandshakeFailureException(&quot;Failed to register &quot; + endpoint, ex);</span>
+<span class="nc" id="L230">		}</span>
+<span class="nc" id="L231">	}</span>
+
+	private void unregister(TyrusWebSocketEngine engine, Object endpoint) {
+		try {
+<span class="nc" id="L235">			unRegisterMethod.invoke(engine, endpoint);</span>
+		}
+<span class="nc" id="L237">		catch (Exception ex) {</span>
+<span class="nc" id="L238">			throw new HandshakeFailureException(&quot;Failed to unregister &quot; + endpoint, ex);</span>
+<span class="nc" id="L239">		}</span>
+<span class="nc" id="L240">	}</span>
+
+
+	protected abstract void handleSuccess(HttpServletRequest request, HttpServletResponse response,
+			UpgradeInfo upgradeInfo, TyrusUpgradeResponse upgradeResponse) throws IOException, ServletException;
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

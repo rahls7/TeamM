@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WebLogicJtaTransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.jta</a> &gt; <span class="el_source">WebLogicJtaTransactionManager.java</span></div><h1>WebLogicJtaTransactionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.jta;
+
+import java.io.Serializable;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import javax.transaction.InvalidTransactionException;
+import javax.transaction.NotSupportedException;
+import javax.transaction.SystemException;
+import javax.transaction.Transaction;
+import javax.transaction.TransactionManager;
+import javax.transaction.UserTransaction;
+
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.util.Assert;
+
+/**
+ * Special {@link JtaTransactionManager} variant for BEA WebLogic (9.0 and higher).
+ * Supports the full power of Spring's transaction definitions on WebLogic's
+ * transaction coordinator, &lt;i&gt;beyond standard JTA&lt;/i&gt;: transaction names,
+ * per-transaction isolation levels, and proper resuming of transactions in all cases.
+ *
+ * &lt;p&gt;Uses WebLogic's special {@code begin(name)} method to start a JTA transaction,
+ * in order to make &lt;b&gt;Spring-driven transactions visible in WebLogic's transaction
+ * monitor&lt;/b&gt;. In case of Spring's declarative transactions, the exposed name will
+ * (by default) be the fully-qualified class name + &quot;.&quot; + method name.
+ *
+ * &lt;p&gt;Supports a &lt;b&gt;per-transaction isolation level&lt;/b&gt; through WebLogic's corresponding
+ * JTA transaction property &quot;ISOLATION LEVEL&quot;. This will apply the specified isolation
+ * level (e.g. ISOLATION_SERIALIZABLE) to all JDBC Connections that participate in the
+ * given transaction.
+ *
+ * &lt;p&gt;Invokes WebLogic's special {@code forceResume} method if standard JTA resume
+ * failed, to &lt;b&gt;also resume if the target transaction was marked rollback-only&lt;/b&gt;.
+ * If you're not relying on this feature of transaction suspension in the first
+ * place, Spring's standard JtaTransactionManager will behave properly too.
+ *
+ * &lt;p&gt;By default, the JTA UserTransaction and TransactionManager handles are
+ * fetched directly from WebLogic's {@code TransactionHelper}. This can be
+ * overridden by specifying &quot;userTransaction&quot;/&quot;userTransactionName&quot; and
+ * &quot;transactionManager&quot;/&quot;transactionManagerName&quot;, passing in existing handles
+ * or specifying corresponding JNDI locations to look up.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: This JtaTransactionManager is intended to refine specific transaction
+ * demarcation behavior on Spring's side. It will happily co-exist with independently
+ * configured WebLogic transaction strategies in your persistence provider, with no
+ * need to specifically connect those setups in any way.&lt;/b&gt;
+ *
+ * @author Juergen Hoeller
+ * @since 1.1
+ * @see org.springframework.transaction.TransactionDefinition#getName
+ * @see org.springframework.transaction.TransactionDefinition#getIsolationLevel
+ * @see weblogic.transaction.UserTransaction#begin(String)
+ * @see weblogic.transaction.Transaction#setProperty
+ * @see weblogic.transaction.TransactionManager#forceResume
+ * @see weblogic.transaction.TransactionHelper
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="nc" id="L76">public class WebLogicJtaTransactionManager extends JtaTransactionManager {</span>
+
+	private static final String USER_TRANSACTION_CLASS_NAME = &quot;weblogic.transaction.UserTransaction&quot;;
+
+	private static final String CLIENT_TRANSACTION_MANAGER_CLASS_NAME = &quot;weblogic.transaction.ClientTransactionManager&quot;;
+
+	private static final String TRANSACTION_CLASS_NAME = &quot;weblogic.transaction.Transaction&quot;;
+
+	private static final String TRANSACTION_HELPER_CLASS_NAME = &quot;weblogic.transaction.TransactionHelper&quot;;
+
+	private static final String ISOLATION_LEVEL_KEY = &quot;ISOLATION LEVEL&quot;;
+
+
+	private boolean weblogicUserTransactionAvailable;
+
+	@Nullable
+	private Method beginWithNameMethod;
+
+	@Nullable
+	private Method beginWithNameAndTimeoutMethod;
+
+	private boolean weblogicTransactionManagerAvailable;
+
+	@Nullable
+	private Method forceResumeMethod;
+
+	@Nullable
+	private Method setPropertyMethod;
+
+	@Nullable
+	private Object transactionHelper;
+
+
+	@Override
+	public void afterPropertiesSet() throws TransactionSystemException {
+<span class="nc" id="L111">		super.afterPropertiesSet();</span>
+<span class="nc" id="L112">		loadWebLogicTransactionClasses();</span>
+<span class="nc" id="L113">	}</span>
+
+	@Override
+	@Nullable
+	protected UserTransaction retrieveUserTransaction() throws TransactionSystemException {
+<span class="nc" id="L118">		Object helper = loadWebLogicTransactionHelper();</span>
+		try {
+<span class="nc" id="L120">			logger.trace(&quot;Retrieving JTA UserTransaction from WebLogic TransactionHelper&quot;);</span>
+<span class="nc" id="L121">			Method getUserTransactionMethod = helper.getClass().getMethod(&quot;getUserTransaction&quot;);</span>
+<span class="nc" id="L122">			return (UserTransaction) getUserTransactionMethod.invoke(this.transactionHelper);</span>
+		}
+<span class="nc" id="L124">		catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L125">			throw new TransactionSystemException(</span>
+<span class="nc" id="L126">					&quot;WebLogic's TransactionHelper.getUserTransaction() method failed&quot;, ex.getTargetException());</span>
+		}
+<span class="nc" id="L128">		catch (Exception ex) {</span>
+<span class="nc" id="L129">			throw new TransactionSystemException(</span>
+					&quot;Could not invoke WebLogic's TransactionHelper.getUserTransaction() method&quot;, ex);
+		}
+	}
+
+	@Override
+	@Nullable
+	protected TransactionManager retrieveTransactionManager() throws TransactionSystemException {
+<span class="nc" id="L137">		Object helper = loadWebLogicTransactionHelper();</span>
+		try {
+<span class="nc" id="L139">			logger.trace(&quot;Retrieving JTA TransactionManager from WebLogic TransactionHelper&quot;);</span>
+<span class="nc" id="L140">			Method getTransactionManagerMethod = helper.getClass().getMethod(&quot;getTransactionManager&quot;);</span>
+<span class="nc" id="L141">			return (TransactionManager) getTransactionManagerMethod.invoke(this.transactionHelper);</span>
+		}
+<span class="nc" id="L143">		catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L144">			throw new TransactionSystemException(</span>
+<span class="nc" id="L145">					&quot;WebLogic's TransactionHelper.getTransactionManager() method failed&quot;, ex.getTargetException());</span>
+		}
+<span class="nc" id="L147">		catch (Exception ex) {</span>
+<span class="nc" id="L148">			throw new TransactionSystemException(</span>
+					&quot;Could not invoke WebLogic's TransactionHelper.getTransactionManager() method&quot;, ex);
+		}
+	}
+
+	private Object loadWebLogicTransactionHelper() throws TransactionSystemException {
+<span class="nc" id="L154">		Object helper = this.transactionHelper;</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">		if (helper == null) {</span>
+			try {
+<span class="nc" id="L157">				Class&lt;?&gt; transactionHelperClass = getClass().getClassLoader().loadClass(TRANSACTION_HELPER_CLASS_NAME);</span>
+<span class="nc" id="L158">				Method getTransactionHelperMethod = transactionHelperClass.getMethod(&quot;getTransactionHelper&quot;);</span>
+<span class="nc" id="L159">				helper = getTransactionHelperMethod.invoke(null);</span>
+<span class="nc" id="L160">				this.transactionHelper = helper;</span>
+<span class="nc" id="L161">				logger.trace(&quot;WebLogic TransactionHelper found&quot;);</span>
+			}
+<span class="nc" id="L163">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L164">				throw new TransactionSystemException(</span>
+<span class="nc" id="L165">						&quot;WebLogic's TransactionHelper.getTransactionHelper() method failed&quot;, ex.getTargetException());</span>
+			}
+<span class="nc" id="L167">			catch (Exception ex) {</span>
+<span class="nc" id="L168">				throw new TransactionSystemException(</span>
+						&quot;Could not initialize WebLogicJtaTransactionManager because WebLogic API classes are not available&quot;,
+						ex);
+<span class="nc" id="L171">			}</span>
+		}
+<span class="nc" id="L173">		return helper;</span>
+	}
+
+	private void loadWebLogicTransactionClasses() throws TransactionSystemException {
+		try {
+<span class="nc" id="L178">			Class&lt;?&gt; userTransactionClass = getClass().getClassLoader().loadClass(USER_TRANSACTION_CLASS_NAME);</span>
+<span class="nc" id="L179">			this.weblogicUserTransactionAvailable = userTransactionClass.isInstance(getUserTransaction());</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">			if (this.weblogicUserTransactionAvailable) {</span>
+<span class="nc" id="L181">				this.beginWithNameMethod = userTransactionClass.getMethod(&quot;begin&quot;, String.class);</span>
+<span class="nc" id="L182">				this.beginWithNameAndTimeoutMethod = userTransactionClass.getMethod(&quot;begin&quot;, String.class, int.class);</span>
+<span class="nc" id="L183">				logger.debug(&quot;Support for WebLogic transaction names available&quot;);</span>
+			}
+			else {
+<span class="nc" id="L186">				logger.debug(&quot;Support for WebLogic transaction names not available&quot;);</span>
+			}
+
+			// Obtain WebLogic ClientTransactionManager interface.
+<span class="nc" id="L190">			Class&lt;?&gt; transactionManagerClass =</span>
+<span class="nc" id="L191">					getClass().getClassLoader().loadClass(CLIENT_TRANSACTION_MANAGER_CLASS_NAME);</span>
+<span class="nc" id="L192">			logger.trace(&quot;WebLogic ClientTransactionManager found&quot;);</span>
+
+<span class="nc" id="L194">			this.weblogicTransactionManagerAvailable = transactionManagerClass.isInstance(getTransactionManager());</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">			if (this.weblogicTransactionManagerAvailable) {</span>
+<span class="nc" id="L196">				Class&lt;?&gt; transactionClass = getClass().getClassLoader().loadClass(TRANSACTION_CLASS_NAME);</span>
+<span class="nc" id="L197">				this.forceResumeMethod = transactionManagerClass.getMethod(&quot;forceResume&quot;, Transaction.class);</span>
+<span class="nc" id="L198">				this.setPropertyMethod = transactionClass.getMethod(&quot;setProperty&quot;, String.class, Serializable.class);</span>
+<span class="nc" id="L199">				logger.debug(&quot;Support for WebLogic forceResume available&quot;);</span>
+<span class="nc" id="L200">			}</span>
+			else {
+<span class="nc" id="L202">				logger.debug(&quot;Support for WebLogic forceResume not available&quot;);</span>
+			}
+		}
+<span class="nc" id="L205">		catch (Exception ex) {</span>
+<span class="nc" id="L206">			throw new TransactionSystemException(</span>
+					&quot;Could not initialize WebLogicJtaTransactionManager because WebLogic API classes are not available&quot;,
+					ex);
+<span class="nc" id="L209">		}</span>
+<span class="nc" id="L210">	}</span>
+
+	private TransactionManager obtainTransactionManager() {
+<span class="nc" id="L213">		TransactionManager tm = getTransactionManager();</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">		Assert.state(tm != null, &quot;No TransactionManager set&quot;);</span>
+<span class="nc" id="L215">		return tm;</span>
+	}
+
+
+	@Override
+	protected void doJtaBegin(JtaTransactionObject txObject, TransactionDefinition definition)
+			throws NotSupportedException, SystemException {
+
+<span class="nc" id="L223">		int timeout = determineTimeout(definition);</span>
+
+		// Apply transaction name (if any) to WebLogic transaction.
+<span class="nc bnc" id="L226" title="All 4 branches missed.">		if (this.weblogicUserTransactionAvailable &amp;&amp; definition.getName() != null) {</span>
+			try {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">				if (timeout &gt; TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+					/*
+					weblogic.transaction.UserTransaction wut = (weblogic.transaction.UserTransaction) ut;
+					wut.begin(definition.getName(), timeout);
+					*/
+<span class="nc bnc" id="L233" title="All 2 branches missed.">					Assert.state(this.beginWithNameAndTimeoutMethod != null, &quot;WebLogic JTA API not initialized&quot;);</span>
+<span class="nc" id="L234">					this.beginWithNameAndTimeoutMethod.invoke(txObject.getUserTransaction(), definition.getName(), timeout);</span>
+				}
+				else {
+					/*
+					weblogic.transaction.UserTransaction wut = (weblogic.transaction.UserTransaction) ut;
+					wut.begin(definition.getName());
+					*/
+<span class="nc bnc" id="L241" title="All 2 branches missed.">					Assert.state(this.beginWithNameMethod != null, &quot;WebLogic JTA API not initialized&quot;);</span>
+<span class="nc" id="L242">					this.beginWithNameMethod.invoke(txObject.getUserTransaction(), definition.getName());</span>
+				}
+			}
+<span class="nc" id="L245">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L246">				throw new TransactionSystemException(</span>
+<span class="nc" id="L247">						&quot;WebLogic's UserTransaction.begin() method failed&quot;, ex.getTargetException());</span>
+			}
+<span class="nc" id="L249">			catch (Exception ex) {</span>
+<span class="nc" id="L250">				throw new TransactionSystemException(</span>
+						&quot;Could not invoke WebLogic's UserTransaction.begin() method&quot;, ex);
+<span class="nc" id="L252">			}</span>
+		}
+		else {
+			// No WebLogic UserTransaction available or no transaction name specified
+			// -&gt; standard JTA begin call.
+<span class="nc" id="L257">			applyTimeout(txObject, timeout);</span>
+<span class="nc" id="L258">			txObject.getUserTransaction().begin();</span>
+		}
+
+		// Specify isolation level, if any, through corresponding WebLogic transaction property.
+<span class="nc bnc" id="L262" title="All 2 branches missed.">		if (this.weblogicTransactionManagerAvailable) {</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">			if (definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT) {</span>
+				try {
+<span class="nc" id="L265">					Transaction tx = obtainTransactionManager().getTransaction();</span>
+<span class="nc" id="L266">					Integer isolationLevel = definition.getIsolationLevel();</span>
+					/*
+					weblogic.transaction.Transaction wtx = (weblogic.transaction.Transaction) tx;
+					wtx.setProperty(ISOLATION_LEVEL_KEY, isolationLevel);
+					*/
+<span class="nc bnc" id="L271" title="All 2 branches missed.">					Assert.state(this.setPropertyMethod != null, &quot;WebLogic JTA API not initialized&quot;);</span>
+<span class="nc" id="L272">					this.setPropertyMethod.invoke(tx, ISOLATION_LEVEL_KEY, isolationLevel);</span>
+				}
+<span class="nc" id="L274">				catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L275">					throw new TransactionSystemException(</span>
+<span class="nc" id="L276">							&quot;WebLogic's Transaction.setProperty(String, Serializable) method failed&quot;, ex.getTargetException());</span>
+				}
+<span class="nc" id="L278">				catch (Exception ex) {</span>
+<span class="nc" id="L279">					throw new TransactionSystemException(</span>
+							&quot;Could not invoke WebLogic's Transaction.setProperty(String, Serializable) method&quot;, ex);
+<span class="nc" id="L281">				}</span>
+			}
+		}
+		else {
+<span class="nc" id="L285">			applyIsolationLevel(txObject, definition.getIsolationLevel());</span>
+		}
+<span class="nc" id="L287">	}</span>
+
+	@Override
+	protected void doJtaResume(@Nullable JtaTransactionObject txObject, Object suspendedTransaction)
+			throws InvalidTransactionException, SystemException {
+
+		try {
+<span class="nc" id="L294">			obtainTransactionManager().resume((Transaction) suspendedTransaction);</span>
+		}
+<span class="nc" id="L296">		catch (InvalidTransactionException ex) {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">			if (!this.weblogicTransactionManagerAvailable) {</span>
+<span class="nc" id="L298">				throw ex;</span>
+			}
+
+<span class="nc bnc" id="L301" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L302">				logger.debug(&quot;Standard JTA resume threw InvalidTransactionException: &quot; + ex.getMessage() +</span>
+					&quot; - trying WebLogic JTA forceResume&quot;);
+			}
+			/*
+			weblogic.transaction.TransactionManager wtm =
+					(weblogic.transaction.TransactionManager) getTransactionManager();
+			wtm.forceResume(suspendedTransaction);
+			*/
+			try {
+<span class="nc bnc" id="L311" title="All 2 branches missed.">				Assert.state(this.forceResumeMethod != null, &quot;WebLogic JTA API not initialized&quot;);</span>
+<span class="nc" id="L312">				this.forceResumeMethod.invoke(getTransactionManager(), suspendedTransaction);</span>
+			}
+<span class="nc" id="L314">			catch (InvocationTargetException ex2) {</span>
+<span class="nc" id="L315">				throw new TransactionSystemException(</span>
+<span class="nc" id="L316">						&quot;WebLogic's TransactionManager.forceResume(Transaction) method failed&quot;, ex2.getTargetException());</span>
+			}
+<span class="nc" id="L318">			catch (Exception ex2) {</span>
+<span class="nc" id="L319">				throw new TransactionSystemException(</span>
+						&quot;Could not access WebLogic's TransactionManager.forceResume(Transaction) method&quot;, ex2);
+<span class="nc" id="L321">			}</span>
+<span class="nc" id="L322">		}</span>
+<span class="nc" id="L323">	}</span>
+
+	@Override
+	public Transaction createTransaction(@Nullable String name, int timeout) throws NotSupportedException, SystemException {
+<span class="nc bnc" id="L327" title="All 4 branches missed.">		if (this.weblogicUserTransactionAvailable &amp;&amp; name != null) {</span>
+			try {
+<span class="nc bnc" id="L329" title="All 2 branches missed.">				if (timeout &gt;= 0) {</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">					Assert.state(this.beginWithNameAndTimeoutMethod != null, &quot;WebLogic JTA API not initialized&quot;);</span>
+<span class="nc" id="L331">					this.beginWithNameAndTimeoutMethod.invoke(getUserTransaction(), name, timeout);</span>
+				}
+				else {
+<span class="nc bnc" id="L334" title="All 2 branches missed.">					Assert.state(this.beginWithNameMethod != null, &quot;WebLogic JTA API not initialized&quot;);</span>
+<span class="nc" id="L335">					this.beginWithNameMethod.invoke(getUserTransaction(), name);</span>
+				}
+			}
+<span class="nc" id="L338">			catch (InvocationTargetException ex) {</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">				if (ex.getTargetException() instanceof NotSupportedException) {</span>
+<span class="nc" id="L340">					throw (NotSupportedException) ex.getTargetException();</span>
+				}
+<span class="nc bnc" id="L342" title="All 2 branches missed.">				else if (ex.getTargetException() instanceof SystemException) {</span>
+<span class="nc" id="L343">					throw (SystemException) ex.getTargetException();</span>
+				}
+<span class="nc bnc" id="L345" title="All 2 branches missed.">				else if (ex.getTargetException() instanceof RuntimeException) {</span>
+<span class="nc" id="L346">					throw (RuntimeException) ex.getTargetException();</span>
+				}
+				else {
+<span class="nc" id="L349">					throw new SystemException(</span>
+<span class="nc" id="L350">							&quot;WebLogic's begin() method failed with an unexpected error: &quot; + ex.getTargetException());</span>
+				}
+			}
+<span class="nc" id="L353">			catch (Exception ex) {</span>
+<span class="nc" id="L354">				throw new SystemException(&quot;Could not invoke WebLogic's UserTransaction.begin() method: &quot; + ex);</span>
+<span class="nc" id="L355">			}</span>
+<span class="nc" id="L356">			return new ManagedTransactionAdapter(obtainTransactionManager());</span>
+		}
+
+		else {
+			// No name specified - standard JTA is sufficient.
+<span class="nc" id="L361">			return super.createTransaction(name, timeout);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

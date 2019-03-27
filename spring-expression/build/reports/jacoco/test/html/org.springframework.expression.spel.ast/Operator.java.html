@@ -1,0 +1,311 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Operator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.ast</a> &gt; <span class="el_source">Operator.java</span></div><h1>Operator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.ast;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+
+import org.springframework.asm.Label;
+import org.springframework.asm.MethodVisitor;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.NumberUtils;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * Common supertype for operators that operate on either one or two operands.
+ * In the case of multiply or divide there would be two operands, but for
+ * unary plus or minus, there is only one.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Giovanni Dall'Oglio Risso
+ * @since 3.0
+ */
+public abstract class Operator extends SpelNodeImpl {
+
+	private final String operatorName;
+
+	// The descriptors of the runtime operand values are used if the discovered declared
+	// descriptors are not providing enough information (for example a generic type
+	// whose accessors seem to only be returning 'Object' - the actual descriptors may
+	// indicate 'int')
+
+	@Nullable
+	protected String leftActualDescriptor;
+
+	@Nullable
+	protected String rightActualDescriptor;
+
+
+	public Operator(String payload, int startPos, int endPos, SpelNodeImpl... operands) {
+<span class="fc" id="L58">		super(startPos, endPos, operands);</span>
+<span class="fc" id="L59">		this.operatorName = payload;</span>
+<span class="fc" id="L60">	}</span>
+
+
+	public SpelNodeImpl getLeftOperand() {
+<span class="fc" id="L64">		return this.children[0];</span>
+	}
+
+	public SpelNodeImpl getRightOperand() {
+<span class="fc" id="L68">		return this.children[1];</span>
+	}
+
+	public final String getOperatorName() {
+<span class="fc" id="L72">		return this.operatorName;</span>
+	}
+
+	/**
+	 * String format for all operators is the same
+	 * {@code '(' [operand] [operator] [operand] ')'}.
+	 */
+	@Override
+	public String toStringAST() {
+<span class="fc" id="L81">		StringBuilder sb = new StringBuilder(&quot;(&quot;);</span>
+<span class="fc" id="L82">		sb.append(getChild(0).toStringAST());</span>
+<span class="fc bfc" id="L83" title="All 2 branches covered.">		for (int i = 1; i &lt; getChildCount(); i++) {</span>
+<span class="fc" id="L84">			sb.append(&quot; &quot;).append(getOperatorName()).append(&quot; &quot;);</span>
+<span class="fc" id="L85">			sb.append(getChild(i).toStringAST());</span>
+		}
+<span class="fc" id="L87">		sb.append(&quot;)&quot;);</span>
+<span class="fc" id="L88">		return sb.toString();</span>
+	}
+
+
+	protected boolean isCompilableOperatorUsingNumerics() {
+<span class="fc" id="L93">		SpelNodeImpl left = getLeftOperand();</span>
+<span class="fc" id="L94">		SpelNodeImpl right = getRightOperand();</span>
+<span class="pc bpc" id="L95" title="2 of 4 branches missed.">		if (!left.isCompilable() || !right.isCompilable()) {</span>
+<span class="nc" id="L96">			return false;</span>
+		}
+
+		// Supported operand types for equals (at the moment)
+<span class="fc" id="L100">		String leftDesc = left.exitTypeDescriptor;</span>
+<span class="fc" id="L101">		String rightDesc = right.exitTypeDescriptor;</span>
+<span class="fc" id="L102">		DescriptorComparison dc = DescriptorComparison.checkNumericCompatibility(</span>
+				leftDesc, rightDesc, this.leftActualDescriptor, this.rightActualDescriptor);
+<span class="pc bpc" id="L104" title="1 of 4 branches missed.">		return (dc.areNumbers &amp;&amp; dc.areCompatible);</span>
+	}
+
+	/**
+	 * Numeric comparison operators share very similar generated code, only differing in
+	 * two comparison instructions.
+	 */
+	protected void generateComparisonCode(MethodVisitor mv, CodeFlow cf, int compInstruction1, int compInstruction2) {
+<span class="fc" id="L112">		SpelNodeImpl left = getLeftOperand();</span>
+<span class="fc" id="L113">		SpelNodeImpl right = getRightOperand();</span>
+<span class="fc" id="L114">		String leftDesc = left.exitTypeDescriptor;</span>
+<span class="fc" id="L115">		String rightDesc = right.exitTypeDescriptor;</span>
+
+<span class="fc bfc" id="L117" title="All 2 branches covered.">		boolean unboxLeft = !CodeFlow.isPrimitive(leftDesc);</span>
+<span class="fc bfc" id="L118" title="All 2 branches covered.">		boolean unboxRight = !CodeFlow.isPrimitive(rightDesc);</span>
+<span class="fc" id="L119">		DescriptorComparison dc = DescriptorComparison.checkNumericCompatibility(</span>
+				leftDesc, rightDesc, this.leftActualDescriptor, this.rightActualDescriptor);
+<span class="fc" id="L121">		char targetType = dc.compatibleType;  // CodeFlow.toPrimitiveTargetDesc(leftDesc);</span>
+
+<span class="fc" id="L123">		cf.enterCompilationScope();</span>
+<span class="fc" id="L124">		left.generateCode(mv, cf);</span>
+<span class="fc" id="L125">		cf.exitCompilationScope();</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">		if (unboxLeft) {</span>
+<span class="fc" id="L127">			CodeFlow.insertUnboxInsns(mv, targetType, leftDesc);</span>
+		}
+
+<span class="fc" id="L130">		cf.enterCompilationScope();</span>
+<span class="fc" id="L131">		right.generateCode(mv, cf);</span>
+<span class="fc" id="L132">		cf.exitCompilationScope();</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">		if (unboxRight) {</span>
+<span class="fc" id="L134">			CodeFlow.insertUnboxInsns(mv, targetType, rightDesc);</span>
+		}
+
+		// assert: SpelCompiler.boxingCompatible(leftDesc, rightDesc)
+<span class="fc" id="L138">		Label elseTarget = new Label();</span>
+<span class="fc" id="L139">		Label endOfIf = new Label();</span>
+<span class="fc bfc" id="L140" title="All 2 branches covered.">		if (targetType == 'D') {</span>
+<span class="fc" id="L141">			mv.visitInsn(DCMPG);</span>
+<span class="fc" id="L142">			mv.visitJumpInsn(compInstruction1, elseTarget);</span>
+		}
+<span class="fc bfc" id="L144" title="All 2 branches covered.">		else if (targetType == 'F') {</span>
+<span class="fc" id="L145">			mv.visitInsn(FCMPG);</span>
+<span class="fc" id="L146">			mv.visitJumpInsn(compInstruction1, elseTarget);</span>
+		}
+<span class="fc bfc" id="L148" title="All 2 branches covered.">		else if (targetType == 'J') {</span>
+<span class="fc" id="L149">			mv.visitInsn(LCMP);</span>
+<span class="fc" id="L150">			mv.visitJumpInsn(compInstruction1, elseTarget);</span>
+		}
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">		else if (targetType == 'I') {</span>
+<span class="fc" id="L153">			mv.visitJumpInsn(compInstruction2, elseTarget);</span>
+		}
+		else {
+<span class="nc" id="L156">			throw new IllegalStateException(&quot;Unexpected descriptor &quot; + leftDesc);</span>
+		}
+
+		// Other numbers are not yet supported (isCompilable will not have returned true)
+<span class="fc" id="L160">		mv.visitInsn(ICONST_1);</span>
+<span class="fc" id="L161">		mv.visitJumpInsn(GOTO,endOfIf);</span>
+<span class="fc" id="L162">		mv.visitLabel(elseTarget);</span>
+<span class="fc" id="L163">		mv.visitInsn(ICONST_0);</span>
+<span class="fc" id="L164">		mv.visitLabel(endOfIf);</span>
+<span class="fc" id="L165">		cf.pushDescriptor(&quot;Z&quot;);</span>
+<span class="fc" id="L166">	}</span>
+
+
+	/**
+	 * Perform an equality check for the given operand values.
+	 * &lt;p&gt;This method is not just used for reflective comparisons in subclasses
+	 * but also from compiled expression code, which is why it needs to be
+	 * declared as {@code public static} here.
+	 * @param context the current evaluation context
+	 * @param left the left-hand operand value
+	 * @param right the right-hand operand value
+	 */
+	public static boolean equalityCheck(EvaluationContext context, @Nullable Object left, @Nullable Object right) {
+<span class="fc bfc" id="L179" title="All 4 branches covered.">		if (left instanceof Number &amp;&amp; right instanceof Number) {</span>
+<span class="fc" id="L180">			Number leftNumber = (Number) left;</span>
+<span class="fc" id="L181">			Number rightNumber = (Number) right;</span>
+
+<span class="fc bfc" id="L183" title="All 4 branches covered.">			if (leftNumber instanceof BigDecimal || rightNumber instanceof BigDecimal) {</span>
+<span class="fc" id="L184">				BigDecimal leftBigDecimal = NumberUtils.convertNumberToTargetClass(leftNumber, BigDecimal.class);</span>
+<span class="fc" id="L185">				BigDecimal rightBigDecimal = NumberUtils.convertNumberToTargetClass(rightNumber, BigDecimal.class);</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">				return (leftBigDecimal.compareTo(rightBigDecimal) == 0);</span>
+			}
+<span class="fc bfc" id="L188" title="All 4 branches covered.">			else if (leftNumber instanceof Double || rightNumber instanceof Double) {</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">				return (leftNumber.doubleValue() == rightNumber.doubleValue());</span>
+			}
+<span class="pc bpc" id="L191" title="1 of 4 branches missed.">			else if (leftNumber instanceof Float || rightNumber instanceof Float) {</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">				return (leftNumber.floatValue() == rightNumber.floatValue());</span>
+			}
+<span class="pc bpc" id="L194" title="2 of 4 branches missed.">			else if (leftNumber instanceof BigInteger || rightNumber instanceof BigInteger) {</span>
+<span class="nc" id="L195">				BigInteger leftBigInteger = NumberUtils.convertNumberToTargetClass(leftNumber, BigInteger.class);</span>
+<span class="nc" id="L196">				BigInteger rightBigInteger = NumberUtils.convertNumberToTargetClass(rightNumber, BigInteger.class);</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">				return (leftBigInteger.compareTo(rightBigInteger) == 0);</span>
+			}
+<span class="pc bpc" id="L199" title="1 of 4 branches missed.">			else if (leftNumber instanceof Long || rightNumber instanceof Long) {</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">				return (leftNumber.longValue() == rightNumber.longValue());</span>
+			}
+<span class="pc bpc" id="L202" title="3 of 4 branches missed.">			else if (leftNumber instanceof Integer || rightNumber instanceof Integer) {</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">				return (leftNumber.intValue() == rightNumber.intValue());</span>
+			}
+<span class="nc bnc" id="L205" title="All 4 branches missed.">			else if (leftNumber instanceof Short || rightNumber instanceof Short) {</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">				return (leftNumber.shortValue() == rightNumber.shortValue());</span>
+			}
+<span class="nc bnc" id="L208" title="All 4 branches missed.">			else if (leftNumber instanceof Byte || rightNumber instanceof Byte) {</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">				return (leftNumber.byteValue() == rightNumber.byteValue());</span>
+			}
+			else {
+				// Unknown Number subtypes -&gt; best guess is double comparison
+<span class="nc bnc" id="L213" title="All 2 branches missed.">				return (leftNumber.doubleValue() == rightNumber.doubleValue());</span>
+			}
+		}
+
+<span class="fc bfc" id="L217" title="All 4 branches covered.">		if (left instanceof CharSequence &amp;&amp; right instanceof CharSequence) {</span>
+<span class="fc" id="L218">			return left.toString().equals(right.toString());</span>
+		}
+
+<span class="pc bpc" id="L221" title="1 of 4 branches missed.">		if (left instanceof Boolean &amp;&amp; right instanceof Boolean) {</span>
+<span class="fc" id="L222">			return left.equals(right);</span>
+		}
+
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		if (ObjectUtils.nullSafeEquals(left, right)) {</span>
+<span class="fc" id="L226">			return true;</span>
+		}
+
+<span class="fc bfc" id="L229" title="All 4 branches covered.">		if (left instanceof Comparable &amp;&amp; right instanceof Comparable) {</span>
+<span class="fc" id="L230">			Class&lt;?&gt; ancestor = ClassUtils.determineCommonAncestor(left.getClass(), right.getClass());</span>
+<span class="pc bpc" id="L231" title="1 of 4 branches missed.">			if (ancestor != null &amp;&amp; Comparable.class.isAssignableFrom(ancestor)) {</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">				return (context.getTypeComparator().compare(left, right) == 0);</span>
+			}
+		}
+
+<span class="fc" id="L236">		return false;</span>
+	}
+
+
+	/**
+	 * A descriptor comparison encapsulates the result of comparing descriptor
+	 * for two operands and describes at what level they are compatible.
+	 */
+	protected static final class DescriptorComparison {
+
+<span class="fc" id="L246">		static final DescriptorComparison NOT_NUMBERS = new DescriptorComparison(false, false, ' ');</span>
+
+<span class="fc" id="L248">		static final DescriptorComparison INCOMPATIBLE_NUMBERS = new DescriptorComparison(true, false, ' ');</span>
+
+		final boolean areNumbers;  // Were the two compared descriptor both for numbers?
+
+		final boolean areCompatible;  // If they were numbers, were they compatible?
+
+		final char compatibleType;  // When compatible, what is the descriptor of the common type
+
+<span class="fc" id="L256">		private DescriptorComparison(boolean areNumbers, boolean areCompatible, char compatibleType) {</span>
+<span class="fc" id="L257">			this.areNumbers = areNumbers;</span>
+<span class="fc" id="L258">			this.areCompatible = areCompatible;</span>
+<span class="fc" id="L259">			this.compatibleType = compatibleType;</span>
+<span class="fc" id="L260">		}</span>
+
+		/**
+		 * Return an object that indicates whether the input descriptors are compatible.
+		 * &lt;p&gt;A declared descriptor is what could statically be determined (e.g. from looking
+		 * at the return value of a property accessor method) whilst an actual descriptor
+		 * is the type of an actual object that was returned, which may differ.
+		 * &lt;p&gt;For generic types with unbound type variables, the declared descriptor
+		 * discovered may be 'Object' but from the actual descriptor it is possible to
+		 * observe that the objects are really numeric values (e.g. ints).
+		 * @param leftDeclaredDescriptor the statically determinable left descriptor
+		 * @param rightDeclaredDescriptor the statically determinable right descriptor
+		 * @param leftActualDescriptor the dynamic/runtime left object descriptor
+		 * @param rightActualDescriptor the dynamic/runtime right object descriptor
+		 * @return a DescriptorComparison object indicating the type of compatibility, if any
+		 */
+		public static DescriptorComparison checkNumericCompatibility(
+				@Nullable String leftDeclaredDescriptor, @Nullable String rightDeclaredDescriptor,
+				@Nullable String leftActualDescriptor, @Nullable String rightActualDescriptor) {
+
+<span class="fc" id="L280">			String ld = leftDeclaredDescriptor;</span>
+<span class="fc" id="L281">			String rd = rightDeclaredDescriptor;</span>
+
+<span class="fc" id="L283">			boolean leftNumeric = CodeFlow.isPrimitiveOrUnboxableSupportedNumberOrBoolean(ld);</span>
+<span class="fc" id="L284">			boolean rightNumeric = CodeFlow.isPrimitiveOrUnboxableSupportedNumberOrBoolean(rd);</span>
+
+			// If the declared descriptors aren't providing the information, try the actual descriptors
+<span class="fc bfc" id="L287" title="All 4 branches covered.">			if (!leftNumeric &amp;&amp; !ObjectUtils.nullSafeEquals(ld, leftActualDescriptor)) {</span>
+<span class="fc" id="L288">				ld = leftActualDescriptor;</span>
+<span class="fc" id="L289">				leftNumeric = CodeFlow.isPrimitiveOrUnboxableSupportedNumberOrBoolean(ld);</span>
+			}
+<span class="fc bfc" id="L291" title="All 4 branches covered.">			if (!rightNumeric &amp;&amp; !ObjectUtils.nullSafeEquals(rd, rightActualDescriptor)) {</span>
+<span class="fc" id="L292">				rd = rightActualDescriptor;</span>
+<span class="fc" id="L293">				rightNumeric = CodeFlow.isPrimitiveOrUnboxableSupportedNumberOrBoolean(rd);</span>
+			}
+
+<span class="fc bfc" id="L296" title="All 4 branches covered.">			if (leftNumeric &amp;&amp; rightNumeric) {</span>
+<span class="fc bfc" id="L297" title="All 2 branches covered.">				if (CodeFlow.areBoxingCompatible(ld, rd)) {</span>
+<span class="fc" id="L298">					return new DescriptorComparison(true, true, CodeFlow.toPrimitiveTargetDesc(ld));</span>
+				}
+				else {
+<span class="fc" id="L301">					return DescriptorComparison.INCOMPATIBLE_NUMBERS;</span>
+				}
+			}
+			else {
+<span class="fc" id="L305">				return DescriptorComparison.NOT_NUMBERS;</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

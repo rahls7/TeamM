@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceHttpMessageWriter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec</a> &gt; <span class="el_source">ResourceHttpMessageWriter.java</span></div><h1>ResourceHttpMessageWriter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import org.apache.commons.logging.Log;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.Hints;
+import org.springframework.core.codec.ResourceDecoder;
+import org.springframework.core.codec.ResourceEncoder;
+import org.springframework.core.codec.ResourceRegionEncoder;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.support.ResourceRegion;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpLogging;
+import org.springframework.http.HttpRange;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.MediaTypeFactory;
+import org.springframework.http.ReactiveHttpOutputMessage;
+import org.springframework.http.ZeroCopyHttpOutputMessage;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.MimeTypeUtils;
+
+/**
+ * {@code HttpMessageWriter} that can write a {@link Resource}.
+ *
+ * &lt;p&gt;Also an implementation of {@code HttpMessageWriter} with support
+ * for writing one or more {@link ResourceRegion}'s based on the HTTP ranges
+ * specified in the request.
+ *
+ * &lt;p&gt;For reading to a Resource, use {@link ResourceDecoder} wrapped with
+ * {@link DecoderHttpMessageReader}.
+ *
+ * @author Arjen Poutsma
+ * @author Brian Clozel
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @see ResourceEncoder
+ * @see ResourceRegionEncoder
+ * @see HttpRange
+ */
+public class ResourceHttpMessageWriter implements HttpMessageWriter&lt;Resource&gt; {
+
+<span class="fc" id="L73">	private static final ResolvableType REGION_TYPE = ResolvableType.forClass(ResourceRegion.class);</span>
+
+<span class="fc" id="L75">	private static final Log logger = HttpLogging.forLogName(ResourceHttpMessageWriter.class);</span>
+
+
+	private final ResourceEncoder encoder;
+
+	private final ResourceRegionEncoder regionEncoder;
+
+	private final List&lt;MediaType&gt; mediaTypes;
+
+
+	public ResourceHttpMessageWriter() {
+<span class="fc" id="L86">		this(ResourceEncoder.DEFAULT_BUFFER_SIZE);</span>
+<span class="fc" id="L87">	}</span>
+
+<span class="fc" id="L89">	public ResourceHttpMessageWriter(int bufferSize) {</span>
+<span class="fc" id="L90">		this.encoder = new ResourceEncoder(bufferSize);</span>
+<span class="fc" id="L91">		this.regionEncoder = new ResourceRegionEncoder(bufferSize);</span>
+<span class="fc" id="L92">		this.mediaTypes = MediaType.asMediaTypes(this.encoder.getEncodableMimeTypes());</span>
+<span class="fc" id="L93">	}</span>
+
+
+	@Override
+	public boolean canWrite(ResolvableType elementType, @Nullable MediaType mediaType) {
+<span class="fc" id="L98">		return this.encoder.canEncode(elementType, mediaType);</span>
+	}
+
+	@Override
+	public List&lt;MediaType&gt; getWritableMediaTypes() {
+<span class="fc" id="L103">		return this.mediaTypes;</span>
+	}
+
+
+	// Client or server: single Resource...
+
+	@Override
+	public Mono&lt;Void&gt; write(Publisher&lt;? extends Resource&gt; inputStream, ResolvableType elementType,
+			@Nullable MediaType mediaType, ReactiveHttpOutputMessage message, Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L113">		return Mono.from(inputStream).flatMap(resource -&gt;</span>
+<span class="fc" id="L114">				writeResource(resource, elementType, mediaType, message, hints));</span>
+	}
+
+	private Mono&lt;Void&gt; writeResource(Resource resource, ResolvableType type, @Nullable MediaType mediaType,
+			ReactiveHttpOutputMessage message, Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L120">		HttpHeaders headers = message.getHeaders();</span>
+<span class="fc" id="L121">		MediaType resourceMediaType = getResourceMediaType(mediaType, resource, hints);</span>
+<span class="fc" id="L122">		headers.setContentType(resourceMediaType);</span>
+
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">		if (headers.getContentLength() &lt; 0) {</span>
+<span class="fc" id="L125">			long length = lengthOf(resource);</span>
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">			if (length != -1) {</span>
+<span class="fc" id="L127">				headers.setContentLength(length);</span>
+			}
+		}
+
+<span class="fc" id="L131">		return zeroCopy(resource, null, message, hints)</span>
+<span class="fc" id="L132">				.orElseGet(() -&gt; {</span>
+<span class="fc" id="L133">					Mono&lt;Resource&gt; input = Mono.just(resource);</span>
+<span class="fc" id="L134">					DataBufferFactory factory = message.bufferFactory();</span>
+<span class="fc" id="L135">					Flux&lt;DataBuffer&gt; body = this.encoder.encode(input, factory, type, resourceMediaType, hints);</span>
+<span class="fc" id="L136">					return message.writeWith(body);</span>
+				});
+	}
+
+	private static MediaType getResourceMediaType(
+			@Nullable MediaType mediaType, Resource resource, Map&lt;String, Object&gt; hints) {
+
+<span class="pc bpc" id="L143" title="2 of 6 branches missed.">		if (mediaType != null &amp;&amp; mediaType.isConcrete() &amp;&amp; !mediaType.equals(MediaType.APPLICATION_OCTET_STREAM)) {</span>
+<span class="fc" id="L144">			return mediaType;</span>
+		}
+<span class="fc" id="L146">		mediaType = MediaTypeFactory.getMediaType(resource).orElse(MediaType.APPLICATION_OCTET_STREAM);</span>
+<span class="pc bpc" id="L147" title="2 of 4 branches missed.">		if (logger.isDebugEnabled() &amp;&amp; !Hints.isLoggingSuppressed(hints)) {</span>
+<span class="nc" id="L148">			logger.debug(Hints.getLogPrefix(hints) + &quot;Resource associated with '&quot; + mediaType + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L150">		return mediaType;</span>
+	}
+
+	private static long lengthOf(Resource resource) {
+		// Don't consume InputStream...
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">		if (InputStreamResource.class != resource.getClass()) {</span>
+			try {
+<span class="fc" id="L157">				return resource.contentLength();</span>
+			}
+<span class="nc" id="L159">			catch (IOException ignored) {</span>
+			}
+		}
+<span class="nc" id="L162">		return -1;</span>
+	}
+
+	private static Optional&lt;Mono&lt;Void&gt;&gt; zeroCopy(Resource resource, @Nullable ResourceRegion region,
+			ReactiveHttpOutputMessage message, Map&lt;String, Object&gt; hints) {
+
+<span class="pc bpc" id="L168" title="3 of 4 branches missed.">		if (message instanceof ZeroCopyHttpOutputMessage &amp;&amp; resource.isFile()) {</span>
+			try {
+<span class="nc" id="L170">				File file = resource.getFile();</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">				long pos = region != null ? region.getPosition() : 0;</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">				long count = region != null ? region.getCount() : file.length();</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">					String formatted = region != null ? &quot;region &quot; + pos + &quot;-&quot; + (count) + &quot; of &quot; : &quot;&quot;;</span>
+<span class="nc" id="L175">					logger.debug(Hints.getLogPrefix(hints) + &quot;Zero-copy &quot; + formatted + &quot;[&quot; + resource + &quot;]&quot;);</span>
+				}
+<span class="nc" id="L177">				return Optional.of(((ZeroCopyHttpOutputMessage) message).writeWith(file, pos, count));</span>
+			}
+<span class="nc" id="L179">			catch (IOException ex) {</span>
+				// should not happen
+			}
+		}
+<span class="fc" id="L183">		return Optional.empty();</span>
+	}
+
+
+	// Server-side only: single Resource or sub-regions...
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public Mono&lt;Void&gt; write(Publisher&lt;? extends Resource&gt; inputStream, @Nullable ResolvableType actualType,
+			ResolvableType elementType, @Nullable MediaType mediaType, ServerHttpRequest request,
+			ServerHttpResponse response, Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L195">		HttpHeaders headers = response.getHeaders();</span>
+<span class="fc" id="L196">		headers.set(HttpHeaders.ACCEPT_RANGES, &quot;bytes&quot;);</span>
+
+		List&lt;HttpRange&gt; ranges;
+		try {
+<span class="fc" id="L200">			ranges = request.getHeaders().getRange();</span>
+		}
+<span class="fc" id="L202">		catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L203">			response.setStatusCode(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE);</span>
+<span class="fc" id="L204">			return response.setComplete();</span>
+<span class="fc" id="L205">		}</span>
+
+<span class="fc" id="L207">		return Mono.from(inputStream).flatMap(resource -&gt; {</span>
+
+<span class="fc bfc" id="L209" title="All 2 branches covered.">			if (ranges.isEmpty()) {</span>
+<span class="fc" id="L210">				return writeResource(resource, elementType, mediaType, response, hints);</span>
+			}
+
+<span class="fc" id="L213">			response.setStatusCode(HttpStatus.PARTIAL_CONTENT);</span>
+<span class="fc" id="L214">			List&lt;ResourceRegion&gt; regions = HttpRange.toResourceRegions(ranges, resource);</span>
+<span class="fc" id="L215">			MediaType resourceMediaType = getResourceMediaType(mediaType, resource, hints);</span>
+
+<span class="fc bfc" id="L217" title="All 2 branches covered.">			if (regions.size() == 1){</span>
+<span class="fc" id="L218">				ResourceRegion region = regions.get(0);</span>
+<span class="fc" id="L219">				headers.setContentType(resourceMediaType);</span>
+<span class="fc" id="L220">				long contentLength = lengthOf(resource);</span>
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">				if (contentLength != -1) {</span>
+<span class="fc" id="L222">					long start = region.getPosition();</span>
+<span class="fc" id="L223">					long end = start + region.getCount() - 1;</span>
+<span class="fc" id="L224">					end = Math.min(end, contentLength - 1);</span>
+<span class="fc" id="L225">					headers.add(&quot;Content-Range&quot;, &quot;bytes &quot; + start + '-' + end + '/' + contentLength);</span>
+<span class="fc" id="L226">					headers.setContentLength(end - start + 1);</span>
+				}
+<span class="fc" id="L228">				return writeSingleRegion(region, response, hints);</span>
+			}
+			else {
+<span class="fc" id="L231">				String boundary = MimeTypeUtils.generateMultipartBoundaryString();</span>
+<span class="fc" id="L232">				MediaType multipartType = MediaType.parseMediaType(&quot;multipart/byteranges;boundary=&quot; + boundary);</span>
+<span class="fc" id="L233">				headers.setContentType(multipartType);</span>
+<span class="fc" id="L234">				Map&lt;String, Object&gt; allHints = Hints.merge(hints, ResourceRegionEncoder.BOUNDARY_STRING_HINT, boundary);</span>
+<span class="fc" id="L235">				return encodeAndWriteRegions(Flux.fromIterable(regions), resourceMediaType, response, allHints);</span>
+			}
+		});
+	}
+
+	private Mono&lt;Void&gt; writeSingleRegion(ResourceRegion region, ReactiveHttpOutputMessage message,
+			Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L243">		return zeroCopy(region.getResource(), region, message, hints)</span>
+<span class="fc" id="L244">				.orElseGet(() -&gt; {</span>
+<span class="fc" id="L245">					Publisher&lt;? extends ResourceRegion&gt; input = Mono.just(region);</span>
+<span class="fc" id="L246">					MediaType mediaType = message.getHeaders().getContentType();</span>
+<span class="fc" id="L247">					return encodeAndWriteRegions(input, mediaType, message, hints);</span>
+				});
+	}
+
+	private Mono&lt;Void&gt; encodeAndWriteRegions(Publisher&lt;? extends ResourceRegion&gt; publisher,
+			@Nullable MediaType mediaType, ReactiveHttpOutputMessage message, Map&lt;String, Object&gt; hints) {
+
+<span class="fc" id="L254">		Flux&lt;DataBuffer&gt; body = this.regionEncoder.encode(</span>
+<span class="fc" id="L255">				publisher, message.bufferFactory(), REGION_TYPE, mediaType, hints);</span>
+
+<span class="fc" id="L257">		return message.writeWith(body);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

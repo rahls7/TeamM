@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CssLinkResourceTransformer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.resource</a> &gt; <span class="el_source">CssLinkResourceTransformer.java</span></div><h1>CssLinkResourceTransformer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.resource;
+
+import java.io.StringWriter;
+import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.util.StreamUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * A {@link ResourceTransformer} implementation that modifies links in a CSS
+ * file to match the public URL paths that should be exposed to clients (e.g.
+ * with an MD5 content-based hash inserted in the URL).
+ *
+ * &lt;p&gt;The implementation looks for links in CSS {@code @import} statements and
+ * also inside CSS {@code url()} functions. All links are then passed through the
+ * {@link ResourceResolverChain} and resolved relative to the location of the
+ * containing CSS file. If successfully resolved, the link is modified, otherwise
+ * the original link is preserved.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+public class CssLinkResourceTransformer extends ResourceTransformerSupport {
+
+<span class="fc" id="L59">	private static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;</span>
+
+<span class="fc" id="L61">	private static final Log logger = LogFactory.getLog(CssLinkResourceTransformer.class);</span>
+
+<span class="fc" id="L63">	private final List&lt;LinkParser&gt; linkParsers = new ArrayList&lt;&gt;(2);</span>
+
+
+<span class="fc" id="L66">	public CssLinkResourceTransformer() {</span>
+<span class="fc" id="L67">		this.linkParsers.add(new ImportLinkParser());</span>
+<span class="fc" id="L68">		this.linkParsers.add(new UrlFunctionLinkParser());</span>
+<span class="fc" id="L69">	}</span>
+
+
+	@SuppressWarnings(&quot;deprecation&quot;)
+	@Override
+	public Mono&lt;Resource&gt; transform(ServerWebExchange exchange, Resource inputResource,
+			ResourceTransformerChain transformerChain) {
+
+<span class="fc" id="L77">		return transformerChain.transform(exchange, inputResource)</span>
+<span class="fc" id="L78">				.flatMap(outputResource -&gt; {</span>
+<span class="fc" id="L79">					String filename = outputResource.getFilename();</span>
+<span class="pc bpc" id="L80" title="1 of 6 branches missed.">					if (!&quot;css&quot;.equals(StringUtils.getFilenameExtension(filename)) ||</span>
+							inputResource instanceof EncodedResourceResolver.EncodedResource ||
+							inputResource instanceof GzipResourceResolver.GzippedResource) {
+<span class="fc" id="L83">						return Mono.just(outputResource);</span>
+					}
+
+<span class="fc" id="L86">					DataBufferFactory bufferFactory = exchange.getResponse().bufferFactory();</span>
+<span class="fc" id="L87">					Flux&lt;DataBuffer&gt; flux = DataBufferUtils</span>
+<span class="fc" id="L88">							.read(outputResource, bufferFactory, StreamUtils.BUFFER_SIZE);</span>
+<span class="fc" id="L89">					return DataBufferUtils.join(flux)</span>
+<span class="fc" id="L90">							.flatMap(dataBuffer -&gt; {</span>
+<span class="fc" id="L91">								CharBuffer charBuffer = DEFAULT_CHARSET.decode(dataBuffer.asByteBuffer());</span>
+<span class="fc" id="L92">								DataBufferUtils.release(dataBuffer);</span>
+<span class="fc" id="L93">								String cssContent = charBuffer.toString();</span>
+<span class="fc" id="L94">								return transformContent(cssContent, outputResource, transformerChain, exchange);</span>
+							});
+				});
+	}
+
+	private Mono&lt;? extends Resource&gt; transformContent(String cssContent, Resource resource,
+			ResourceTransformerChain chain, ServerWebExchange exchange) {
+
+<span class="fc" id="L102">		List&lt;ContentChunkInfo&gt; contentChunkInfos = parseContent(cssContent);</span>
+<span class="fc bfc" id="L103" title="All 2 branches covered.">		if (contentChunkInfos.isEmpty()) {</span>
+<span class="fc" id="L104">			return Mono.just(resource);</span>
+		}
+
+<span class="fc" id="L107">		return Flux.fromIterable(contentChunkInfos)</span>
+<span class="fc" id="L108">				.concatMap(contentChunkInfo -&gt; {</span>
+<span class="fc" id="L109">					String contentChunk = contentChunkInfo.getContent(cssContent);</span>
+<span class="fc bfc" id="L110" title="All 4 branches covered.">					if (contentChunkInfo.isLink() &amp;&amp; !hasScheme(contentChunk)) {</span>
+<span class="fc" id="L111">						String link = toAbsolutePath(contentChunk, exchange);</span>
+<span class="fc" id="L112">						return resolveUrlPath(link, exchange, resource, chain).defaultIfEmpty(contentChunk);</span>
+					}
+					else {
+<span class="fc" id="L115">						return Mono.just(contentChunk);</span>
+					}
+				})
+<span class="fc" id="L118">				.reduce(new StringWriter(), (writer, chunk) -&gt; {</span>
+<span class="fc" id="L119">					writer.write(chunk);</span>
+<span class="fc" id="L120">					return writer;</span>
+				})
+<span class="fc" id="L122">				.map(writer -&gt; {</span>
+<span class="fc" id="L123">					byte[] newContent = writer.toString().getBytes(DEFAULT_CHARSET);</span>
+<span class="fc" id="L124">					return new TransformedResource(resource, newContent);</span>
+				});
+	}
+
+	private List&lt;ContentChunkInfo&gt; parseContent(String cssContent) {
+<span class="fc" id="L129">		SortedSet&lt;ContentChunkInfo&gt; links = new TreeSet&lt;&gt;();</span>
+<span class="fc" id="L130">		this.linkParsers.forEach(parser -&gt; parser.parse(cssContent, links));</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">		if (links.isEmpty()) {</span>
+<span class="fc" id="L132">			return Collections.emptyList();</span>
+		}
+<span class="fc" id="L134">		int index = 0;</span>
+<span class="fc" id="L135">		List&lt;ContentChunkInfo&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">		for (ContentChunkInfo link : links) {</span>
+<span class="fc" id="L137">			result.add(new ContentChunkInfo(index, link.getStart(), false));</span>
+<span class="fc" id="L138">			result.add(link);</span>
+<span class="fc" id="L139">			index = link.getEnd();</span>
+<span class="fc" id="L140">		}</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">		if (index &lt; cssContent.length()) {</span>
+<span class="fc" id="L142">			result.add(new ContentChunkInfo(index, cssContent.length(), false));</span>
+		}
+<span class="fc" id="L144">		return result;</span>
+	}
+
+	private boolean hasScheme(String link) {
+<span class="fc" id="L148">		int schemeIndex = link.indexOf(':');</span>
+<span class="pc bpc" id="L149" title="1 of 6 branches missed.">		return (schemeIndex &gt; 0 &amp;&amp; !link.substring(0, schemeIndex).contains(&quot;/&quot;)) || link.indexOf(&quot;//&quot;) == 0;</span>
+	}
+
+
+	/**
+	 * Extract content chunks that represent links.
+	 */
+	@FunctionalInterface
+	protected interface LinkParser {
+
+		void parse(String cssContent, SortedSet&lt;ContentChunkInfo&gt; result);
+
+	}
+
+
+	/**
+	 * Abstract base class for {@link LinkParser} implementations.
+	 */
+<span class="fc" id="L167">	protected abstract static class AbstractLinkParser implements LinkParser {</span>
+
+		/** Return the keyword to use to search for links, e.g. &quot;@import&quot;, &quot;url(&quot; */
+		protected abstract String getKeyword();
+
+		@Override
+		public void parse(String content, SortedSet&lt;ContentChunkInfo&gt; result) {
+<span class="fc" id="L174">			int position = 0;</span>
+			while (true) {
+<span class="fc" id="L176">				position = content.indexOf(getKeyword(), position);</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">				if (position == -1) {</span>
+<span class="fc" id="L178">					return;</span>
+				}
+<span class="fc" id="L180">				position += getKeyword().length();</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">				while (Character.isWhitespace(content.charAt(position))) {</span>
+<span class="fc" id="L182">					position++;</span>
+				}
+<span class="fc bfc" id="L184" title="All 2 branches covered.">				if (content.charAt(position) == '\'') {</span>
+<span class="fc" id="L185">					position = extractLink(position, '\'', content, result);</span>
+				}
+<span class="fc bfc" id="L187" title="All 2 branches covered.">				else if (content.charAt(position) == '&quot;') {</span>
+<span class="fc" id="L188">					position = extractLink(position, '&quot;', content, result);</span>
+				}
+				else {
+<span class="fc" id="L191">					position = extractUnquotedLink(position, content, result);</span>
+
+				}
+			}
+		}
+
+		protected int extractLink(int index, char endChar, String content, Set&lt;ContentChunkInfo&gt; result) {
+<span class="fc" id="L198">			int start = index + 1;</span>
+<span class="fc" id="L199">			int end = content.indexOf(endChar, start);</span>
+<span class="fc" id="L200">			result.add(new ContentChunkInfo(start, end, true));</span>
+<span class="fc" id="L201">			return end + 1;</span>
+		}
+
+		/**
+		 * Invoked after a keyword match, after whitespaces removed, and when
+		 * the next char is neither a single nor double quote.
+		 */
+		protected abstract int extractUnquotedLink(int position, String content,
+				Set&lt;ContentChunkInfo&gt; linksToAdd);
+
+	}
+
+
+	private static class ImportLinkParser extends AbstractLinkParser {
+
+		@Override
+		protected String getKeyword() {
+<span class="fc" id="L218">			return &quot;@import&quot;;</span>
+		}
+
+		@Override
+		protected int extractUnquotedLink(int position, String content, Set&lt;ContentChunkInfo&gt; result) {
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">			if (content.substring(position, position + 4).equals(&quot;url(&quot;)) {</span>
+				// Ignore, UrlFunctionContentParser will take care
+			}
+<span class="nc bnc" id="L226" title="All 2 branches missed.">			else if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L227">				logger.trace(&quot;Unexpected syntax for @import link at index &quot; + position);</span>
+			}
+<span class="fc" id="L229">			return position;</span>
+		}
+	}
+
+
+	private static class UrlFunctionLinkParser extends AbstractLinkParser {
+
+		@Override
+		protected String getKeyword() {
+<span class="fc" id="L238">			return &quot;url(&quot;;</span>
+		}
+
+		@Override
+		protected int extractUnquotedLink(int position, String content, Set&lt;ContentChunkInfo&gt; result) {
+			// A url() function without unquoted
+<span class="fc" id="L244">			return extractLink(position - 1, ')', content, result);</span>
+		}
+	}
+
+
+	private static class ContentChunkInfo implements Comparable&lt;ContentChunkInfo&gt; {
+
+		private final int start;
+
+		private final int end;
+
+		private final boolean isLink;
+
+
+<span class="fc" id="L258">		ContentChunkInfo(int start, int end, boolean isLink) {</span>
+<span class="fc" id="L259">			this.start = start;</span>
+<span class="fc" id="L260">			this.end = end;</span>
+<span class="fc" id="L261">			this.isLink = isLink;</span>
+<span class="fc" id="L262">		}</span>
+
+
+		public int getStart() {
+<span class="fc" id="L266">			return this.start;</span>
+		}
+
+		public int getEnd() {
+<span class="fc" id="L270">			return this.end;</span>
+		}
+
+		public boolean isLink() {
+<span class="fc" id="L274">			return this.isLink;</span>
+		}
+
+		public String getContent(String fullContent) {
+<span class="fc" id="L278">			return fullContent.substring(this.start, this.end);</span>
+		}
+
+		@Override
+		public int compareTo(ContentChunkInfo other) {
+<span class="fc" id="L283">			return Integer.compare(this.start, other.start);</span>
+		}
+
+		@Override
+		public boolean equals(Object other) {
+<span class="nc bnc" id="L288" title="All 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L289">				return true;</span>
+			}
+<span class="nc bnc" id="L291" title="All 2 branches missed.">			if (!(other instanceof ContentChunkInfo)) {</span>
+<span class="nc" id="L292">				return false;</span>
+			}
+<span class="nc" id="L294">			ContentChunkInfo otherCci = (ContentChunkInfo) other;</span>
+<span class="nc bnc" id="L295" title="All 4 branches missed.">			return (this.start == otherCci.start &amp;&amp; this.end == otherCci.end);</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L300">			return this.start * 31 + this.end;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

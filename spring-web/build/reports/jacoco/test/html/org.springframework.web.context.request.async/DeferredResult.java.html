@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DeferredResult.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.context.request.async</a> &gt; <span class="el_source">DeferredResult.java</span></div><h1>DeferredResult.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.context.request.async;
+
+import java.util.PriorityQueue;
+import java.util.concurrent.Callable;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.web.context.request.NativeWebRequest;
+
+/**
+ * {@code DeferredResult} provides an alternative to using a {@link Callable} for
+ * asynchronous request processing. While a {@code Callable} is executed concurrently
+ * on behalf of the application, with a {@code DeferredResult} the application can
+ * produce the result from a thread of its choice.
+ *
+ * &lt;p&gt;Subclasses can extend this class to easily associate additional data or behavior
+ * with the {@link DeferredResult}. For example, one might want to associate the user
+ * used to create the {@link DeferredResult} by extending the class and adding an
+ * additional property for the user. In this way, the user could easily be accessed
+ * later without the need to use a data structure to do the mapping.
+ *
+ * &lt;p&gt;An example of associating additional behavior to this class might be realized
+ * by extending the class to implement an additional interface. For example, one
+ * might want to implement {@link Comparable} so that when the {@link DeferredResult}
+ * is added to a {@link PriorityQueue} it is handled in the correct order.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @author Rob Winch
+ * @since 3.2
+ * @param &lt;T&gt; the result type
+ */
+public class DeferredResult&lt;T&gt; {
+
+<span class="fc" id="L57">	private static final Object RESULT_NONE = new Object();</span>
+
+<span class="fc" id="L59">	private static final Log logger = LogFactory.getLog(DeferredResult.class);</span>
+
+
+	@Nullable
+	private final Long timeout;
+
+	private final Supplier&lt;?&gt; timeoutResult;
+
+	private Runnable timeoutCallback;
+
+	private Consumer&lt;Throwable&gt; errorCallback;
+
+	private Runnable completionCallback;
+
+	private DeferredResultHandler resultHandler;
+
+<span class="fc" id="L75">	private volatile Object result = RESULT_NONE;</span>
+
+<span class="fc" id="L77">	private volatile boolean expired = false;</span>
+
+
+	/**
+	 * Create a DeferredResult.
+	 */
+	public DeferredResult() {
+<span class="fc" id="L84">		this(null, () -&gt; RESULT_NONE);</span>
+<span class="fc" id="L85">	}</span>
+
+	/**
+	 * Create a DeferredResult with a custom timeout value.
+	 * &lt;p&gt;By default not set in which case the default configured in the MVC
+	 * Java Config or the MVC namespace is used, or if that's not set, then the
+	 * timeout depends on the default of the underlying server.
+	 * @param timeout timeout value in milliseconds
+	 */
+	public DeferredResult(Long timeout) {
+<span class="pc" id="L95">		this(timeout, () -&gt; RESULT_NONE);</span>
+<span class="fc" id="L96">	}</span>
+
+	/**
+	 * Create a DeferredResult with a timeout value and a default result to use
+	 * in case of timeout.
+	 * @param timeout timeout value in milliseconds (ignored if {@code null})
+	 * @param timeoutResult the result to use
+	 */
+<span class="fc" id="L104">	public DeferredResult(@Nullable Long timeout, final Object timeoutResult) {</span>
+<span class="fc" id="L105">		this.timeoutResult = () -&gt; timeoutResult;</span>
+<span class="fc" id="L106">		this.timeout = timeout;</span>
+<span class="fc" id="L107">	}</span>
+
+	/**
+	 * Variant of {@link #DeferredResult(Long, Object)} that accepts a dynamic
+	 * fallback value based on a {@link Supplier}.
+	 * @param timeout timeout value in milliseconds (ignored if {@code null})
+	 * @param timeoutResult the result supplier to use
+	 * @since 5.1.1
+	 */
+<span class="fc" id="L116">	public DeferredResult(@Nullable Long timeout, Supplier&lt;?&gt; timeoutResult) {</span>
+<span class="fc" id="L117">		this.timeoutResult = timeoutResult;</span>
+<span class="fc" id="L118">		this.timeout = timeout;</span>
+<span class="fc" id="L119">	}</span>
+
+	/**
+	 * Return {@code true} if this DeferredResult is no longer usable either
+	 * because it was previously set or because the underlying request expired.
+	 * &lt;p&gt;The result may have been set with a call to {@link #setResult(Object)},
+	 * or {@link #setErrorResult(Object)}, or as a result of a timeout, if a
+	 * timeout result was provided to the constructor. The request may also
+	 * expire due to a timeout or network error.
+	 */
+	public final boolean isSetOrExpired() {
+<span class="fc bfc" id="L130" title="All 4 branches covered.">		return (this.result != RESULT_NONE || this.expired);</span>
+	}
+
+	/**
+	 * Return {@code true} if the DeferredResult has been set.
+	 * @since 4.0
+	 */
+	public boolean hasResult() {
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">		return (this.result != RESULT_NONE);</span>
+	}
+
+	/**
+	 * Return the result, or {@code null} if the result wasn't set. Since the result
+	 * can also be {@code null}, it is recommended to use {@link #hasResult()} first
+	 * to check if there is a result prior to calling this method.
+	 * @since 4.0
+	 */
+	@Nullable
+	public Object getResult() {
+<span class="fc" id="L149">		Object resultToCheck = this.result;</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">		return (resultToCheck != RESULT_NONE ? resultToCheck : null);</span>
+	}
+
+	/**
+	 * Return the configured timeout value in milliseconds.
+	 */
+	@Nullable
+	final Long getTimeoutValue() {
+<span class="fc" id="L158">		return this.timeout;</span>
+	}
+
+	/**
+	 * Register code to invoke when the async request times out.
+	 * &lt;p&gt;This method is called from a container thread when an async request
+	 * times out before the {@code DeferredResult} has been populated.
+	 * It may invoke {@link DeferredResult#setResult setResult} or
+	 * {@link DeferredResult#setErrorResult setErrorResult} to resume processing.
+	 */
+	public void onTimeout(Runnable callback) {
+<span class="fc" id="L169">		this.timeoutCallback = callback;</span>
+<span class="fc" id="L170">	}</span>
+
+	/**
+	 * Register code to invoke when an error occurred during the async request.
+	 * &lt;p&gt;This method is called from a container thread when an error occurs
+	 * while processing an async request before the {@code DeferredResult} has
+	 * been populated. It may invoke {@link DeferredResult#setResult setResult}
+	 * or {@link DeferredResult#setErrorResult setErrorResult} to resume
+	 * processing.
+	 * @since 5.0
+	 */
+	public void onError(Consumer&lt;Throwable&gt; callback) {
+<span class="fc" id="L182">		this.errorCallback = callback;</span>
+<span class="fc" id="L183">	}</span>
+
+	/**
+	 * Register code to invoke when the async request completes.
+	 * &lt;p&gt;This method is called from a container thread when an async request
+	 * completed for any reason including timeout and network error. This is useful
+	 * for detecting that a {@code DeferredResult} instance is no longer usable.
+	 */
+	public void onCompletion(Runnable callback) {
+<span class="fc" id="L192">		this.completionCallback = callback;</span>
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * Provide a handler to use to handle the result value.
+	 * @param resultHandler the handler
+	 * @see DeferredResultProcessingInterceptor
+	 */
+	public final void setResultHandler(DeferredResultHandler resultHandler) {
+<span class="fc" id="L201">		Assert.notNull(resultHandler, &quot;DeferredResultHandler is required&quot;);</span>
+		// Immediate expiration check outside of the result lock
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">		if (this.expired) {</span>
+<span class="nc" id="L204">			return;</span>
+		}
+		Object resultToHandle;
+<span class="fc" id="L207">		synchronized (this) {</span>
+			// Got the lock in the meantime: double-check expiration status
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">			if (this.expired) {</span>
+<span class="nc" id="L210">				return;</span>
+			}
+<span class="fc" id="L212">			resultToHandle = this.result;</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">			if (resultToHandle == RESULT_NONE) {</span>
+				// No result yet: store handler for processing once it comes in
+<span class="fc" id="L215">				this.resultHandler = resultHandler;</span>
+<span class="fc" id="L216">				return;</span>
+			}
+<span class="nc" id="L218">		}</span>
+		// If we get here, we need to process an existing result object immediately.
+		// The decision is made within the result lock; just the handle call outside
+		// of it, avoiding any deadlock potential with Servlet container locks.
+		try {
+<span class="nc" id="L223">			resultHandler.handleResult(resultToHandle);</span>
+		}
+<span class="nc" id="L225">		catch (Throwable ex) {</span>
+<span class="nc" id="L226">			logger.debug(&quot;Failed to process async result&quot;, ex);</span>
+<span class="nc" id="L227">		}</span>
+<span class="nc" id="L228">	}</span>
+
+	/**
+	 * Set the value for the DeferredResult and handle it.
+	 * @param result the value to set
+	 * @return {@code true} if the result was set and passed on for handling;
+	 * {@code false} if the result was already set or the async request expired
+	 * @see #isSetOrExpired()
+	 */
+	public boolean setResult(T result) {
+<span class="fc" id="L238">		return setResultInternal(result);</span>
+	}
+
+	private boolean setResultInternal(Object result) {
+		// Immediate expiration check outside of the result lock
+<span class="fc bfc" id="L243" title="All 2 branches covered.">		if (isSetOrExpired()) {</span>
+<span class="fc" id="L244">			return false;</span>
+		}
+		DeferredResultHandler resultHandlerToUse;
+<span class="fc" id="L247">		synchronized (this) {</span>
+			// Got the lock in the meantime: double-check expiration status
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">			if (isSetOrExpired()) {</span>
+<span class="nc" id="L250">				return false;</span>
+			}
+			// At this point, we got a new result to process
+<span class="fc" id="L253">			this.result = result;</span>
+<span class="fc" id="L254">			resultHandlerToUse = this.resultHandler;</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">			if (resultHandlerToUse == null) {</span>
+				// No result handler set yet -&gt; let the setResultHandler implementation
+				// pick up the result object and invoke the result handler for it.
+<span class="fc" id="L258">				return true;</span>
+			}
+			// Result handler available -&gt; let's clear the stored reference since
+			// we don't need it anymore.
+<span class="fc" id="L262">			this.resultHandler = null;</span>
+<span class="fc" id="L263">		}</span>
+		// If we get here, we need to process an existing result object immediately.
+		// The decision is made within the result lock; just the handle call outside
+		// of it, avoiding any deadlock potential with Servlet container locks.
+<span class="fc" id="L267">		resultHandlerToUse.handleResult(result);</span>
+<span class="fc" id="L268">		return true;</span>
+	}
+
+	/**
+	 * Set an error value for the {@link DeferredResult} and handle it.
+	 * The value may be an {@link Exception} or {@link Throwable} in which case
+	 * it will be processed as if a handler raised the exception.
+	 * @param result the error result value
+	 * @return {@code true} if the result was set to the error value and passed on
+	 * for handling; {@code false} if the result was already set or the async
+	 * request expired
+	 * @see #isSetOrExpired()
+	 */
+	public boolean setErrorResult(Object result) {
+<span class="fc" id="L282">		return setResultInternal(result);</span>
+	}
+
+
+	final DeferredResultProcessingInterceptor getInterceptor() {
+<span class="fc" id="L287">		return new DeferredResultProcessingInterceptor() {</span>
+			@Override
+			public &lt;S&gt; boolean handleTimeout(NativeWebRequest request, DeferredResult&lt;S&gt; deferredResult) {
+<span class="fc" id="L290">				boolean continueProcessing = true;</span>
+				try {
+<span class="fc bfc" id="L292" title="All 2 branches covered.">					if (timeoutCallback != null) {</span>
+<span class="fc" id="L293">						timeoutCallback.run();</span>
+					}
+				}
+				finally {
+<span class="fc" id="L297">					Object value = timeoutResult.get();</span>
+<span class="fc bfc" id="L298" title="All 2 branches covered.">					if (value != RESULT_NONE) {</span>
+<span class="fc" id="L299">						continueProcessing = false;</span>
+						try {
+<span class="fc" id="L301">							setResultInternal(value);</span>
+						}
+<span class="nc" id="L303">						catch (Throwable ex) {</span>
+<span class="nc" id="L304">							logger.debug(&quot;Failed to handle timeout result&quot;, ex);</span>
+<span class="fc" id="L305">						}</span>
+					}
+				}
+<span class="fc" id="L308">				return continueProcessing;</span>
+			}
+			@Override
+			public &lt;S&gt; boolean handleError(NativeWebRequest request, DeferredResult&lt;S&gt; deferredResult, Throwable t) {
+				try {
+<span class="fc bfc" id="L313" title="All 2 branches covered.">					if (errorCallback != null) {</span>
+<span class="fc" id="L314">						errorCallback.accept(t);</span>
+					}
+				}
+				finally {
+					try {
+<span class="fc" id="L319">						setResultInternal(t);</span>
+					}
+<span class="nc" id="L321">					catch (Throwable ex) {</span>
+<span class="nc" id="L322">						logger.debug(&quot;Failed to handle error result&quot;, ex);</span>
+<span class="fc" id="L323">					}</span>
+				}
+<span class="fc" id="L325">				return false;</span>
+			}
+			@Override
+			public &lt;S&gt; void afterCompletion(NativeWebRequest request, DeferredResult&lt;S&gt; deferredResult) {
+<span class="fc" id="L329">				expired = true;</span>
+<span class="fc bfc" id="L330" title="All 2 branches covered.">				if (completionCallback != null) {</span>
+<span class="fc" id="L331">					completionCallback.run();</span>
+				}
+<span class="fc" id="L333">			}</span>
+		};
+	}
+
+
+	/**
+	 * Handles a DeferredResult value when set.
+	 */
+	@FunctionalInterface
+	public interface DeferredResultHandler {
+
+		void handleResult(Object result);
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

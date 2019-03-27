@@ -1,0 +1,289 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReflectiveMethodResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.support</a> &gt; <span class="el_source">ReflectiveMethodResolver.java</span></div><h1>ReflectiveMethodResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.support;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.AccessException;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.MethodExecutor;
+import org.springframework.expression.MethodFilter;
+import org.springframework.expression.MethodResolver;
+import org.springframework.expression.TypeConverter;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.lang.Nullable;
+
+/**
+ * Reflection-based {@link MethodResolver} used by default in {@link StandardEvaluationContext}
+ * unless explicit method resolvers have been specified.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Chris Beams
+ * @since 3.0
+ * @see StandardEvaluationContext#addMethodResolver(MethodResolver)
+ */
+public class ReflectiveMethodResolver implements MethodResolver {
+
+	// Using distance will ensure a more accurate match is discovered,
+	// more closely following the Java rules.
+	private final boolean useDistance;
+
+	@Nullable
+	private Map&lt;Class&lt;?&gt;, MethodFilter&gt; filters;
+
+
+<span class="fc" id="L64">	public ReflectiveMethodResolver() {</span>
+<span class="fc" id="L65">		this.useDistance = true;</span>
+<span class="fc" id="L66">	}</span>
+
+	/**
+	 * This constructor allows the ReflectiveMethodResolver to be configured such that it
+	 * will use a distance computation to check which is the better of two close matches
+	 * (when there are multiple matches). Using the distance computation is intended to
+	 * ensure matches are more closely representative of what a Java compiler would do
+	 * when taking into account boxing/unboxing and whether the method candidates are
+	 * declared to handle a supertype of the type (of the argument) being passed in.
+	 * @param useDistance {@code true} if distance computation should be used when
+	 * calculating matches; {@code false} otherwise
+	 */
+<span class="fc" id="L78">	public ReflectiveMethodResolver(boolean useDistance) {</span>
+<span class="fc" id="L79">		this.useDistance = useDistance;</span>
+<span class="fc" id="L80">	}</span>
+
+
+	/**
+	 * Register a filter for methods on the given type.
+	 * @param type the type to filter on
+	 * @param filter the corresponding method filter,
+	 * or {@code null} to clear any filter for the given type
+	 */
+	public void registerMethodFilter(Class&lt;?&gt; type, @Nullable MethodFilter filter) {
+<span class="fc bfc" id="L90" title="All 2 branches covered.">		if (this.filters == null) {</span>
+<span class="fc" id="L91">			this.filters = new HashMap&lt;&gt;();</span>
+		}
+<span class="fc bfc" id="L93" title="All 2 branches covered.">		if (filter != null) {</span>
+<span class="fc" id="L94">			this.filters.put(type, filter);</span>
+		}
+		else {
+<span class="fc" id="L97">			this.filters.remove(type);</span>
+		}
+<span class="fc" id="L99">	}</span>
+
+	/**
+	 * Locate a method on a type. There are three kinds of match that might occur:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;an exact match where the types of the arguments match the types of the constructor
+	 * &lt;li&gt;an in-exact match where the types we are looking for are subtypes of those defined on the constructor
+	 * &lt;li&gt;a match where we are able to convert the arguments into those expected by the constructor,
+	 * according to the registered type converter
+	 * &lt;/ol&gt;
+	 */
+	@Override
+	@Nullable
+	public MethodExecutor resolve(EvaluationContext context, Object targetObject, String name,
+			List&lt;TypeDescriptor&gt; argumentTypes) throws AccessException {
+
+		try {
+<span class="fc" id="L116">			TypeConverter typeConverter = context.getTypeConverter();</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">			Class&lt;?&gt; type = (targetObject instanceof Class ? (Class&lt;?&gt;) targetObject : targetObject.getClass());</span>
+<span class="fc" id="L118">			ArrayList&lt;Method&gt; methods = new ArrayList&lt;&gt;(getMethods(type, targetObject));</span>
+
+			// If a filter is registered for this type, call it
+<span class="fc bfc" id="L121" title="All 2 branches covered.">			MethodFilter filter = (this.filters != null ? this.filters.get(type) : null);</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">			if (filter != null) {</span>
+<span class="fc" id="L123">				List&lt;Method&gt; filtered = filter.filter(methods);</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">				methods = (filtered instanceof ArrayList ? (ArrayList&lt;Method&gt;) filtered : new ArrayList&lt;&gt;(filtered));</span>
+			}
+
+			// Sort methods into a sensible order
+<span class="fc bfc" id="L128" title="All 2 branches covered.">			if (methods.size() &gt; 1) {</span>
+<span class="fc" id="L129">				methods.sort((m1, m2) -&gt; {</span>
+<span class="fc" id="L130">					int m1pl = m1.getParameterCount();</span>
+<span class="fc" id="L131">					int m2pl = m2.getParameterCount();</span>
+					// vararg methods go last
+<span class="fc bfc" id="L133" title="All 2 branches covered.">					if (m1pl == m2pl) {</span>
+<span class="fc bfc" id="L134" title="All 4 branches covered.">						if (!m1.isVarArgs() &amp;&amp; m2.isVarArgs()) {</span>
+<span class="fc" id="L135">							return -1;</span>
+						}
+<span class="fc bfc" id="L137" title="All 4 branches covered.">						else if (m1.isVarArgs() &amp;&amp; !m2.isVarArgs()) {</span>
+<span class="fc" id="L138">							return 1;</span>
+						}
+						else {
+<span class="fc" id="L141">							return 0;</span>
+						}
+					}
+<span class="fc" id="L144">					return Integer.compare(m1pl, m2pl);</span>
+				});
+			}
+
+			// Resolve any bridge methods
+<span class="fc bfc" id="L149" title="All 2 branches covered.">			for (int i = 0; i &lt; methods.size(); i++) {</span>
+<span class="fc" id="L150">				methods.set(i, BridgeMethodResolver.findBridgedMethod(methods.get(i)));</span>
+			}
+
+			// Remove duplicate methods (possible due to resolved bridge methods)
+<span class="fc" id="L154">			Set&lt;Method&gt; methodsToIterate = new LinkedHashSet&lt;&gt;(methods);</span>
+
+<span class="fc" id="L156">			Method closeMatch = null;</span>
+<span class="fc" id="L157">			int closeMatchDistance = Integer.MAX_VALUE;</span>
+<span class="fc" id="L158">			Method matchRequiringConversion = null;</span>
+<span class="fc" id="L159">			boolean multipleOptions = false;</span>
+
+<span class="fc bfc" id="L161" title="All 2 branches covered.">			for (Method method : methodsToIterate) {</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">				if (method.getName().equals(name)) {</span>
+<span class="fc" id="L163">					Class&lt;?&gt;[] paramTypes = method.getParameterTypes();</span>
+<span class="fc" id="L164">					List&lt;TypeDescriptor&gt; paramDescriptors = new ArrayList&lt;&gt;(paramTypes.length);</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">					for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="fc" id="L166">						paramDescriptors.add(new TypeDescriptor(new MethodParameter(method, i)));</span>
+					}
+<span class="fc" id="L168">					ReflectionHelper.ArgumentsMatchInfo matchInfo = null;</span>
+<span class="pc bpc" id="L169" title="1 of 4 branches missed.">					if (method.isVarArgs() &amp;&amp; argumentTypes.size() &gt;= (paramTypes.length - 1)) {</span>
+						// *sigh* complicated
+<span class="fc" id="L171">						matchInfo = ReflectionHelper.compareArgumentsVarargs(paramDescriptors, argumentTypes, typeConverter);</span>
+					}
+<span class="fc bfc" id="L173" title="All 2 branches covered.">					else if (paramTypes.length == argumentTypes.size()) {</span>
+						// Name and parameter number match, check the arguments
+<span class="fc" id="L175">						matchInfo = ReflectionHelper.compareArguments(paramDescriptors, argumentTypes, typeConverter);</span>
+					}
+<span class="fc bfc" id="L177" title="All 2 branches covered.">					if (matchInfo != null) {</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">						if (matchInfo.isExactMatch()) {</span>
+<span class="fc" id="L179">							return new ReflectiveMethodExecutor(method);</span>
+						}
+<span class="fc bfc" id="L181" title="All 2 branches covered.">						else if (matchInfo.isCloseMatch()) {</span>
+<span class="pc bpc" id="L182" title="1 of 2 branches missed.">							if (this.useDistance) {</span>
+<span class="fc" id="L183">								int matchDistance = ReflectionHelper.getTypeDifferenceWeight(paramDescriptors, argumentTypes);</span>
+<span class="fc bfc" id="L184" title="All 4 branches covered.">								if (closeMatch == null || matchDistance &lt; closeMatchDistance) {</span>
+									// This is a better match...
+<span class="fc" id="L186">									closeMatch = method;</span>
+<span class="fc" id="L187">									closeMatchDistance = matchDistance;</span>
+								}
+<span class="fc" id="L189">							}</span>
+							else {
+								// Take this as a close match if there isn't one already
+<span class="nc bnc" id="L192" title="All 2 branches missed.">								if (closeMatch == null) {</span>
+<span class="nc" id="L193">									closeMatch = method;</span>
+								}
+							}
+						}
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">						else if (matchInfo.isMatchRequiringConversion()) {</span>
+<span class="fc bfc" id="L198" title="All 2 branches covered.">							if (matchRequiringConversion != null) {</span>
+<span class="fc" id="L199">								multipleOptions = true;</span>
+							}
+<span class="fc" id="L201">							matchRequiringConversion = method;</span>
+						}
+					}
+				}
+<span class="fc" id="L205">			}</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">			if (closeMatch != null) {</span>
+<span class="fc" id="L207">				return new ReflectiveMethodExecutor(closeMatch);</span>
+			}
+<span class="fc bfc" id="L209" title="All 2 branches covered.">			else if (matchRequiringConversion != null) {</span>
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">				if (multipleOptions) {</span>
+<span class="nc" id="L211">					throw new SpelEvaluationException(SpelMessage.MULTIPLE_POSSIBLE_METHODS, name);</span>
+				}
+<span class="fc" id="L213">				return new ReflectiveMethodExecutor(matchRequiringConversion);</span>
+			}
+			else {
+<span class="fc" id="L216">				return null;</span>
+			}
+		}
+<span class="nc" id="L219">		catch (EvaluationException ex) {</span>
+<span class="nc" id="L220">			throw new AccessException(&quot;Failed to resolve method&quot;, ex);</span>
+		}
+	}
+
+	private Set&lt;Method&gt; getMethods(Class&lt;?&gt; type, Object targetObject) {
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		if (targetObject instanceof Class) {</span>
+<span class="fc" id="L226">			Set&lt;Method&gt; result = new LinkedHashSet&lt;&gt;();</span>
+			// Add these so that static methods are invocable on the type: e.g. Float.valueOf(..)
+<span class="fc" id="L228">			Method[] methods = getMethods(type);</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">			for (Method method : methods) {</span>
+<span class="fc bfc" id="L230" title="All 2 branches covered.">				if (Modifier.isStatic(method.getModifiers())) {</span>
+<span class="fc" id="L231">					result.add(method);</span>
+				}
+			}
+			// Also expose methods from java.lang.Class itself
+<span class="fc" id="L235">			Collections.addAll(result, getMethods(Class.class));</span>
+<span class="fc" id="L236">			return result;</span>
+		}
+<span class="fc bfc" id="L238" title="All 2 branches covered.">		else if (Proxy.isProxyClass(type)) {</span>
+<span class="fc" id="L239">			Set&lt;Method&gt; result = new LinkedHashSet&lt;&gt;();</span>
+			// Expose interface methods (not proxy-declared overrides) for proper vararg introspection
+<span class="fc bfc" id="L241" title="All 2 branches covered.">			for (Class&lt;?&gt; ifc : type.getInterfaces()) {</span>
+<span class="fc" id="L242">				Method[] methods = getMethods(ifc);</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">				for (Method method : methods) {</span>
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">					if (isCandidateForInvocation(method, type)) {</span>
+<span class="fc" id="L245">						result.add(method);</span>
+					}
+				}
+			}
+<span class="fc" id="L249">			return result;</span>
+		}
+		else {
+<span class="fc" id="L252">			Set&lt;Method&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L253">			Method[] methods = getMethods(type);</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">			for (Method method : methods) {</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">				if (isCandidateForInvocation(method, type)) {</span>
+<span class="fc" id="L256">					result.add(method);</span>
+				}
+			}
+<span class="fc" id="L259">			return result;</span>
+		}
+	}
+
+	/**
+	 * Return the set of methods for this type. The default implementation returns the
+	 * result of {@link Class#getMethods()} for the given {@code type}, but subclasses
+	 * may override in order to alter the results, e.g. specifying static methods
+	 * declared elsewhere.
+	 * @param type the class for which to return the methods
+	 * @since 3.1.1
+	 */
+	protected Method[] getMethods(Class&lt;?&gt; type) {
+<span class="fc" id="L272">		return type.getMethods();</span>
+	}
+
+	/**
+	 * Determine whether the given {@code Method} is a candidate for method resolution
+	 * on an instance of the given target class.
+	 * &lt;p&gt;The default implementation considers any method as a candidate, even for
+	 * static methods sand non-user-declared methods on the {@link Object} base class.
+	 * @param method the Method to evaluate
+	 * @param targetClass the concrete target class that is being introspected
+	 * @since 4.3.15
+	 */
+	protected boolean isCandidateForInvocation(Method method, Class&lt;?&gt; targetClass) {
+<span class="fc" id="L285">		return true;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

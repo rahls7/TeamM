@@ -1,0 +1,1191 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractBeanDefinition.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">AbstractBeanDefinition.java</span></div><h1>AbstractBeanDefinition.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.lang.reflect.Constructor;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Supplier;
+
+import org.springframework.beans.BeanMetadataAttributeAccessor;
+import org.springframework.beans.MutablePropertyValues;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.ConstructorArgumentValues;
+import org.springframework.core.io.DescriptiveResource;
+import org.springframework.core.io.Resource;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Base class for concrete, full-fledged {@link BeanDefinition} classes,
+ * factoring out common properties of {@link GenericBeanDefinition},
+ * {@link RootBeanDefinition}, and {@link ChildBeanDefinition}.
+ *
+ * &lt;p&gt;The autowire constants match the ones defined in the
+ * {@link org.springframework.beans.factory.config.AutowireCapableBeanFactory}
+ * interface.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Mark Fisher
+ * @see GenericBeanDefinition
+ * @see RootBeanDefinition
+ * @see ChildBeanDefinition
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public abstract class AbstractBeanDefinition extends BeanMetadataAttributeAccessor
+		implements BeanDefinition, Cloneable {
+
+	/**
+	 * Constant for the default scope name: {@code &quot;&quot;}, equivalent to singleton
+	 * status unless overridden from a parent bean definition (if applicable).
+	 */
+	public static final String SCOPE_DEFAULT = &quot;&quot;;
+
+	/**
+	 * Constant that indicates no autowiring at all.
+	 * @see #setAutowireMode
+	 */
+	public static final int AUTOWIRE_NO = AutowireCapableBeanFactory.AUTOWIRE_NO;
+
+	/**
+	 * Constant that indicates autowiring bean properties by name.
+	 * @see #setAutowireMode
+	 */
+	public static final int AUTOWIRE_BY_NAME = AutowireCapableBeanFactory.AUTOWIRE_BY_NAME;
+
+	/**
+	 * Constant that indicates autowiring bean properties by type.
+	 * @see #setAutowireMode
+	 */
+	public static final int AUTOWIRE_BY_TYPE = AutowireCapableBeanFactory.AUTOWIRE_BY_TYPE;
+
+	/**
+	 * Constant that indicates autowiring a constructor.
+	 * @see #setAutowireMode
+	 */
+	public static final int AUTOWIRE_CONSTRUCTOR = AutowireCapableBeanFactory.AUTOWIRE_CONSTRUCTOR;
+
+	/**
+	 * Constant that indicates determining an appropriate autowire strategy
+	 * through introspection of the bean class.
+	 * @see #setAutowireMode
+	 * @deprecated as of Spring 3.0: If you are using mixed autowiring strategies,
+	 * use annotation-based autowiring for clearer demarcation of autowiring needs.
+	 */
+	@Deprecated
+	public static final int AUTOWIRE_AUTODETECT = AutowireCapableBeanFactory.AUTOWIRE_AUTODETECT;
+
+	/**
+	 * Constant that indicates no dependency check at all.
+	 * @see #setDependencyCheck
+	 */
+	public static final int DEPENDENCY_CHECK_NONE = 0;
+
+	/**
+	 * Constant that indicates dependency checking for object references.
+	 * @see #setDependencyCheck
+	 */
+	public static final int DEPENDENCY_CHECK_OBJECTS = 1;
+
+	/**
+	 * Constant that indicates dependency checking for &quot;simple&quot; properties.
+	 * @see #setDependencyCheck
+	 * @see org.springframework.beans.BeanUtils#isSimpleProperty
+	 */
+	public static final int DEPENDENCY_CHECK_SIMPLE = 2;
+
+	/**
+	 * Constant that indicates dependency checking for all properties
+	 * (object references as well as &quot;simple&quot; properties).
+	 * @see #setDependencyCheck
+	 */
+	public static final int DEPENDENCY_CHECK_ALL = 3;
+
+	/**
+	 * Constant that indicates the container should attempt to infer the
+	 * {@link #setDestroyMethodName destroy method name} for a bean as opposed to
+	 * explicit specification of a method name. The value {@value} is specifically
+	 * designed to include characters otherwise illegal in a method name, ensuring
+	 * no possibility of collisions with legitimately named methods having the same
+	 * name.
+	 * &lt;p&gt;Currently, the method names detected during destroy method inference
+	 * are &quot;close&quot; and &quot;shutdown&quot;, if present on the specific bean class.
+	 */
+	public static final String INFER_METHOD = &quot;(inferred)&quot;;
+
+
+	@Nullable
+	private volatile Object beanClass;
+
+<span class="fc" id="L143">	@Nullable</span>
+	private String scope = SCOPE_DEFAULT;
+
+<span class="fc" id="L146">	private boolean abstractFlag = false;</span>
+
+<span class="fc" id="L148">	private boolean lazyInit = false;</span>
+
+<span class="fc" id="L150">	private int autowireMode = AUTOWIRE_NO;</span>
+
+<span class="fc" id="L152">	private int dependencyCheck = DEPENDENCY_CHECK_NONE;</span>
+
+	@Nullable
+	private String[] dependsOn;
+
+<span class="fc" id="L157">	private boolean autowireCandidate = true;</span>
+
+<span class="fc" id="L159">	private boolean primary = false;</span>
+
+<span class="fc" id="L161">	private final Map&lt;String, AutowireCandidateQualifier&gt; qualifiers = new LinkedHashMap&lt;&gt;();</span>
+
+	@Nullable
+	private Supplier&lt;?&gt; instanceSupplier;
+
+<span class="fc" id="L166">	private boolean nonPublicAccessAllowed = true;</span>
+
+<span class="fc" id="L168">	private boolean lenientConstructorResolution = true;</span>
+
+	@Nullable
+	private String factoryBeanName;
+
+	@Nullable
+	private String factoryMethodName;
+
+	@Nullable
+	private ConstructorArgumentValues constructorArgumentValues;
+
+	@Nullable
+	private MutablePropertyValues propertyValues;
+
+	@Nullable
+	private MethodOverrides methodOverrides;
+
+	@Nullable
+	private String initMethodName;
+
+	@Nullable
+	private String destroyMethodName;
+
+<span class="fc" id="L191">	private boolean enforceInitMethod = true;</span>
+
+<span class="fc" id="L193">	private boolean enforceDestroyMethod = true;</span>
+
+<span class="fc" id="L195">	private boolean synthetic = false;</span>
+
+<span class="fc" id="L197">	private int role = BeanDefinition.ROLE_APPLICATION;</span>
+
+	@Nullable
+	private String description;
+
+	@Nullable
+	private Resource resource;
+
+
+	/**
+	 * Create a new AbstractBeanDefinition with default settings.
+	 */
+	protected AbstractBeanDefinition() {
+<span class="fc" id="L210">		this(null, null);</span>
+<span class="fc" id="L211">	}</span>
+
+	/**
+	 * Create a new AbstractBeanDefinition with the given
+	 * constructor argument values and property values.
+	 */
+<span class="fc" id="L217">	protected AbstractBeanDefinition(@Nullable ConstructorArgumentValues cargs, @Nullable MutablePropertyValues pvs) {</span>
+<span class="fc" id="L218">		this.constructorArgumentValues = cargs;</span>
+<span class="fc" id="L219">		this.propertyValues = pvs;</span>
+<span class="fc" id="L220">	}</span>
+
+	/**
+	 * Create a new AbstractBeanDefinition as a deep copy of the given
+	 * bean definition.
+	 * @param original the original bean definition to copy from
+	 */
+<span class="fc" id="L227">	protected AbstractBeanDefinition(BeanDefinition original) {</span>
+<span class="fc" id="L228">		setParentName(original.getParentName());</span>
+<span class="fc" id="L229">		setBeanClassName(original.getBeanClassName());</span>
+<span class="fc" id="L230">		setScope(original.getScope());</span>
+<span class="fc" id="L231">		setAbstract(original.isAbstract());</span>
+<span class="fc" id="L232">		setLazyInit(original.isLazyInit());</span>
+<span class="fc" id="L233">		setFactoryBeanName(original.getFactoryBeanName());</span>
+<span class="fc" id="L234">		setFactoryMethodName(original.getFactoryMethodName());</span>
+<span class="fc" id="L235">		setRole(original.getRole());</span>
+<span class="fc" id="L236">		setSource(original.getSource());</span>
+<span class="fc" id="L237">		copyAttributesFrom(original);</span>
+
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		if (original instanceof AbstractBeanDefinition) {</span>
+<span class="fc" id="L240">			AbstractBeanDefinition originalAbd = (AbstractBeanDefinition) original;</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">			if (originalAbd.hasBeanClass()) {</span>
+<span class="fc" id="L242">				setBeanClass(originalAbd.getBeanClass());</span>
+			}
+<span class="fc bfc" id="L244" title="All 2 branches covered.">			if (originalAbd.hasConstructorArgumentValues()) {</span>
+<span class="fc" id="L245">				setConstructorArgumentValues(new ConstructorArgumentValues(original.getConstructorArgumentValues()));</span>
+			}
+<span class="fc bfc" id="L247" title="All 2 branches covered.">			if (originalAbd.hasPropertyValues()) {</span>
+<span class="fc" id="L248">				setPropertyValues(new MutablePropertyValues(original.getPropertyValues()));</span>
+			}
+<span class="fc bfc" id="L250" title="All 2 branches covered.">			if (originalAbd.hasMethodOverrides()) {</span>
+<span class="fc" id="L251">				setMethodOverrides(new MethodOverrides(originalAbd.getMethodOverrides()));</span>
+			}
+<span class="fc" id="L253">			setAutowireMode(originalAbd.getAutowireMode());</span>
+<span class="fc" id="L254">			setDependencyCheck(originalAbd.getDependencyCheck());</span>
+<span class="fc" id="L255">			setDependsOn(originalAbd.getDependsOn());</span>
+<span class="fc" id="L256">			setAutowireCandidate(originalAbd.isAutowireCandidate());</span>
+<span class="fc" id="L257">			setPrimary(originalAbd.isPrimary());</span>
+<span class="fc" id="L258">			copyQualifiersFrom(originalAbd);</span>
+<span class="fc" id="L259">			setInstanceSupplier(originalAbd.getInstanceSupplier());</span>
+<span class="fc" id="L260">			setNonPublicAccessAllowed(originalAbd.isNonPublicAccessAllowed());</span>
+<span class="fc" id="L261">			setLenientConstructorResolution(originalAbd.isLenientConstructorResolution());</span>
+<span class="fc" id="L262">			setInitMethodName(originalAbd.getInitMethodName());</span>
+<span class="fc" id="L263">			setEnforceInitMethod(originalAbd.isEnforceInitMethod());</span>
+<span class="fc" id="L264">			setDestroyMethodName(originalAbd.getDestroyMethodName());</span>
+<span class="fc" id="L265">			setEnforceDestroyMethod(originalAbd.isEnforceDestroyMethod());</span>
+<span class="fc" id="L266">			setSynthetic(originalAbd.isSynthetic());</span>
+<span class="fc" id="L267">			setResource(originalAbd.getResource());</span>
+<span class="fc" id="L268">		}</span>
+		else {
+<span class="nc" id="L270">			setConstructorArgumentValues(new ConstructorArgumentValues(original.getConstructorArgumentValues()));</span>
+<span class="nc" id="L271">			setPropertyValues(new MutablePropertyValues(original.getPropertyValues()));</span>
+<span class="nc" id="L272">			setResourceDescription(original.getResourceDescription());</span>
+		}
+<span class="fc" id="L274">	}</span>
+
+
+	/**
+	 * Override settings in this bean definition (presumably a copied parent
+	 * from a parent-child inheritance relationship) from the given bean
+	 * definition (presumably the child).
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Will override beanClass if specified in the given bean definition.
+	 * &lt;li&gt;Will always take {@code abstract}, {@code scope},
+	 * {@code lazyInit}, {@code autowireMode}, {@code dependencyCheck},
+	 * and {@code dependsOn} from the given bean definition.
+	 * &lt;li&gt;Will add {@code constructorArgumentValues}, {@code propertyValues},
+	 * {@code methodOverrides} from the given bean definition to existing ones.
+	 * &lt;li&gt;Will override {@code factoryBeanName}, {@code factoryMethodName},
+	 * {@code initMethodName}, and {@code destroyMethodName} if specified
+	 * in the given bean definition.
+	 * &lt;/ul&gt;
+	 */
+	public void overrideFrom(BeanDefinition other) {
+<span class="fc bfc" id="L294" title="All 2 branches covered.">		if (StringUtils.hasLength(other.getBeanClassName())) {</span>
+<span class="fc" id="L295">			setBeanClassName(other.getBeanClassName());</span>
+		}
+<span class="fc bfc" id="L297" title="All 2 branches covered.">		if (StringUtils.hasLength(other.getScope())) {</span>
+<span class="fc" id="L298">			setScope(other.getScope());</span>
+		}
+<span class="fc" id="L300">		setAbstract(other.isAbstract());</span>
+<span class="fc" id="L301">		setLazyInit(other.isLazyInit());</span>
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">		if (StringUtils.hasLength(other.getFactoryBeanName())) {</span>
+<span class="nc" id="L303">			setFactoryBeanName(other.getFactoryBeanName());</span>
+		}
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">		if (StringUtils.hasLength(other.getFactoryMethodName())) {</span>
+<span class="nc" id="L306">			setFactoryMethodName(other.getFactoryMethodName());</span>
+		}
+<span class="fc" id="L308">		setRole(other.getRole());</span>
+<span class="fc" id="L309">		setSource(other.getSource());</span>
+<span class="fc" id="L310">		copyAttributesFrom(other);</span>
+
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">		if (other instanceof AbstractBeanDefinition) {</span>
+<span class="fc" id="L313">			AbstractBeanDefinition otherAbd = (AbstractBeanDefinition) other;</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">			if (otherAbd.hasBeanClass()) {</span>
+<span class="fc" id="L315">				setBeanClass(otherAbd.getBeanClass());</span>
+			}
+<span class="fc bfc" id="L317" title="All 2 branches covered.">			if (otherAbd.hasConstructorArgumentValues()) {</span>
+<span class="fc" id="L318">				getConstructorArgumentValues().addArgumentValues(other.getConstructorArgumentValues());</span>
+			}
+<span class="fc bfc" id="L320" title="All 2 branches covered.">			if (otherAbd.hasPropertyValues()) {</span>
+<span class="fc" id="L321">				getPropertyValues().addPropertyValues(other.getPropertyValues());</span>
+			}
+<span class="fc bfc" id="L323" title="All 2 branches covered.">			if (otherAbd.hasMethodOverrides()) {</span>
+<span class="fc" id="L324">				getMethodOverrides().addOverrides(otherAbd.getMethodOverrides());</span>
+			}
+<span class="fc" id="L326">			setAutowireMode(otherAbd.getAutowireMode());</span>
+<span class="fc" id="L327">			setDependencyCheck(otherAbd.getDependencyCheck());</span>
+<span class="fc" id="L328">			setDependsOn(otherAbd.getDependsOn());</span>
+<span class="fc" id="L329">			setAutowireCandidate(otherAbd.isAutowireCandidate());</span>
+<span class="fc" id="L330">			setPrimary(otherAbd.isPrimary());</span>
+<span class="fc" id="L331">			copyQualifiersFrom(otherAbd);</span>
+<span class="fc" id="L332">			setInstanceSupplier(otherAbd.getInstanceSupplier());</span>
+<span class="fc" id="L333">			setNonPublicAccessAllowed(otherAbd.isNonPublicAccessAllowed());</span>
+<span class="fc" id="L334">			setLenientConstructorResolution(otherAbd.isLenientConstructorResolution());</span>
+<span class="fc bfc" id="L335" title="All 2 branches covered.">			if (otherAbd.getInitMethodName() != null) {</span>
+<span class="fc" id="L336">				setInitMethodName(otherAbd.getInitMethodName());</span>
+<span class="fc" id="L337">				setEnforceInitMethod(otherAbd.isEnforceInitMethod());</span>
+			}
+<span class="fc bfc" id="L339" title="All 2 branches covered.">			if (otherAbd.getDestroyMethodName() != null) {</span>
+<span class="fc" id="L340">				setDestroyMethodName(otherAbd.getDestroyMethodName());</span>
+<span class="fc" id="L341">				setEnforceDestroyMethod(otherAbd.isEnforceDestroyMethod());</span>
+			}
+<span class="fc" id="L343">			setSynthetic(otherAbd.isSynthetic());</span>
+<span class="fc" id="L344">			setResource(otherAbd.getResource());</span>
+<span class="fc" id="L345">		}</span>
+		else {
+<span class="nc" id="L347">			getConstructorArgumentValues().addArgumentValues(other.getConstructorArgumentValues());</span>
+<span class="nc" id="L348">			getPropertyValues().addPropertyValues(other.getPropertyValues());</span>
+<span class="nc" id="L349">			setResourceDescription(other.getResourceDescription());</span>
+		}
+<span class="fc" id="L351">	}</span>
+
+	/**
+	 * Apply the provided default values to this bean.
+	 * @param defaults the defaults to apply
+	 */
+	public void applyDefaults(BeanDefinitionDefaults defaults) {
+<span class="nc" id="L358">		setLazyInit(defaults.isLazyInit());</span>
+<span class="nc" id="L359">		setAutowireMode(defaults.getAutowireMode());</span>
+<span class="nc" id="L360">		setDependencyCheck(defaults.getDependencyCheck());</span>
+<span class="nc" id="L361">		setInitMethodName(defaults.getInitMethodName());</span>
+<span class="nc" id="L362">		setEnforceInitMethod(false);</span>
+<span class="nc" id="L363">		setDestroyMethodName(defaults.getDestroyMethodName());</span>
+<span class="nc" id="L364">		setEnforceDestroyMethod(false);</span>
+<span class="nc" id="L365">	}</span>
+
+
+	/**
+	 * Specify the bean class name of this bean definition.
+	 */
+	@Override
+	public void setBeanClassName(@Nullable String beanClassName) {
+<span class="fc" id="L373">		this.beanClass = beanClassName;</span>
+<span class="fc" id="L374">	}</span>
+
+	/**
+	 * Return the current bean class name of this bean definition.
+	 */
+	@Override
+	@Nullable
+	public String getBeanClassName() {
+<span class="fc" id="L382">		Object beanClassObject = this.beanClass;</span>
+<span class="fc bfc" id="L383" title="All 2 branches covered.">		if (beanClassObject instanceof Class) {</span>
+<span class="fc" id="L384">			return ((Class&lt;?&gt;) beanClassObject).getName();</span>
+		}
+		else {
+<span class="fc" id="L387">			return (String) beanClassObject;</span>
+		}
+	}
+
+	/**
+	 * Specify the class for this bean.
+	 */
+	public void setBeanClass(@Nullable Class&lt;?&gt; beanClass) {
+<span class="fc" id="L395">		this.beanClass = beanClass;</span>
+<span class="fc" id="L396">	}</span>
+
+	/**
+	 * Return the class of the wrapped bean, if already resolved.
+	 * @return the bean class, or {@code null} if none defined
+	 * @throws IllegalStateException if the bean definition does not define a bean class,
+	 * or a specified bean class name has not been resolved into an actual Class
+	 */
+	public Class&lt;?&gt; getBeanClass() throws IllegalStateException {
+<span class="fc" id="L405">		Object beanClassObject = this.beanClass;</span>
+<span class="fc bfc" id="L406" title="All 2 branches covered.">		if (beanClassObject == null) {</span>
+<span class="fc" id="L407">			throw new IllegalStateException(&quot;No bean class specified on bean definition&quot;);</span>
+		}
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">		if (!(beanClassObject instanceof Class)) {</span>
+<span class="nc" id="L410">			throw new IllegalStateException(</span>
+					&quot;Bean class name [&quot; + beanClassObject + &quot;] has not been resolved into an actual Class&quot;);
+		}
+<span class="fc" id="L413">		return (Class&lt;?&gt;) beanClassObject;</span>
+	}
+
+	/**
+	 * Return whether this definition specifies a bean class.
+	 */
+	public boolean hasBeanClass() {
+<span class="fc" id="L420">		return (this.beanClass instanceof Class);</span>
+	}
+
+	/**
+	 * Determine the class of the wrapped bean, resolving it from a
+	 * specified class name if necessary. Will also reload a specified
+	 * Class from its name when called with the bean class already resolved.
+	 * @param classLoader the ClassLoader to use for resolving a (potential) class name
+	 * @return the resolved bean class
+	 * @throws ClassNotFoundException if the class name could be resolved
+	 */
+	@Nullable
+	public Class&lt;?&gt; resolveBeanClass(@Nullable ClassLoader classLoader) throws ClassNotFoundException {
+<span class="fc" id="L433">		String className = getBeanClassName();</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">		if (className == null) {</span>
+<span class="fc" id="L435">			return null;</span>
+		}
+<span class="fc" id="L437">		Class&lt;?&gt; resolvedClass = ClassUtils.forName(className, classLoader);</span>
+<span class="fc" id="L438">		this.beanClass = resolvedClass;</span>
+<span class="fc" id="L439">		return resolvedClass;</span>
+	}
+
+	/**
+	 * Set the name of the target scope for the bean.
+	 * &lt;p&gt;The default is singleton status, although this is only applied once
+	 * a bean definition becomes active in the containing factory. A bean
+	 * definition may eventually inherit its scope from a parent bean definition.
+	 * For this reason, the default scope name is an empty string (i.e., {@code &quot;&quot;}),
+	 * with singleton status being assumed until a resolved scope is set.
+	 * @see #SCOPE_SINGLETON
+	 * @see #SCOPE_PROTOTYPE
+	 */
+	@Override
+	public void setScope(@Nullable String scope) {
+<span class="fc" id="L454">		this.scope = scope;</span>
+<span class="fc" id="L455">	}</span>
+
+	/**
+	 * Return the name of the target scope for the bean.
+	 */
+	@Override
+	@Nullable
+	public String getScope() {
+<span class="fc" id="L463">		return this.scope;</span>
+	}
+
+	/**
+	 * Return whether this a &lt;b&gt;Singleton&lt;/b&gt;, with a single shared instance
+	 * returned from all calls.
+	 * @see #SCOPE_SINGLETON
+	 */
+	@Override
+	public boolean isSingleton() {
+<span class="pc bpc" id="L473" title="1 of 4 branches missed.">		return SCOPE_SINGLETON.equals(this.scope) || SCOPE_DEFAULT.equals(this.scope);</span>
+	}
+
+	/**
+	 * Return whether this a &lt;b&gt;Prototype&lt;/b&gt;, with an independent instance
+	 * returned for each call.
+	 * @see #SCOPE_PROTOTYPE
+	 */
+	@Override
+	public boolean isPrototype() {
+<span class="fc" id="L483">		return SCOPE_PROTOTYPE.equals(this.scope);</span>
+	}
+
+	/**
+	 * Set if this bean is &quot;abstract&quot;, i.e. not meant to be instantiated itself but
+	 * rather just serving as parent for concrete child bean definitions.
+	 * &lt;p&gt;Default is &quot;false&quot;. Specify true to tell the bean factory to not try to
+	 * instantiate that particular bean in any case.
+	 */
+	public void setAbstract(boolean abstractFlag) {
+<span class="fc" id="L493">		this.abstractFlag = abstractFlag;</span>
+<span class="fc" id="L494">	}</span>
+
+	/**
+	 * Return whether this bean is &quot;abstract&quot;, i.e. not meant to be instantiated
+	 * itself but rather just serving as parent for concrete child bean definitions.
+	 */
+	@Override
+	public boolean isAbstract() {
+<span class="fc" id="L502">		return this.abstractFlag;</span>
+	}
+
+	/**
+	 * Set whether this bean should be lazily initialized.
+	 * &lt;p&gt;If {@code false}, the bean will get instantiated on startup by bean
+	 * factories that perform eager initialization of singletons.
+	 */
+	@Override
+	public void setLazyInit(boolean lazyInit) {
+<span class="fc" id="L512">		this.lazyInit = lazyInit;</span>
+<span class="fc" id="L513">	}</span>
+
+	/**
+	 * Return whether this bean should be lazily initialized, i.e. not
+	 * eagerly instantiated on startup. Only applicable to a singleton bean.
+	 */
+	@Override
+	public boolean isLazyInit() {
+<span class="fc" id="L521">		return this.lazyInit;</span>
+	}
+
+	/**
+	 * Set the autowire mode. This determines whether any automagical detection
+	 * and setting of bean references will happen. Default is AUTOWIRE_NO,
+	 * which means there's no autowire.
+	 * @param autowireMode the autowire mode to set.
+	 * Must be one of the constants defined in this class.
+	 * @see #AUTOWIRE_NO
+	 * @see #AUTOWIRE_BY_NAME
+	 * @see #AUTOWIRE_BY_TYPE
+	 * @see #AUTOWIRE_CONSTRUCTOR
+	 * @see #AUTOWIRE_AUTODETECT
+	 */
+	public void setAutowireMode(int autowireMode) {
+<span class="fc" id="L537">		this.autowireMode = autowireMode;</span>
+<span class="fc" id="L538">	}</span>
+
+	/**
+	 * Return the autowire mode as specified in the bean definition.
+	 */
+	public int getAutowireMode() {
+<span class="fc" id="L544">		return this.autowireMode;</span>
+	}
+
+	/**
+	 * Return the resolved autowire code,
+	 * (resolving AUTOWIRE_AUTODETECT to AUTOWIRE_CONSTRUCTOR or AUTOWIRE_BY_TYPE).
+	 * @see #AUTOWIRE_AUTODETECT
+	 * @see #AUTOWIRE_CONSTRUCTOR
+	 * @see #AUTOWIRE_BY_TYPE
+	 */
+	public int getResolvedAutowireMode() {
+<span class="pc bpc" id="L555" title="1 of 2 branches missed.">		if (this.autowireMode == AUTOWIRE_AUTODETECT) {</span>
+			// Work out whether to apply setter autowiring or constructor autowiring.
+			// If it has a no-arg constructor it's deemed to be setter autowiring,
+			// otherwise we'll try constructor autowiring.
+<span class="nc" id="L559">			Constructor&lt;?&gt;[] constructors = getBeanClass().getConstructors();</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">			for (Constructor&lt;?&gt; constructor : constructors) {</span>
+<span class="nc bnc" id="L561" title="All 2 branches missed.">				if (constructor.getParameterCount() == 0) {</span>
+<span class="nc" id="L562">					return AUTOWIRE_BY_TYPE;</span>
+				}
+			}
+<span class="nc" id="L565">			return AUTOWIRE_CONSTRUCTOR;</span>
+		}
+		else {
+<span class="fc" id="L568">			return this.autowireMode;</span>
+		}
+	}
+
+	/**
+	 * Set the dependency check code.
+	 * @param dependencyCheck the code to set.
+	 * Must be one of the four constants defined in this class.
+	 * @see #DEPENDENCY_CHECK_NONE
+	 * @see #DEPENDENCY_CHECK_OBJECTS
+	 * @see #DEPENDENCY_CHECK_SIMPLE
+	 * @see #DEPENDENCY_CHECK_ALL
+	 */
+	public void setDependencyCheck(int dependencyCheck) {
+<span class="fc" id="L582">		this.dependencyCheck = dependencyCheck;</span>
+<span class="fc" id="L583">	}</span>
+
+	/**
+	 * Return the dependency check code.
+	 */
+	public int getDependencyCheck() {
+<span class="fc" id="L589">		return this.dependencyCheck;</span>
+	}
+
+	/**
+	 * Set the names of the beans that this bean depends on being initialized.
+	 * The bean factory will guarantee that these beans get initialized first.
+	 * &lt;p&gt;Note that dependencies are normally expressed through bean properties or
+	 * constructor arguments. This property should just be necessary for other kinds
+	 * of dependencies like statics (*ugh*) or database preparation on startup.
+	 */
+	@Override
+	public void setDependsOn(@Nullable String... dependsOn) {
+<span class="fc" id="L601">		this.dependsOn = dependsOn;</span>
+<span class="fc" id="L602">	}</span>
+
+	/**
+	 * Return the bean names that this bean depends on.
+	 */
+	@Override
+	@Nullable
+	public String[] getDependsOn() {
+<span class="fc" id="L610">		return this.dependsOn;</span>
+	}
+
+	/**
+	 * Set whether this bean is a candidate for getting autowired into some other bean.
+	 * &lt;p&gt;Note that this flag is designed to only affect type-based autowiring.
+	 * It does not affect explicit references by name, which will get resolved even
+	 * if the specified bean is not marked as an autowire candidate. As a consequence,
+	 * autowiring by name will nevertheless inject a bean if the name matches.
+	 * @see #AUTOWIRE_BY_TYPE
+	 * @see #AUTOWIRE_BY_NAME
+	 */
+	@Override
+	public void setAutowireCandidate(boolean autowireCandidate) {
+<span class="fc" id="L624">		this.autowireCandidate = autowireCandidate;</span>
+<span class="fc" id="L625">	}</span>
+
+	/**
+	 * Return whether this bean is a candidate for getting autowired into some other bean.
+	 */
+	@Override
+	public boolean isAutowireCandidate() {
+<span class="fc" id="L632">		return this.autowireCandidate;</span>
+	}
+
+	/**
+	 * Set whether this bean is a primary autowire candidate.
+	 * &lt;p&gt;If this value is {@code true} for exactly one bean among multiple
+	 * matching candidates, it will serve as a tie-breaker.
+	 */
+	@Override
+	public void setPrimary(boolean primary) {
+<span class="fc" id="L642">		this.primary = primary;</span>
+<span class="fc" id="L643">	}</span>
+
+	/**
+	 * Return whether this bean is a primary autowire candidate.
+	 */
+	@Override
+	public boolean isPrimary() {
+<span class="fc" id="L650">		return this.primary;</span>
+	}
+
+	/**
+	 * Register a qualifier to be used for autowire candidate resolution,
+	 * keyed by the qualifier's type name.
+	 * @see AutowireCandidateQualifier#getTypeName()
+	 */
+	public void addQualifier(AutowireCandidateQualifier qualifier) {
+<span class="fc" id="L659">		this.qualifiers.put(qualifier.getTypeName(), qualifier);</span>
+<span class="fc" id="L660">	}</span>
+
+	/**
+	 * Return whether this bean has the specified qualifier.
+	 */
+	public boolean hasQualifier(String typeName) {
+<span class="nc" id="L666">		return this.qualifiers.containsKey(typeName);</span>
+	}
+
+	/**
+	 * Return the qualifier mapped to the provided type name.
+	 */
+	@Nullable
+	public AutowireCandidateQualifier getQualifier(String typeName) {
+<span class="fc" id="L674">		return this.qualifiers.get(typeName);</span>
+	}
+
+	/**
+	 * Return all registered qualifiers.
+	 * @return the Set of {@link AutowireCandidateQualifier} objects.
+	 */
+	public Set&lt;AutowireCandidateQualifier&gt; getQualifiers() {
+<span class="nc" id="L682">		return new LinkedHashSet&lt;&gt;(this.qualifiers.values());</span>
+	}
+
+	/**
+	 * Copy the qualifiers from the supplied AbstractBeanDefinition to this bean definition.
+	 * @param source the AbstractBeanDefinition to copy from
+	 */
+	public void copyQualifiersFrom(AbstractBeanDefinition source) {
+<span class="fc" id="L690">		Assert.notNull(source, &quot;Source must not be null&quot;);</span>
+<span class="fc" id="L691">		this.qualifiers.putAll(source.qualifiers);</span>
+<span class="fc" id="L692">	}</span>
+
+	/**
+	 * Specify a callback for creating an instance of the bean,
+	 * as an alternative to a declaratively specified factory method.
+	 * &lt;p&gt;If such a callback is set, it will override any other constructor
+	 * or factory method metadata. However, bean property population and
+	 * potential annotation-driven injection will still apply as usual.
+	 * @since 5.0
+	 * @see #setConstructorArgumentValues(ConstructorArgumentValues)
+	 * @see #setPropertyValues(MutablePropertyValues)
+	 */
+	public void setInstanceSupplier(@Nullable Supplier&lt;?&gt; instanceSupplier) {
+<span class="fc" id="L705">		this.instanceSupplier = instanceSupplier;</span>
+<span class="fc" id="L706">	}</span>
+
+	/**
+	 * Return a callback for creating an instance of the bean, if any.
+	 * @since 5.0
+	 */
+	@Nullable
+	public Supplier&lt;?&gt; getInstanceSupplier() {
+<span class="fc" id="L714">		return this.instanceSupplier;</span>
+	}
+
+	/**
+	 * Specify whether to allow access to non-public constructors and methods,
+	 * for the case of externalized metadata pointing to those. The default is
+	 * {@code true}; switch this to {@code false} for public access only.
+	 * &lt;p&gt;This applies to constructor resolution, factory method resolution,
+	 * and also init/destroy methods. Bean property accessors have to be public
+	 * in any case and are not affected by this setting.
+	 * &lt;p&gt;Note that annotation-driven configuration will still access non-public
+	 * members as far as they have been annotated. This setting applies to
+	 * externalized metadata in this bean definition only.
+	 */
+	public void setNonPublicAccessAllowed(boolean nonPublicAccessAllowed) {
+<span class="fc" id="L729">		this.nonPublicAccessAllowed = nonPublicAccessAllowed;</span>
+<span class="fc" id="L730">	}</span>
+
+	/**
+	 * Return whether to allow access to non-public constructors and methods.
+	 */
+	public boolean isNonPublicAccessAllowed() {
+<span class="fc" id="L736">		return this.nonPublicAccessAllowed;</span>
+	}
+
+	/**
+	 * Specify whether to resolve constructors in lenient mode ({@code true},
+	 * which is the default) or to switch to strict resolution (throwing an exception
+	 * in case of ambiguous constructors that all match when converting the arguments,
+	 * whereas lenient mode would use the one with the 'closest' type matches).
+	 */
+	public void setLenientConstructorResolution(boolean lenientConstructorResolution) {
+<span class="fc" id="L746">		this.lenientConstructorResolution = lenientConstructorResolution;</span>
+<span class="fc" id="L747">	}</span>
+
+	/**
+	 * Return whether to resolve constructors in lenient mode or in strict mode.
+	 */
+	public boolean isLenientConstructorResolution() {
+<span class="fc" id="L753">		return this.lenientConstructorResolution;</span>
+	}
+
+	/**
+	 * Specify the factory bean to use, if any.
+	 * This the name of the bean to call the specified factory method on.
+	 * @see #setFactoryMethodName
+	 */
+	@Override
+	public void setFactoryBeanName(@Nullable String factoryBeanName) {
+<span class="fc" id="L763">		this.factoryBeanName = factoryBeanName;</span>
+<span class="fc" id="L764">	}</span>
+
+	/**
+	 * Return the factory bean name, if any.
+	 */
+	@Override
+	@Nullable
+	public String getFactoryBeanName() {
+<span class="fc" id="L772">		return this.factoryBeanName;</span>
+	}
+
+	/**
+	 * Specify a factory method, if any. This method will be invoked with
+	 * constructor arguments, or with no arguments if none are specified.
+	 * The method will be invoked on the specified factory bean, if any,
+	 * or otherwise as a static method on the local bean class.
+	 * @see #setFactoryBeanName
+	 * @see #setBeanClassName
+	 */
+	@Override
+	public void setFactoryMethodName(@Nullable String factoryMethodName) {
+<span class="fc" id="L785">		this.factoryMethodName = factoryMethodName;</span>
+<span class="fc" id="L786">	}</span>
+
+	/**
+	 * Return a factory method, if any.
+	 */
+	@Override
+	@Nullable
+	public String getFactoryMethodName() {
+<span class="fc" id="L794">		return this.factoryMethodName;</span>
+	}
+
+	/**
+	 * Specify constructor argument values for this bean.
+	 */
+	public void setConstructorArgumentValues(ConstructorArgumentValues constructorArgumentValues) {
+<span class="fc" id="L801">		this.constructorArgumentValues = constructorArgumentValues;</span>
+<span class="fc" id="L802">	}</span>
+
+	/**
+	 * Return constructor argument values for this bean (never {@code null}).
+	 */
+	@Override
+	public ConstructorArgumentValues getConstructorArgumentValues() {
+<span class="fc bfc" id="L809" title="All 2 branches covered.">		if (this.constructorArgumentValues == null) {</span>
+<span class="fc" id="L810">			this.constructorArgumentValues = new ConstructorArgumentValues();</span>
+		}
+<span class="fc" id="L812">		return this.constructorArgumentValues;</span>
+	}
+
+	/**
+	 * Return if there are constructor argument values defined for this bean.
+	 */
+	@Override
+	public boolean hasConstructorArgumentValues() {
+<span class="fc bfc" id="L820" title="All 4 branches covered.">		return (this.constructorArgumentValues != null &amp;&amp; !this.constructorArgumentValues.isEmpty());</span>
+	}
+
+	/**
+	 * Specify property values for this bean, if any.
+	 */
+	public void setPropertyValues(MutablePropertyValues propertyValues) {
+<span class="fc" id="L827">		this.propertyValues = propertyValues;</span>
+<span class="fc" id="L828">	}</span>
+
+	/**
+	 * Return property values for this bean (never {@code null}).
+	 */
+	@Override
+	public MutablePropertyValues getPropertyValues() {
+<span class="fc bfc" id="L835" title="All 2 branches covered.">		if (this.propertyValues == null) {</span>
+<span class="fc" id="L836">			this.propertyValues = new MutablePropertyValues();</span>
+		}
+<span class="fc" id="L838">		return this.propertyValues;</span>
+	}
+
+	/**
+	 * Return if there are property values values defined for this bean.
+	 * @since 5.0.2
+	 */
+	@Override
+	public boolean hasPropertyValues() {
+<span class="fc bfc" id="L847" title="All 4 branches covered.">		return (this.propertyValues != null &amp;&amp; !this.propertyValues.isEmpty());</span>
+	}
+
+	/**
+	 * Specify method overrides for the bean, if any.
+	 */
+	public void setMethodOverrides(MethodOverrides methodOverrides) {
+<span class="fc" id="L854">		this.methodOverrides = methodOverrides;</span>
+<span class="fc" id="L855">	}</span>
+
+	/**
+	 * Return information about methods to be overridden by the IoC
+	 * container. This will be empty if there are no method overrides.
+	 * &lt;p&gt;Never returns {@code null}.
+	 */
+	public MethodOverrides getMethodOverrides() {
+<span class="fc bfc" id="L863" title="All 2 branches covered.">		if (this.methodOverrides == null) {</span>
+<span class="fc" id="L864">			this.methodOverrides = new MethodOverrides();</span>
+		}
+<span class="fc" id="L866">		return this.methodOverrides;</span>
+	}
+
+	/**
+	 * Return if there are method overrides defined for this bean.
+	 * @since 5.0.2
+	 */
+	public boolean hasMethodOverrides() {
+<span class="fc bfc" id="L874" title="All 4 branches covered.">		return (this.methodOverrides != null &amp;&amp; !this.methodOverrides.isEmpty());</span>
+	}
+
+	/**
+	 * Set the name of the initializer method.
+	 * &lt;p&gt;The default is {@code null} in which case there is no initializer method.
+	 */
+	@Override
+	public void setInitMethodName(@Nullable String initMethodName) {
+<span class="fc" id="L883">		this.initMethodName = initMethodName;</span>
+<span class="fc" id="L884">	}</span>
+
+	/**
+	 * Return the name of the initializer method.
+	 */
+	@Override
+	@Nullable
+	public String getInitMethodName() {
+<span class="fc" id="L892">		return this.initMethodName;</span>
+	}
+
+	/**
+	 * Specify whether or not the configured init method is the default.
+	 * &lt;p&gt;The default value is {@code false}.
+	 * @see #setInitMethodName
+	 */
+	public void setEnforceInitMethod(boolean enforceInitMethod) {
+<span class="fc" id="L901">		this.enforceInitMethod = enforceInitMethod;</span>
+<span class="fc" id="L902">	}</span>
+
+	/**
+	 * Indicate whether the configured init method is the default.
+	 * @see #getInitMethodName()
+	 */
+	public boolean isEnforceInitMethod() {
+<span class="fc" id="L909">		return this.enforceInitMethod;</span>
+	}
+
+	/**
+	 * Set the name of the destroy method.
+	 * &lt;p&gt;The default is {@code null} in which case there is no destroy method.
+	 */
+	@Override
+	public void setDestroyMethodName(@Nullable String destroyMethodName) {
+<span class="fc" id="L918">		this.destroyMethodName = destroyMethodName;</span>
+<span class="fc" id="L919">	}</span>
+
+	/**
+	 * Return the name of the destroy method.
+	 */
+	@Override
+	@Nullable
+	public String getDestroyMethodName() {
+<span class="fc" id="L927">		return this.destroyMethodName;</span>
+	}
+
+	/**
+	 * Specify whether or not the configured destroy method is the default.
+	 * &lt;p&gt;The default value is {@code false}.
+	 * @see #setDestroyMethodName
+	 */
+	public void setEnforceDestroyMethod(boolean enforceDestroyMethod) {
+<span class="fc" id="L936">		this.enforceDestroyMethod = enforceDestroyMethod;</span>
+<span class="fc" id="L937">	}</span>
+
+	/**
+	 * Indicate whether the configured destroy method is the default.
+	 * @see #getDestroyMethodName
+	 */
+	public boolean isEnforceDestroyMethod() {
+<span class="fc" id="L944">		return this.enforceDestroyMethod;</span>
+	}
+
+	/**
+	 * Set whether this bean definition is 'synthetic', that is, not defined
+	 * by the application itself (for example, an infrastructure bean such
+	 * as a helper for auto-proxying, created through {@code &lt;aop:config&gt;}).
+	 */
+	public void setSynthetic(boolean synthetic) {
+<span class="fc" id="L953">		this.synthetic = synthetic;</span>
+<span class="fc" id="L954">	}</span>
+
+	/**
+	 * Return whether this bean definition is 'synthetic', that is,
+	 * not defined by the application itself.
+	 */
+	public boolean isSynthetic() {
+<span class="fc" id="L961">		return this.synthetic;</span>
+	}
+
+	/**
+	 * Set the role hint for this {@code BeanDefinition}.
+	 */
+	@Override
+	public void setRole(int role) {
+<span class="fc" id="L969">		this.role = role;</span>
+<span class="fc" id="L970">	}</span>
+
+	/**
+	 * Return the role hint for this {@code BeanDefinition}.
+	 */
+	@Override
+	public int getRole() {
+<span class="fc" id="L977">		return this.role;</span>
+	}
+
+	/**
+	 * Set a human-readable description of this bean definition.
+	 */
+	@Override
+	public void setDescription(@Nullable String description) {
+<span class="fc" id="L985">		this.description = description;</span>
+<span class="fc" id="L986">	}</span>
+
+	/**
+	 * Return a human-readable description of this bean definition.
+	 */
+	@Override
+	@Nullable
+	public String getDescription() {
+<span class="nc" id="L994">		return this.description;</span>
+	}
+
+	/**
+	 * Set the resource that this bean definition came from
+	 * (for the purpose of showing context in case of errors).
+	 */
+	public void setResource(@Nullable Resource resource) {
+<span class="fc" id="L1002">		this.resource = resource;</span>
+<span class="fc" id="L1003">	}</span>
+
+	/**
+	 * Return the resource that this bean definition came from.
+	 */
+	@Nullable
+	public Resource getResource() {
+<span class="fc" id="L1010">		return this.resource;</span>
+	}
+
+	/**
+	 * Set a description of the resource that this bean definition
+	 * came from (for the purpose of showing context in case of errors).
+	 */
+	public void setResourceDescription(@Nullable String resourceDescription) {
+<span class="pc bpc" id="L1018" title="1 of 2 branches missed.">		this.resource = (resourceDescription != null ? new DescriptiveResource(resourceDescription) : null);</span>
+<span class="fc" id="L1019">	}</span>
+
+	/**
+	 * Return a description of the resource that this bean definition
+	 * came from (for the purpose of showing context in case of errors).
+	 */
+	@Override
+	@Nullable
+	public String getResourceDescription() {
+<span class="fc bfc" id="L1028" title="All 2 branches covered.">		return (this.resource != null ? this.resource.getDescription() : null);</span>
+	}
+
+	/**
+	 * Set the originating (e.g. decorated) BeanDefinition, if any.
+	 */
+	public void setOriginatingBeanDefinition(BeanDefinition originatingBd) {
+<span class="nc" id="L1035">		this.resource = new BeanDefinitionResource(originatingBd);</span>
+<span class="nc" id="L1036">	}</span>
+
+	/**
+	 * Return the originating BeanDefinition, or {@code null} if none.
+	 * Allows for retrieving the decorated bean definition, if any.
+	 * &lt;p&gt;Note that this method returns the immediate originator. Iterate through the
+	 * originator chain to find the original BeanDefinition as defined by the user.
+	 */
+	@Override
+	@Nullable
+	public BeanDefinition getOriginatingBeanDefinition() {
+<span class="pc bpc" id="L1047" title="1 of 2 branches missed.">		return (this.resource instanceof BeanDefinitionResource ?</span>
+<span class="pc" id="L1048">				((BeanDefinitionResource) this.resource).getBeanDefinition() : null);</span>
+	}
+
+	/**
+	 * Validate this bean definition.
+	 * @throws BeanDefinitionValidationException in case of validation failure
+	 */
+	public void validate() throws BeanDefinitionValidationException {
+<span class="pc bpc" id="L1056" title="1 of 4 branches missed.">		if (hasMethodOverrides() &amp;&amp; getFactoryMethodName() != null) {</span>
+<span class="nc" id="L1057">			throw new BeanDefinitionValidationException(</span>
+					&quot;Cannot combine static factory method with method overrides: &quot; +
+					&quot;the static factory method must create the instance&quot;);
+		}
+
+<span class="fc bfc" id="L1062" title="All 2 branches covered.">		if (hasBeanClass()) {</span>
+<span class="fc" id="L1063">			prepareMethodOverrides();</span>
+		}
+<span class="fc" id="L1065">	}</span>
+
+	/**
+	 * Validate and prepare the method overrides defined for this bean.
+	 * Checks for existence of a method with the specified name.
+	 * @throws BeanDefinitionValidationException in case of validation failure
+	 */
+	public void prepareMethodOverrides() throws BeanDefinitionValidationException {
+		// Check that lookup methods exists.
+<span class="fc bfc" id="L1074" title="All 2 branches covered.">		if (hasMethodOverrides()) {</span>
+<span class="fc" id="L1075">			Set&lt;MethodOverride&gt; overrides = getMethodOverrides().getOverrides();</span>
+<span class="fc" id="L1076">			synchronized (overrides) {</span>
+<span class="fc bfc" id="L1077" title="All 2 branches covered.">				for (MethodOverride mo : overrides) {</span>
+<span class="fc" id="L1078">					prepareMethodOverride(mo);</span>
+<span class="fc" id="L1079">				}</span>
+<span class="fc" id="L1080">			}</span>
+		}
+<span class="fc" id="L1082">	}</span>
+
+	/**
+	 * Validate and prepare the given method override.
+	 * Checks for existence of a method with the specified name,
+	 * marking it as not overloaded if none found.
+	 * @param mo the MethodOverride object to validate
+	 * @throws BeanDefinitionValidationException in case of validation failure
+	 */
+	protected void prepareMethodOverride(MethodOverride mo) throws BeanDefinitionValidationException {
+<span class="fc" id="L1092">		int count = ClassUtils.getMethodCountForName(getBeanClass(), mo.getMethodName());</span>
+<span class="pc bpc" id="L1093" title="1 of 2 branches missed.">		if (count == 0) {</span>
+<span class="nc" id="L1094">			throw new BeanDefinitionValidationException(</span>
+<span class="nc" id="L1095">					&quot;Invalid method override: no method with name '&quot; + mo.getMethodName() +</span>
+<span class="nc" id="L1096">					&quot;' on class [&quot; + getBeanClassName() + &quot;]&quot;);</span>
+		}
+<span class="fc bfc" id="L1098" title="All 2 branches covered.">		else if (count == 1) {</span>
+			// Mark override as not overloaded, to avoid the overhead of arg type checking.
+<span class="fc" id="L1100">			mo.setOverloaded(false);</span>
+		}
+<span class="fc" id="L1102">	}</span>
+
+
+	/**
+	 * Public declaration of Object's {@code clone()} method.
+	 * Delegates to {@link #cloneBeanDefinition()}.
+	 * @see Object#clone()
+	 */
+	@Override
+	public Object clone() {
+<span class="nc" id="L1112">		return cloneBeanDefinition();</span>
+	}
+
+	/**
+	 * Clone this bean definition.
+	 * To be implemented by concrete subclasses.
+	 * @return the cloned bean definition object
+	 */
+	public abstract AbstractBeanDefinition cloneBeanDefinition();
+
+	@Override
+	public boolean equals(Object other) {
+<span class="pc bpc" id="L1124" title="1 of 2 branches missed.">		if (this == other) {</span>
+<span class="nc" id="L1125">			return true;</span>
+		}
+<span class="pc bpc" id="L1127" title="1 of 2 branches missed.">		if (!(other instanceof AbstractBeanDefinition)) {</span>
+<span class="nc" id="L1128">			return false;</span>
+		}
+<span class="fc" id="L1130">		AbstractBeanDefinition that = (AbstractBeanDefinition) other;</span>
+<span class="fc" id="L1131">		boolean rtn = ObjectUtils.nullSafeEquals(getBeanClassName(), that.getBeanClassName());</span>
+<span class="fc" id="L1132">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.scope, that.scope);</span>
+<span class="fc bfc" id="L1133" title="All 2 branches covered.">		rtn = rtn &amp;= this.abstractFlag == that.abstractFlag;</span>
+<span class="fc bfc" id="L1134" title="All 2 branches covered.">		rtn = rtn &amp;= this.lazyInit == that.lazyInit;</span>
+<span class="pc bpc" id="L1135" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.autowireMode == that.autowireMode;</span>
+<span class="pc bpc" id="L1136" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.dependencyCheck == that.dependencyCheck;</span>
+<span class="fc" id="L1137">		rtn = rtn &amp;= Arrays.equals(this.dependsOn, that.dependsOn);</span>
+<span class="pc bpc" id="L1138" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.autowireCandidate == that.autowireCandidate;</span>
+<span class="fc" id="L1139">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.qualifiers, that.qualifiers);</span>
+<span class="pc bpc" id="L1140" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.primary == that.primary;</span>
+<span class="pc bpc" id="L1141" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.nonPublicAccessAllowed == that.nonPublicAccessAllowed;</span>
+<span class="pc bpc" id="L1142" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.lenientConstructorResolution == that.lenientConstructorResolution;</span>
+<span class="fc" id="L1143">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.constructorArgumentValues, that.constructorArgumentValues);</span>
+<span class="fc" id="L1144">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.propertyValues, that.propertyValues);</span>
+<span class="fc" id="L1145">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.methodOverrides, that.methodOverrides);</span>
+<span class="fc" id="L1146">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.factoryBeanName, that.factoryBeanName);</span>
+<span class="fc" id="L1147">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.factoryMethodName, that.factoryMethodName);</span>
+<span class="fc" id="L1148">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.initMethodName, that.initMethodName);</span>
+<span class="pc bpc" id="L1149" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.enforceInitMethod == that.enforceInitMethod;</span>
+<span class="fc" id="L1150">		rtn = rtn &amp;= ObjectUtils.nullSafeEquals(this.destroyMethodName, that.destroyMethodName);</span>
+<span class="pc bpc" id="L1151" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.enforceDestroyMethod == that.enforceDestroyMethod;</span>
+<span class="pc bpc" id="L1152" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.synthetic == that.synthetic;</span>
+<span class="pc bpc" id="L1153" title="1 of 2 branches missed.">		rtn = rtn &amp;= this.role == that.role;</span>
+<span class="pc bpc" id="L1154" title="1 of 4 branches missed.">		return rtn &amp;&amp; super.equals(other);</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="fc" id="L1159">		int hashCode = ObjectUtils.nullSafeHashCode(getBeanClassName());</span>
+<span class="fc" id="L1160">		hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(this.scope);</span>
+<span class="fc" id="L1161">		hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(this.constructorArgumentValues);</span>
+<span class="fc" id="L1162">		hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(this.propertyValues);</span>
+<span class="fc" id="L1163">		hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(this.factoryBeanName);</span>
+<span class="fc" id="L1164">		hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(this.factoryMethodName);</span>
+<span class="fc" id="L1165">		hashCode = 29 * hashCode + super.hashCode();</span>
+<span class="fc" id="L1166">		return hashCode;</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="fc" id="L1171">		StringBuilder sb = new StringBuilder(&quot;class [&quot;);</span>
+<span class="fc" id="L1172">		sb.append(getBeanClassName()).append(&quot;]&quot;);</span>
+<span class="fc" id="L1173">		sb.append(&quot;; scope=&quot;).append(this.scope);</span>
+<span class="fc" id="L1174">		sb.append(&quot;; abstract=&quot;).append(this.abstractFlag);</span>
+<span class="fc" id="L1175">		sb.append(&quot;; lazyInit=&quot;).append(this.lazyInit);</span>
+<span class="fc" id="L1176">		sb.append(&quot;; autowireMode=&quot;).append(this.autowireMode);</span>
+<span class="fc" id="L1177">		sb.append(&quot;; dependencyCheck=&quot;).append(this.dependencyCheck);</span>
+<span class="fc" id="L1178">		sb.append(&quot;; autowireCandidate=&quot;).append(this.autowireCandidate);</span>
+<span class="fc" id="L1179">		sb.append(&quot;; primary=&quot;).append(this.primary);</span>
+<span class="fc" id="L1180">		sb.append(&quot;; factoryBeanName=&quot;).append(this.factoryBeanName);</span>
+<span class="fc" id="L1181">		sb.append(&quot;; factoryMethodName=&quot;).append(this.factoryMethodName);</span>
+<span class="fc" id="L1182">		sb.append(&quot;; initMethodName=&quot;).append(this.initMethodName);</span>
+<span class="fc" id="L1183">		sb.append(&quot;; destroyMethodName=&quot;).append(this.destroyMethodName);</span>
+<span class="pc bpc" id="L1184" title="1 of 2 branches missed.">		if (this.resource != null) {</span>
+<span class="nc" id="L1185">			sb.append(&quot;; defined in &quot;).append(this.resource.getDescription());</span>
+		}
+<span class="fc" id="L1187">		return sb.toString();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

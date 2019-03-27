@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractInterfaceDrivenDependencyInjectionAspect.aj</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aspects</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.aspectj</a> &gt; <span class="el_source">AbstractInterfaceDrivenDependencyInjectionAspect.aj</span></div><h1>AbstractInterfaceDrivenDependencyInjectionAspect.aj</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2014 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.aspectj;
+
+import java.io.ObjectStreamException;
+import java.io.Serializable;
+
+/**
+ * An aspect that injects dependency into any object whose type implements the
+ * {@link ConfigurableObject} interface.
+ *
+ * &lt;p&gt;This aspect supports injecting into domain objects when they are created
+ * for the first time as well as upon deserialization. Subaspects need to simply
+ * provide definition for the configureBean() method. This method may be
+ * implemented without relying on Spring container if so desired.
+ *
+ * &lt;p&gt;There are two cases that needs to be handled:
+ * &lt;ol&gt;
+ * &lt;li&gt;Normal object creation via the '{@code new}' operator: this is
+ * taken care of by advising {@code initialization()} join points.&lt;/li&gt;
+ * &lt;li&gt;Object creation through deserialization: since no constructor is
+ * invoked during deserialization, the aspect needs to advise a method that a
+ * deserialization mechanism is going to invoke. Ideally, we should not
+ * require user classes to implement any specific method. This implies that
+ * we need to &lt;i&gt;introduce&lt;/i&gt; the chosen method. We should also handle the cases
+ * where the chosen method is already implemented in classes (in which case,
+ * the user's implementation for that method should take precedence over the
+ * introduced implementation). There are a few choices for the chosen method:
+ * &lt;ul&gt;
+ * &lt;li&gt;readObject(ObjectOutputStream): Java requires that the method must be
+ * {@code private}&lt;/p&gt;. Since aspects cannot introduce a private member,
+ * while preserving its name, this option is ruled out.&lt;/li&gt;
+ * &lt;li&gt;readResolve(): Java doesn't pose any restriction on an access specifier.
+ * Problem solved! There is one (minor) limitation of this approach in
+ * that if a user class already has this method, that method must be
+ * {@code public}. However, this shouldn't be a big burden, since
+ * use cases that need classes to implement readResolve() (custom enums,
+ * for example) are unlikely to be marked as &amp;#64;Configurable, and
+ * in any case asking to make that method {@code public} should not
+ * pose any undue burden.&lt;/li&gt;
+ * &lt;/ul&gt;
+ * The minor collaboration needed by user classes (i.e., that the implementation of
+ * {@code readResolve()}, if any, must be {@code public}) can be lifted as well if we
+ * were to use an experimental feature in AspectJ - the {@code hasmethod()} PCD.&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * &lt;p&gt;While having type implement the {@link ConfigurableObject} interface is certainly
+ * a valid choice, an alternative is to use a 'declare parents' statement another aspect
+ * (a subaspect of this aspect would be a logical choice) that declares the classes that
+ * need to be configured by supplying the {@link ConfigurableObject} interface.
+ *
+ * @author Ramnivas Laddad
+ * @since 2.5.2
+ */
+<span class="fc" id="L69">public abstract aspect AbstractInterfaceDrivenDependencyInjectionAspect extends AbstractDependencyInjectionAspect {</span>
+	/**
+	 * Select initialization join point as object construction
+	 */
+	public pointcut beanConstruction(Object bean) :
+			initialization(ConfigurableObject+.new(..)) &amp;&amp; this(bean);
+
+	/**
+	 * Select deserialization join point made available through ITDs for ConfigurableDeserializationSupport
+	 */
+	public pointcut beanDeserialization(Object bean) :
+			execution(Object ConfigurableDeserializationSupport+.readResolve()) &amp;&amp; this(bean);
+
+	public pointcut leastSpecificSuperTypeConstruction() : initialization(ConfigurableObject.new(..));
+
+
+
+	// Implementation to support re-injecting dependencies once an object is deserialized
+
+	/**
+	 * Declare any class implementing Serializable and ConfigurableObject as also implementing
+	 * ConfigurableDeserializationSupport. This allows us to introduce the {@code readResolve()}
+	 * method and select it with the beanDeserialization() pointcut.
+	 * &lt;p&gt;Here is an improved version that uses the hasmethod() pointcut and lifts
+	 * even the minor requirement on user classes:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * declare parents: ConfigurableObject+ Serializable+
+	 * &amp;&amp; !hasmethod(Object readResolve() throws ObjectStreamException)
+	 * implements ConfigurableDeserializationSupport;
+	 * &lt;/pre&gt;
+	 */
+	declare parents: ConfigurableObject+ &amp;&amp; Serializable+ implements ConfigurableDeserializationSupport;
+
+	/**
+	 * A marker interface to which the {@code readResolve()} is introduced.
+	 */
+	static interface ConfigurableDeserializationSupport extends Serializable {
+	}
+
+	/**
+	 * Introduce the {@code readResolve()} method so that we can advise its
+	 * execution to configure the object.
+	 * &lt;p&gt;Note if a method with the same signature already exists in a
+	 * {@code Serializable} class of ConfigurableObject type,
+	 * that implementation will take precedence (a good thing, since we are
+	 * merely interested in an opportunity to detect deserialization.)
+	 */
+	public Object ConfigurableDeserializationSupport.readResolve() throws ObjectStreamException {
+<span class="nc bnc" id="L117" title="All 4 branches missed.">		return this;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

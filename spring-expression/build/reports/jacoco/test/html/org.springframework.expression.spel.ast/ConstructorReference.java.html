@@ -1,0 +1,469 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConstructorReference.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.ast</a> &gt; <span class="el_source">ConstructorReference.java</span></div><h1>ConstructorReference.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.ast;
+
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.springframework.asm.MethodVisitor;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.AccessException;
+import org.springframework.expression.ConstructorExecutor;
+import org.springframework.expression.ConstructorResolver;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.TypeConverter;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.common.ExpressionUtils;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.ExpressionState;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.SpelNode;
+import org.springframework.expression.spel.support.ReflectiveConstructorExecutor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+
+/**
+ * Represents the invocation of a constructor. Either a constructor on a regular type or
+ * construction of an array. When an array is constructed, an initializer can be specified.
+ *
+ * &lt;p&gt;Examples:&lt;br&gt;
+ * new String('hello world')&lt;br&gt;
+ * new int[]{1,2,3,4}&lt;br&gt;
+ * new int[3] new int[3]{1,2,3}
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @since 3.0
+ */
+public class ConstructorReference extends SpelNodeImpl {
+
+<span class="fc" id="L60">	private boolean isArrayConstructor = false;</span>
+
+	@Nullable
+	private SpelNodeImpl[] dimensions;
+
+	// TODO is this caching safe - passing the expression around will mean this executor is also being passed around
+	/** The cached executor that may be reused on subsequent evaluations. */
+	@Nullable
+	private volatile ConstructorExecutor cachedExecutor;
+
+
+	/**
+	 * Create a constructor reference. The first argument is the type, the rest are the parameters to the constructor
+	 * call
+	 */
+	public ConstructorReference(int startPos, int endPos, SpelNodeImpl... arguments) {
+<span class="fc" id="L76">		super(startPos, endPos, arguments);</span>
+<span class="fc" id="L77">		this.isArrayConstructor = false;</span>
+<span class="fc" id="L78">	}</span>
+
+	/**
+	 * Create a constructor reference. The first argument is the type, the rest are the parameters to the constructor
+	 * call
+	 */
+	public ConstructorReference(int startPos, int endPos, SpelNodeImpl[] dimensions, SpelNodeImpl... arguments) {
+<span class="fc" id="L85">		super(startPos, endPos, arguments);</span>
+<span class="fc" id="L86">		this.isArrayConstructor = true;</span>
+<span class="fc" id="L87">		this.dimensions = dimensions;</span>
+<span class="fc" id="L88">	}</span>
+
+
+	/**
+	 * Implements getValue() - delegating to the code for building an array or a simple type.
+	 */
+	@Override
+	public TypedValue getValueInternal(ExpressionState state) throws EvaluationException {
+<span class="fc bfc" id="L96" title="All 2 branches covered.">		if (this.isArrayConstructor) {</span>
+<span class="fc" id="L97">			return createArray(state);</span>
+		}
+		else {
+<span class="fc" id="L100">			return createNewInstance(state);</span>
+		}
+	}
+
+	/**
+	 * Create a new ordinary object and return it.
+	 * @param state the expression state within which this expression is being evaluated
+	 * @return the new object
+	 * @throws EvaluationException if there is a problem creating the object
+	 */
+	private TypedValue createNewInstance(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L111">		Object[] arguments = new Object[getChildCount() - 1];</span>
+<span class="fc" id="L112">		List&lt;TypeDescriptor&gt; argumentTypes = new ArrayList&lt;&gt;(getChildCount() - 1);</span>
+<span class="fc bfc" id="L113" title="All 2 branches covered.">		for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="fc" id="L114">			TypedValue childValue = this.children[i + 1].getValueInternal(state);</span>
+<span class="fc" id="L115">			Object value = childValue.getValue();</span>
+<span class="fc" id="L116">			arguments[i] = value;</span>
+<span class="fc" id="L117">			argumentTypes.add(TypeDescriptor.forObject(value));</span>
+		}
+
+<span class="fc" id="L120">		ConstructorExecutor executorToUse = this.cachedExecutor;</span>
+<span class="fc bfc" id="L121" title="All 2 branches covered.">		if (executorToUse != null) {</span>
+			try {
+<span class="fc" id="L123">				return executorToUse.execute(state.getEvaluationContext(), arguments);</span>
+			}
+<span class="fc" id="L125">			catch (AccessException ex) {</span>
+				// Two reasons this can occur:
+				// 1. the method invoked actually threw a real exception
+				// 2. the method invoked was not passed the arguments it expected and has become 'stale'
+
+				// In the first case we should not retry, in the second case we should see if there is a
+				// better suited method.
+
+				// To determine which situation it is, the AccessException will contain a cause.
+				// If the cause is an InvocationTargetException, a user exception was thrown inside the constructor.
+				// Otherwise the constructor could not be invoked.
+<span class="fc bfc" id="L136" title="All 2 branches covered.">				if (ex.getCause() instanceof InvocationTargetException) {</span>
+					// User exception was the root cause - exit now
+<span class="fc" id="L138">					Throwable rootCause = ex.getCause().getCause();</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">					if (rootCause instanceof RuntimeException) {</span>
+<span class="fc" id="L140">						throw (RuntimeException) rootCause;</span>
+					}
+					else {
+<span class="fc" id="L143">						String typeName = (String) this.children[0].getValueInternal(state).getValue();</span>
+<span class="fc" id="L144">						throw new SpelEvaluationException(getStartPosition(), rootCause,</span>
+								SpelMessage.CONSTRUCTOR_INVOCATION_PROBLEM, typeName,
+<span class="fc" id="L146">								FormatHelper.formatMethodForMessage(&quot;&quot;, argumentTypes));</span>
+					}
+				}
+
+				// At this point we know it wasn't a user problem so worth a retry if a better candidate can be found
+<span class="fc" id="L151">				this.cachedExecutor = null;</span>
+			}
+		}
+
+		// Either there was no accessor or it no longer exists
+<span class="fc" id="L156">		String typeName = (String) this.children[0].getValueInternal(state).getValue();</span>
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">		Assert.state(typeName != null, &quot;No type name&quot;);</span>
+<span class="fc" id="L158">		executorToUse = findExecutorForConstructor(typeName, argumentTypes, state);</span>
+		try {
+<span class="fc" id="L160">			this.cachedExecutor = executorToUse;</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">			if (executorToUse instanceof ReflectiveConstructorExecutor) {</span>
+<span class="fc" id="L162">				this.exitTypeDescriptor = CodeFlow.toDescriptor(</span>
+<span class="fc" id="L163">						((ReflectiveConstructorExecutor) executorToUse).getConstructor().getDeclaringClass());</span>
+
+			}
+<span class="fc" id="L166">			return executorToUse.execute(state.getEvaluationContext(), arguments);</span>
+		}
+<span class="fc" id="L168">		catch (AccessException ex) {</span>
+<span class="fc" id="L169">			throw new SpelEvaluationException(getStartPosition(), ex,</span>
+					SpelMessage.CONSTRUCTOR_INVOCATION_PROBLEM, typeName,
+<span class="fc" id="L171">					FormatHelper.formatMethodForMessage(&quot;&quot;, argumentTypes));</span>
+		}
+	}
+
+	/**
+	 * Go through the list of registered constructor resolvers and see if any can find a
+	 * constructor that takes the specified set of arguments.
+	 * @param typeName the type trying to be constructed
+	 * @param argumentTypes the types of the arguments supplied that the constructor must take
+	 * @param state the current state of the expression
+	 * @return a reusable ConstructorExecutor that can be invoked to run the constructor or null
+	 * @throws SpelEvaluationException if there is a problem locating the constructor
+	 */
+	private ConstructorExecutor findExecutorForConstructor(String typeName,
+			List&lt;TypeDescriptor&gt; argumentTypes, ExpressionState state) throws SpelEvaluationException {
+
+<span class="fc" id="L187">		EvaluationContext evalContext = state.getEvaluationContext();</span>
+<span class="fc" id="L188">		List&lt;ConstructorResolver&gt; ctorResolvers = evalContext.getConstructorResolvers();</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">		for (ConstructorResolver ctorResolver : ctorResolvers) {</span>
+			try {
+<span class="fc" id="L191">				ConstructorExecutor ce = ctorResolver.resolve(state.getEvaluationContext(), typeName, argumentTypes);</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">				if (ce != null) {</span>
+<span class="fc" id="L193">					return ce;</span>
+				}
+			}
+<span class="fc" id="L196">			catch (AccessException ex) {</span>
+<span class="fc" id="L197">				throw new SpelEvaluationException(getStartPosition(), ex,</span>
+						SpelMessage.CONSTRUCTOR_INVOCATION_PROBLEM, typeName,
+<span class="fc" id="L199">						FormatHelper.formatMethodForMessage(&quot;&quot;, argumentTypes));</span>
+<span class="nc" id="L200">			}</span>
+<span class="nc" id="L201">		}</span>
+<span class="nc" id="L202">		throw new SpelEvaluationException(getStartPosition(), SpelMessage.CONSTRUCTOR_NOT_FOUND, typeName,</span>
+<span class="nc" id="L203">				FormatHelper.formatMethodForMessage(&quot;&quot;, argumentTypes));</span>
+	}
+
+	@Override
+	public String toStringAST() {
+<span class="fc" id="L208">		StringBuilder sb = new StringBuilder(&quot;new &quot;);</span>
+<span class="fc" id="L209">		int index = 0;</span>
+<span class="fc" id="L210">		sb.append(getChild(index++).toStringAST());</span>
+<span class="fc" id="L211">		sb.append(&quot;(&quot;);</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">		for (int i = index; i &lt; getChildCount(); i++) {</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">			if (i &gt; index) {</span>
+<span class="nc" id="L214">				sb.append(&quot;,&quot;);</span>
+			}
+<span class="fc" id="L216">			sb.append(getChild(i).toStringAST());</span>
+		}
+<span class="fc" id="L218">		sb.append(&quot;)&quot;);</span>
+<span class="fc" id="L219">		return sb.toString();</span>
+	}
+
+	/**
+	 * Create an array and return it.
+	 * @param state the expression state within which this expression is being evaluated
+	 * @return the new array
+	 * @throws EvaluationException if there is a problem creating the array
+	 */
+	private TypedValue createArray(ExpressionState state) throws EvaluationException {
+		// First child gives us the array type which will either be a primitive or reference type
+<span class="fc" id="L230">		Object intendedArrayType = getChild(0).getValue(state);</span>
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">		if (!(intendedArrayType instanceof String)) {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">			throw new SpelEvaluationException(getChild(0).getStartPosition(),</span>
+					SpelMessage.TYPE_NAME_EXPECTED_FOR_ARRAY_CONSTRUCTION,
+<span class="nc" id="L234">					FormatHelper.formatClassNameForMessage(</span>
+<span class="nc" id="L235">							intendedArrayType != null ? intendedArrayType.getClass() : null));</span>
+		}
+<span class="fc" id="L237">		String type = (String) intendedArrayType;</span>
+		Class&lt;?&gt; componentType;
+<span class="fc" id="L239">		TypeCode arrayTypeCode = TypeCode.forName(type);</span>
+<span class="fc bfc" id="L240" title="All 2 branches covered.">		if (arrayTypeCode == TypeCode.OBJECT) {</span>
+<span class="fc" id="L241">			componentType = state.findType(type);</span>
+		}
+		else {
+<span class="fc" id="L244">			componentType = arrayTypeCode.getType();</span>
+		}
+		Object newArray;
+<span class="fc bfc" id="L247" title="All 2 branches covered.">		if (!hasInitializer()) {</span>
+			// Confirm all dimensions were specified (for example [3][][5] is missing the 2nd dimension)
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">			if (this.dimensions != null) {</span>
+<span class="fc bfc" id="L250" title="All 2 branches covered.">				for (SpelNodeImpl dimension : this.dimensions) {</span>
+<span class="fc bfc" id="L251" title="All 2 branches covered.">					if (dimension == null) {</span>
+<span class="fc" id="L252">						throw new SpelEvaluationException(getStartPosition(), SpelMessage.MISSING_ARRAY_DIMENSION);</span>
+					}
+				}
+			}
+<span class="fc" id="L256">			TypeConverter typeConverter = state.getEvaluationContext().getTypeConverter();</span>
+
+			// Shortcut for 1 dimensional
+<span class="fc bfc" id="L259" title="All 2 branches covered.">			if (this.dimensions.length == 1) {</span>
+<span class="fc" id="L260">				TypedValue o = this.dimensions[0].getTypedValue(state);</span>
+<span class="fc" id="L261">				int arraySize = ExpressionUtils.toInt(typeConverter, o);</span>
+<span class="fc" id="L262">				newArray = Array.newInstance(componentType, arraySize);</span>
+<span class="fc" id="L263">			}</span>
+			else {
+				// Multi-dimensional - hold onto your hat!
+<span class="fc" id="L266">				int[] dims = new int[this.dimensions.length];</span>
+<span class="fc bfc" id="L267" title="All 2 branches covered.">				for (int d = 0; d &lt; this.dimensions.length; d++) {</span>
+<span class="fc" id="L268">					TypedValue o = this.dimensions[d].getTypedValue(state);</span>
+<span class="fc" id="L269">					dims[d] = ExpressionUtils.toInt(typeConverter, o);</span>
+				}
+<span class="fc" id="L271">				newArray = Array.newInstance(componentType, dims);</span>
+			}
+<span class="fc" id="L273">		}</span>
+		else {
+			// There is an initializer
+<span class="pc bpc" id="L276" title="1 of 4 branches missed.">			if (this.dimensions == null || this.dimensions.length &gt; 1) {</span>
+				// There is an initializer but this is a multi-dimensional array (e.g. new int[][]{{1,2},{3,4}}) - this
+				// is not currently supported
+<span class="fc" id="L279">				throw new SpelEvaluationException(getStartPosition(),</span>
+						SpelMessage.MULTIDIM_ARRAY_INITIALIZER_NOT_SUPPORTED);
+			}
+<span class="fc" id="L282">			TypeConverter typeConverter = state.getEvaluationContext().getTypeConverter();</span>
+<span class="fc" id="L283">			InlineList initializer = (InlineList) getChild(1);</span>
+			// If a dimension was specified, check it matches the initializer length
+<span class="fc bfc" id="L285" title="All 2 branches covered.">			if (this.dimensions[0] != null) {</span>
+<span class="fc" id="L286">				TypedValue dValue = this.dimensions[0].getTypedValue(state);</span>
+<span class="fc" id="L287">				int i = ExpressionUtils.toInt(typeConverter, dValue);</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">				if (i != initializer.getChildCount()) {</span>
+<span class="fc" id="L289">					throw new SpelEvaluationException(getStartPosition(), SpelMessage.INITIALIZER_LENGTH_INCORRECT);</span>
+				}
+			}
+			// Build the array and populate it
+<span class="fc" id="L293">			int arraySize = initializer.getChildCount();</span>
+<span class="fc" id="L294">			newArray = Array.newInstance(componentType, arraySize);</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">			if (arrayTypeCode == TypeCode.OBJECT) {</span>
+<span class="fc" id="L296">				populateReferenceTypeArray(state, newArray, typeConverter, initializer, componentType);</span>
+			}
+<span class="fc bfc" id="L298" title="All 2 branches covered.">			else if (arrayTypeCode == TypeCode.BOOLEAN) {</span>
+<span class="fc" id="L299">				populateBooleanArray(state, newArray, typeConverter, initializer);</span>
+			}
+<span class="fc bfc" id="L301" title="All 2 branches covered.">			else if (arrayTypeCode == TypeCode.BYTE) {</span>
+<span class="fc" id="L302">				populateByteArray(state, newArray, typeConverter, initializer);</span>
+			}
+<span class="fc bfc" id="L304" title="All 2 branches covered.">			else if (arrayTypeCode == TypeCode.CHAR) {</span>
+<span class="fc" id="L305">				populateCharArray(state, newArray, typeConverter, initializer);</span>
+			}
+<span class="fc bfc" id="L307" title="All 2 branches covered.">			else if (arrayTypeCode == TypeCode.DOUBLE) {</span>
+<span class="fc" id="L308">				populateDoubleArray(state, newArray, typeConverter, initializer);</span>
+			}
+<span class="fc bfc" id="L310" title="All 2 branches covered.">			else if (arrayTypeCode == TypeCode.FLOAT) {</span>
+<span class="fc" id="L311">				populateFloatArray(state, newArray, typeConverter, initializer);</span>
+			}
+<span class="fc bfc" id="L313" title="All 2 branches covered.">			else if (arrayTypeCode == TypeCode.INT) {</span>
+<span class="fc" id="L314">				populateIntArray(state, newArray, typeConverter, initializer);</span>
+			}
+<span class="fc bfc" id="L316" title="All 2 branches covered.">			else if (arrayTypeCode == TypeCode.LONG) {</span>
+<span class="fc" id="L317">				populateLongArray(state, newArray, typeConverter, initializer);</span>
+			}
+<span class="pc bpc" id="L319" title="1 of 2 branches missed.">			else if (arrayTypeCode == TypeCode.SHORT) {</span>
+<span class="fc" id="L320">				populateShortArray(state, newArray, typeConverter, initializer);</span>
+			}
+			else {
+<span class="nc" id="L323">				throw new IllegalStateException(arrayTypeCode.name());</span>
+			}
+		}
+<span class="fc" id="L326">		return new TypedValue(newArray);</span>
+	}
+
+	private void populateReferenceTypeArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer, Class&lt;?&gt; componentType) {
+
+<span class="fc" id="L332">		TypeDescriptor toTypeDescriptor = TypeDescriptor.valueOf(componentType);</span>
+<span class="fc" id="L333">		Object[] newObjectArray = (Object[]) newArray;</span>
+<span class="fc bfc" id="L334" title="All 2 branches covered.">		for (int i = 0; i &lt; newObjectArray.length; i++) {</span>
+<span class="fc" id="L335">			SpelNode elementNode = initializer.getChild(i);</span>
+<span class="fc" id="L336">			Object arrayEntry = elementNode.getValue(state);</span>
+<span class="fc" id="L337">			newObjectArray[i] = typeConverter.convertValue(arrayEntry,</span>
+<span class="fc" id="L338">					TypeDescriptor.forObject(arrayEntry), toTypeDescriptor);</span>
+		}
+<span class="fc" id="L340">	}</span>
+
+	private void populateByteArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L345">		byte[] newByteArray = (byte[]) newArray;</span>
+<span class="fc bfc" id="L346" title="All 2 branches covered.">		for (int i = 0; i &lt; newByteArray.length; i++) {</span>
+<span class="fc" id="L347">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L348">			newByteArray[i] = ExpressionUtils.toByte(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L350">	}</span>
+
+	private void populateFloatArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L355">		float[] newFloatArray = (float[]) newArray;</span>
+<span class="fc bfc" id="L356" title="All 2 branches covered.">		for (int i = 0; i &lt; newFloatArray.length; i++) {</span>
+<span class="fc" id="L357">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L358">			newFloatArray[i] = ExpressionUtils.toFloat(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L360">	}</span>
+
+	private void populateDoubleArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L365">		double[] newDoubleArray = (double[]) newArray;</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">		for (int i = 0; i &lt; newDoubleArray.length; i++) {</span>
+<span class="fc" id="L367">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L368">			newDoubleArray[i] = ExpressionUtils.toDouble(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L370">	}</span>
+
+	private void populateShortArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L375">		short[] newShortArray = (short[]) newArray;</span>
+<span class="fc bfc" id="L376" title="All 2 branches covered.">		for (int i = 0; i &lt; newShortArray.length; i++) {</span>
+<span class="fc" id="L377">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L378">			newShortArray[i] = ExpressionUtils.toShort(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L380">	}</span>
+
+	private void populateLongArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L385">		long[] newLongArray = (long[]) newArray;</span>
+<span class="fc bfc" id="L386" title="All 2 branches covered.">		for (int i = 0; i &lt; newLongArray.length; i++) {</span>
+<span class="fc" id="L387">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L388">			newLongArray[i] = ExpressionUtils.toLong(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L390">	}</span>
+
+	private void populateCharArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L395">		char[] newCharArray = (char[]) newArray;</span>
+<span class="fc bfc" id="L396" title="All 2 branches covered.">		for (int i = 0; i &lt; newCharArray.length; i++) {</span>
+<span class="fc" id="L397">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L398">			newCharArray[i] = ExpressionUtils.toChar(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L400">	}</span>
+
+	private void populateBooleanArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L405">		boolean[] newBooleanArray = (boolean[]) newArray;</span>
+<span class="fc bfc" id="L406" title="All 2 branches covered.">		for (int i = 0; i &lt; newBooleanArray.length; i++) {</span>
+<span class="fc" id="L407">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L408">			newBooleanArray[i] = ExpressionUtils.toBoolean(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L410">	}</span>
+
+	private void populateIntArray(ExpressionState state, Object newArray, TypeConverter typeConverter,
+			InlineList initializer) {
+
+<span class="fc" id="L415">		int[] newIntArray = (int[]) newArray;</span>
+<span class="fc bfc" id="L416" title="All 2 branches covered.">		for (int i = 0; i &lt; newIntArray.length; i++) {</span>
+<span class="fc" id="L417">			TypedValue typedValue = initializer.getChild(i).getTypedValue(state);</span>
+<span class="fc" id="L418">			newIntArray[i] = ExpressionUtils.toInt(typeConverter, typedValue);</span>
+		}
+<span class="fc" id="L420">	}</span>
+
+	private boolean hasInitializer() {
+<span class="fc bfc" id="L423" title="All 2 branches covered.">		return (getChildCount() &gt; 1);</span>
+	}
+
+	@Override
+	public boolean isCompilable() {
+<span class="pc bpc" id="L428" title="2 of 4 branches missed.">		if (!(this.cachedExecutor instanceof ReflectiveConstructorExecutor) ||</span>
+			this.exitTypeDescriptor == null) {
+<span class="nc" id="L430">			return false;</span>
+		}
+
+<span class="fc bfc" id="L433" title="All 2 branches covered.">		if (getChildCount() &gt; 1) {</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">			for (int c = 1, max = getChildCount();c &lt; max; c++) {</span>
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">				if (!this.children[c].isCompilable()) {</span>
+<span class="nc" id="L436">					return false;</span>
+				}
+			}
+		}
+
+<span class="fc" id="L441">		ReflectiveConstructorExecutor executor = (ReflectiveConstructorExecutor) this.cachedExecutor;</span>
+<span class="pc bpc" id="L442" title="1 of 2 branches missed.">		if (executor == null) {</span>
+<span class="nc" id="L443">			return false;</span>
+		}
+<span class="fc" id="L445">		Constructor&lt;?&gt; constructor = executor.getConstructor();</span>
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">		return (Modifier.isPublic(constructor.getModifiers()) &amp;&amp;</span>
+<span class="fc bfc" id="L447" title="All 2 branches covered.">				Modifier.isPublic(constructor.getDeclaringClass().getModifiers()));</span>
+	}
+
+	@Override
+	public void generateCode(MethodVisitor mv, CodeFlow cf) {
+<span class="fc" id="L452">		ReflectiveConstructorExecutor executor = ((ReflectiveConstructorExecutor) this.cachedExecutor);</span>
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">		Assert.state(executor != null, &quot;No cached executor&quot;);</span>
+
+<span class="fc" id="L455">		Constructor&lt;?&gt; constructor = executor.getConstructor();</span>
+<span class="fc" id="L456">		String classDesc = constructor.getDeclaringClass().getName().replace('.', '/');</span>
+<span class="fc" id="L457">		mv.visitTypeInsn(NEW, classDesc);</span>
+<span class="fc" id="L458">		mv.visitInsn(DUP);</span>
+
+		// children[0] is the type of the constructor, don't want to include that in argument processing
+<span class="fc" id="L461">		SpelNodeImpl[] arguments = new SpelNodeImpl[this.children.length - 1];</span>
+<span class="fc" id="L462">		System.arraycopy(this.children, 1, arguments, 0, this.children.length - 1);</span>
+<span class="fc" id="L463">		generateCodeForArguments(mv, cf, constructor, arguments);</span>
+<span class="fc" id="L464">		mv.visitMethodInsn(INVOKESPECIAL, classDesc, &quot;&lt;init&gt;&quot;, CodeFlow.createSignatureDescriptor(constructor), false);</span>
+<span class="fc" id="L465">		cf.pushDescriptor(this.exitTypeDescriptor);</span>
+<span class="fc" id="L466">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

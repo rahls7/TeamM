@@ -1,0 +1,748 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultPersistenceUnitManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.jpa.persistenceunit</a> &gt; <span class="el_source">DefaultPersistenceUnitManager.java</span></div><h1>DefaultPersistenceUnitManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.jpa.persistenceunit;
+
+import java.io.IOException;
+import java.net.URL;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import javax.persistence.Converter;
+import javax.persistence.Embeddable;
+import javax.persistence.Entity;
+import javax.persistence.MappedSuperclass;
+import javax.persistence.PersistenceException;
+import javax.persistence.SharedCacheMode;
+import javax.persistence.ValidationMode;
+import javax.persistence.spi.PersistenceUnitInfo;
+import javax.sql.DataSource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ResourceLoaderAware;
+import org.springframework.context.index.CandidateComponentsIndex;
+import org.springframework.context.index.CandidateComponentsIndexLoader;
+import org.springframework.context.weaving.LoadTimeWeaverAware;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternUtils;
+import org.springframework.core.type.classreading.CachingMetadataReaderFactory;
+import org.springframework.core.type.classreading.MetadataReader;
+import org.springframework.core.type.classreading.MetadataReaderFactory;
+import org.springframework.core.type.filter.AnnotationTypeFilter;
+import org.springframework.core.type.filter.TypeFilter;
+import org.springframework.instrument.classloading.InstrumentationLoadTimeWeaver;
+import org.springframework.instrument.classloading.LoadTimeWeaver;
+import org.springframework.jdbc.datasource.lookup.DataSourceLookup;
+import org.springframework.jdbc.datasource.lookup.JndiDataSourceLookup;
+import org.springframework.jdbc.datasource.lookup.MapDataSourceLookup;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ResourceUtils;
+
+/**
+ * Default implementation of the {@link PersistenceUnitManager} interface.
+ * Used as internal default by
+ * {@link org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean}.
+ *
+ * &lt;p&gt;Supports standard JPA scanning for {@code persistence.xml} files,
+ * with configurable file locations, JDBC DataSource lookup and load-time weaving.
+ *
+ * &lt;p&gt;The default XML file location is {@code classpath*:META-INF/persistence.xml},
+ * scanning for all matching files in the classpath (as defined in the JPA specification).
+ * DataSource names are by default interpreted as JNDI names, and no load time weaving
+ * is available (which requires weaving to be turned off in the persistence provider).
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: Spring's JPA support requires JPA 2.1 or higher, as of Spring 5.0.&lt;/b&gt;
+ *
+ * @author Juergen Hoeller
+ * @author Stephane Nicoll
+ * @since 2.0
+ * @see #setPersistenceXmlLocations
+ * @see #setDataSourceLookup
+ * @see #setLoadTimeWeaver
+ * @see org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean#setPersistenceUnitManager
+ */
+<span class="fc" id="L89">public class DefaultPersistenceUnitManager</span>
+		implements PersistenceUnitManager, ResourceLoaderAware, LoadTimeWeaverAware, InitializingBean {
+
+	private static final String CLASS_RESOURCE_PATTERN = &quot;/**/*.class&quot;;
+
+	private static final String PACKAGE_INFO_SUFFIX = &quot;.package-info&quot;;
+
+	private static final String DEFAULT_ORM_XML_RESOURCE = &quot;META-INF/orm.xml&quot;;
+
+	private static final String PERSISTENCE_XML_FILENAME = &quot;persistence.xml&quot;;
+
+	/**
+	 * Default location of the {@code persistence.xml} file:
+	 * &quot;classpath*:META-INF/persistence.xml&quot;.
+	 */
+	public static final String DEFAULT_PERSISTENCE_XML_LOCATION = &quot;classpath*:META-INF/&quot; + PERSISTENCE_XML_FILENAME;
+
+	/**
+	 * Default location for the persistence unit root URL:
+	 * &quot;classpath:&quot;, indicating the root of the classpath.
+	 */
+	public static final String ORIGINAL_DEFAULT_PERSISTENCE_UNIT_ROOT_LOCATION = &quot;classpath:&quot;;
+
+	/**
+	 * Default persistence unit name.
+	 */
+	public static final String ORIGINAL_DEFAULT_PERSISTENCE_UNIT_NAME = &quot;default&quot;;
+
+
+	private static final Set&lt;AnnotationTypeFilter&gt; entityTypeFilters;
+
+	static {
+<span class="fc" id="L121">		entityTypeFilters = new LinkedHashSet&lt;&gt;(8);</span>
+<span class="fc" id="L122">		entityTypeFilters.add(new AnnotationTypeFilter(Entity.class, false));</span>
+<span class="fc" id="L123">		entityTypeFilters.add(new AnnotationTypeFilter(Embeddable.class, false));</span>
+<span class="fc" id="L124">		entityTypeFilters.add(new AnnotationTypeFilter(MappedSuperclass.class, false));</span>
+<span class="fc" id="L125">		entityTypeFilters.add(new AnnotationTypeFilter(Converter.class, false));</span>
+<span class="fc" id="L126">	}</span>
+
+
+<span class="fc" id="L129">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L131">	private String[] persistenceXmlLocations = new String[] {DEFAULT_PERSISTENCE_XML_LOCATION};</span>
+
+<span class="fc" id="L133">	@Nullable</span>
+	private String defaultPersistenceUnitRootLocation = ORIGINAL_DEFAULT_PERSISTENCE_UNIT_ROOT_LOCATION;
+
+<span class="fc" id="L136">	@Nullable</span>
+	private String defaultPersistenceUnitName = ORIGINAL_DEFAULT_PERSISTENCE_UNIT_NAME;
+
+	@Nullable
+	private String[] packagesToScan;
+
+	@Nullable
+	private String[] mappingResources;
+
+	@Nullable
+	private SharedCacheMode sharedCacheMode;
+
+	@Nullable
+	private ValidationMode validationMode;
+
+<span class="fc" id="L151">	private DataSourceLookup dataSourceLookup = new JndiDataSourceLookup();</span>
+
+	@Nullable
+	private DataSource defaultDataSource;
+
+	@Nullable
+	private DataSource defaultJtaDataSource;
+
+	@Nullable
+	private PersistenceUnitPostProcessor[] persistenceUnitPostProcessors;
+
+	@Nullable
+	private LoadTimeWeaver loadTimeWeaver;
+
+<span class="fc" id="L165">	private ResourcePatternResolver resourcePatternResolver = new PathMatchingResourcePatternResolver();</span>
+
+	@Nullable
+	private CandidateComponentsIndex componentsIndex;
+
+<span class="fc" id="L170">	private final Set&lt;String&gt; persistenceUnitInfoNames = new HashSet&lt;&gt;();</span>
+
+<span class="fc" id="L172">	private final Map&lt;String, PersistenceUnitInfo&gt; persistenceUnitInfos = new HashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Specify the location of the {@code persistence.xml} files to load.
+	 * These can be specified as Spring resource locations and/or location patterns.
+	 * &lt;p&gt;Default is &quot;classpath*:META-INF/persistence.xml&quot;.
+	 */
+	public void setPersistenceXmlLocation(String persistenceXmlLocation) {
+<span class="fc" id="L181">		this.persistenceXmlLocations = new String[] {persistenceXmlLocation};</span>
+<span class="fc" id="L182">	}</span>
+
+	/**
+	 * Specify multiple locations of {@code persistence.xml} files to load.
+	 * These can be specified as Spring resource locations and/or location patterns.
+	 * &lt;p&gt;Default is &quot;classpath*:META-INF/persistence.xml&quot;.
+	 * @param persistenceXmlLocations an array of Spring resource Strings
+	 * identifying the location of the {@code persistence.xml} files to read
+	 */
+	public void setPersistenceXmlLocations(String... persistenceXmlLocations) {
+<span class="fc" id="L192">		this.persistenceXmlLocations = persistenceXmlLocations;</span>
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * Set the default persistence unit root location, to be applied
+	 * if no unit-specific persistence unit root could be determined.
+	 * &lt;p&gt;Default is &quot;classpath:&quot;, that is, the root of the current classpath
+	 * (nearest root directory). To be overridden if unit-specific resolution
+	 * does not work and the classpath root is not appropriate either.
+	 */
+	public void setDefaultPersistenceUnitRootLocation(String defaultPersistenceUnitRootLocation) {
+<span class="nc" id="L203">		this.defaultPersistenceUnitRootLocation = defaultPersistenceUnitRootLocation;</span>
+<span class="nc" id="L204">	}</span>
+
+	/**
+	 * Specify the name of the default persistence unit, if any. Default is &quot;default&quot;.
+	 * &lt;p&gt;Primarily applied to a scanned persistence unit without {@code persistence.xml}.
+	 * Also applicable to selecting a default unit from several persistence units available.
+	 * @see #setPackagesToScan
+	 * @see #obtainDefaultPersistenceUnitInfo
+	 */
+	public void setDefaultPersistenceUnitName(String defaultPersistenceUnitName) {
+<span class="fc" id="L214">		this.defaultPersistenceUnitName = defaultPersistenceUnitName;</span>
+<span class="fc" id="L215">	}</span>
+
+	/**
+	 * Set whether to use Spring-based scanning for entity classes in the classpath
+	 * instead of using JPA's standard scanning of jar files with {@code persistence.xml}
+	 * markers in them. In case of Spring-based scanning, no {@code persistence.xml}
+	 * is necessary; all you need to do is to specify base packages to search here.
+	 * &lt;p&gt;Default is none. Specify packages to search for autodetection of your entity
+	 * classes in the classpath. This is analogous to Spring's component-scan feature
+	 * ({@link org.springframework.context.annotation.ClassPathBeanDefinitionScanner}).
+	 * &lt;p&gt;Such package scanning defines a &quot;default persistence unit&quot; in Spring, which
+	 * may live next to regularly defined units originating from {@code persistence.xml}.
+	 * Its name is determined by {@link #setDefaultPersistenceUnitName}: by default,
+	 * it's simply &quot;default&quot;.
+	 * &lt;p&gt;&lt;b&gt;Note: There may be limitations in comparison to regular JPA scanning.&lt;/b&gt;
+	 * In particular, JPA providers may pick up annotated packages for provider-specific
+	 * annotations only when driven by {@code persistence.xml}. As of 4.1, Spring's
+	 * scan can detect annotated packages as well if supported by the given
+	 * {@link org.springframework.orm.jpa.JpaVendorAdapter} (e.g. for Hibernate).
+	 * &lt;p&gt;If no explicit {@link #setMappingResources mapping resources} have been
+	 * specified in addition to these packages, this manager looks for a default
+	 * {@code META-INF/orm.xml} file in the classpath, registering it as a mapping
+	 * resource for the default unit if the mapping file is not co-located with a
+	 * {@code persistence.xml} file (in which case we assume it is only meant to be
+	 * used with the persistence units defined there, like in standard JPA).
+	 * @see #setDefaultPersistenceUnitName
+	 * @see #setMappingResources
+	 */
+	public void setPackagesToScan(String... packagesToScan) {
+<span class="fc" id="L244">		this.packagesToScan = packagesToScan;</span>
+<span class="fc" id="L245">	}</span>
+
+	/**
+	 * Specify one or more mapping resources (equivalent to {@code &lt;mapping-file&gt;}
+	 * entries in {@code persistence.xml}) for the default persistence unit.
+	 * Can be used on its own or in combination with entity scanning in the classpath,
+	 * in both cases avoiding {@code persistence.xml}.
+	 * &lt;p&gt;Note that mapping resources must be relative to the classpath root,
+	 * e.g. &quot;META-INF/mappings.xml&quot; or &quot;com/mycompany/repository/mappings.xml&quot;,
+	 * so that they can be loaded through {@code ClassLoader.getResource}.
+	 * &lt;p&gt;If no explicit mapping resources have been specified next to
+	 * {@link #setPackagesToScan packages to scan}, this manager looks for a default
+	 * {@code META-INF/orm.xml} file in the classpath, registering it as a mapping
+	 * resource for the default unit if the mapping file is not co-located with a
+	 * {@code persistence.xml} file (in which case we assume it is only meant to be
+	 * used with the persistence units defined there, like in standard JPA).
+	 * &lt;p&gt;Note that specifying an empty array/list here suppresses the default
+	 * {@code META-INF/orm.xml} check. On the other hand, explicitly specifying
+	 * {@code META-INF/orm.xml} here will register that file even if it happens
+	 * to be co-located with a {@code persistence.xml} file.
+	 * @see #setDefaultPersistenceUnitName
+	 * @see #setPackagesToScan
+	 */
+	public void setMappingResources(String... mappingResources) {
+<span class="nc" id="L269">		this.mappingResources = mappingResources;</span>
+<span class="nc" id="L270">	}</span>
+
+	/**
+	 * Specify the JPA 2.0 shared cache mode for all of this manager's persistence
+	 * units, overriding any value in {@code persistence.xml} if set.
+	 * @since 4.0
+	 * @see javax.persistence.spi.PersistenceUnitInfo#getSharedCacheMode()
+	 */
+	public void setSharedCacheMode(SharedCacheMode sharedCacheMode) {
+<span class="nc" id="L279">		this.sharedCacheMode = sharedCacheMode;</span>
+<span class="nc" id="L280">	}</span>
+
+	/**
+	 * Specify the JPA 2.0 validation mode for all of this manager's persistence
+	 * units, overriding any value in {@code persistence.xml} if set.
+	 * @since 4.0
+	 * @see javax.persistence.spi.PersistenceUnitInfo#getValidationMode()
+	 */
+	public void setValidationMode(ValidationMode validationMode) {
+<span class="nc" id="L289">		this.validationMode = validationMode;</span>
+<span class="nc" id="L290">	}</span>
+
+	/**
+	 * Specify the JDBC DataSources that the JPA persistence provider is supposed
+	 * to use for accessing the database, resolving data source names in
+	 * {@code persistence.xml} against Spring-managed DataSources.
+	 * &lt;p&gt;The specified Map needs to define data source names for specific DataSource
+	 * objects, matching the data source names used in {@code persistence.xml}.
+	 * If not specified, data source names will be resolved as JNDI names instead
+	 * (as defined by standard JPA).
+	 * @see org.springframework.jdbc.datasource.lookup.MapDataSourceLookup
+	 */
+	public void setDataSources(Map&lt;String, DataSource&gt; dataSources) {
+<span class="nc" id="L303">		this.dataSourceLookup = new MapDataSourceLookup(dataSources);</span>
+<span class="nc" id="L304">	}</span>
+
+	/**
+	 * Specify the JDBC DataSourceLookup that provides DataSources for the
+	 * persistence provider, resolving data source names in {@code persistence.xml}
+	 * against Spring-managed DataSource instances.
+	 * &lt;p&gt;Default is JndiDataSourceLookup, which resolves DataSource names as
+	 * JNDI names (as defined by standard JPA). Specify a BeanFactoryDataSourceLookup
+	 * instance if you want DataSource names to be resolved against Spring bean names.
+	 * &lt;p&gt;Alternatively, consider passing in a map from names to DataSource instances
+	 * via the &quot;dataSources&quot; property. If the {@code persistence.xml} file
+	 * does not define DataSource names at all, specify a default DataSource
+	 * via the &quot;defaultDataSource&quot; property.
+	 * @see org.springframework.jdbc.datasource.lookup.JndiDataSourceLookup
+	 * @see org.springframework.jdbc.datasource.lookup.BeanFactoryDataSourceLookup
+	 * @see #setDataSources
+	 * @see #setDefaultDataSource
+	 */
+	public void setDataSourceLookup(@Nullable DataSourceLookup dataSourceLookup) {
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">		this.dataSourceLookup = (dataSourceLookup != null ? dataSourceLookup : new JndiDataSourceLookup());</span>
+<span class="fc" id="L324">	}</span>
+
+	/**
+	 * Return the JDBC DataSourceLookup that provides DataSources for the
+	 * persistence provider, resolving data source names in {@code persistence.xml}
+	 * against Spring-managed DataSource instances.
+	 */
+	@Nullable
+	public DataSourceLookup getDataSourceLookup() {
+<span class="nc" id="L333">		return this.dataSourceLookup;</span>
+	}
+
+	/**
+	 * Specify the JDBC DataSource that the JPA persistence provider is supposed to use
+	 * for accessing the database if none has been specified in {@code persistence.xml}.
+	 * This variant indicates no special transaction setup, i.e. typical resource-local.
+	 * &lt;p&gt;In JPA speak, a DataSource passed in here will be uses as &quot;nonJtaDataSource&quot;
+	 * on the PersistenceUnitInfo passed to the PersistenceProvider, provided that
+	 * none has been registered before.
+	 * @see javax.persistence.spi.PersistenceUnitInfo#getNonJtaDataSource()
+	 */
+	public void setDefaultDataSource(@Nullable DataSource defaultDataSource) {
+<span class="fc" id="L346">		this.defaultDataSource = defaultDataSource;</span>
+<span class="fc" id="L347">	}</span>
+
+	/**
+	 * Return the JDBC DataSource that the JPA persistence provider is supposed to use
+	 * for accessing the database if none has been specified in {@code persistence.xml}.
+	 */
+	@Nullable
+	public DataSource getDefaultDataSource() {
+<span class="nc" id="L355">		return this.defaultDataSource;</span>
+	}
+
+	/**
+	 * Specify the JDBC DataSource that the JPA persistence provider is supposed to use
+	 * for accessing the database if none has been specified in {@code persistence.xml}.
+	 * This variant indicates that JTA is supposed to be used as transaction type.
+	 * &lt;p&gt;In JPA speak, a DataSource passed in here will be uses as &quot;jtaDataSource&quot;
+	 * on the PersistenceUnitInfo passed to the PersistenceProvider, provided that
+	 * none has been registered before.
+	 * @see javax.persistence.spi.PersistenceUnitInfo#getJtaDataSource()
+	 */
+	public void setDefaultJtaDataSource(@Nullable DataSource defaultJtaDataSource) {
+<span class="nc" id="L368">		this.defaultJtaDataSource = defaultJtaDataSource;</span>
+<span class="nc" id="L369">	}</span>
+
+	/**
+	 * Return the JTA-aware DataSource that the JPA persistence provider is supposed to use
+	 * for accessing the database if none has been specified in {@code persistence.xml}.
+	 */
+	@Nullable
+	public DataSource getDefaultJtaDataSource() {
+<span class="nc" id="L377">		return this.defaultJtaDataSource;</span>
+	}
+
+	/**
+	 * Set the PersistenceUnitPostProcessors to be applied to each
+	 * PersistenceUnitInfo that has been parsed by this manager.
+	 * &lt;p&gt;Such post-processors can, for example, register further entity classes and
+	 * jar files, in addition to the metadata read from {@code persistence.xml}.
+	 */
+	public void setPersistenceUnitPostProcessors(@Nullable PersistenceUnitPostProcessor... postProcessors) {
+<span class="nc" id="L387">		this.persistenceUnitPostProcessors = postProcessors;</span>
+<span class="nc" id="L388">	}</span>
+
+	/**
+	 * Return the PersistenceUnitPostProcessors to be applied to each
+	 * PersistenceUnitInfo that has been parsed by this manager.
+	 */
+	@Nullable
+	public PersistenceUnitPostProcessor[] getPersistenceUnitPostProcessors() {
+<span class="fc" id="L396">		return this.persistenceUnitPostProcessors;</span>
+	}
+
+	/**
+	 * Specify the Spring LoadTimeWeaver to use for class instrumentation according
+	 * to the JPA class transformer contract.
+	 * &lt;p&gt;It is not required to specify a LoadTimeWeaver: Most providers will be able
+	 * to provide a subset of their functionality without class instrumentation as well,
+	 * or operate with their own VM agent specified on JVM startup. Furthermore,
+	 * DefaultPersistenceUnitManager falls back to an InstrumentationLoadTimeWeaver
+	 * if Spring's agent-based instrumentation is available at runtime.
+	 * &lt;p&gt;In terms of Spring-provided weaving options, the most important ones are
+	 * InstrumentationLoadTimeWeaver, which requires a Spring-specific (but very general)
+	 * VM agent specified on JVM startup, and ReflectiveLoadTimeWeaver, which interacts
+	 * with an underlying ClassLoader based on specific extended methods being available
+	 * on it (for example, interacting with Spring's TomcatInstrumentableClassLoader).
+	 * Consider using the {@code context:load-time-weaver} XML tag for creating
+	 * such a shared LoadTimeWeaver (autodetecting the environment by default).
+	 * @see org.springframework.instrument.classloading.InstrumentationLoadTimeWeaver
+	 * @see org.springframework.instrument.classloading.ReflectiveLoadTimeWeaver
+	 */
+	@Override
+	public void setLoadTimeWeaver(@Nullable LoadTimeWeaver loadTimeWeaver) {
+<span class="fc" id="L419">		this.loadTimeWeaver = loadTimeWeaver;</span>
+<span class="fc" id="L420">	}</span>
+
+	/**
+	 * Return the Spring LoadTimeWeaver to use for class instrumentation according
+	 * to the JPA class transformer contract.
+	 */
+	@Nullable
+	public LoadTimeWeaver getLoadTimeWeaver() {
+<span class="nc" id="L428">		return this.loadTimeWeaver;</span>
+	}
+
+	@Override
+	public void setResourceLoader(ResourceLoader resourceLoader) {
+<span class="fc" id="L433">		this.resourcePatternResolver = ResourcePatternUtils.getResourcePatternResolver(resourceLoader);</span>
+<span class="fc" id="L434">		this.componentsIndex = CandidateComponentsIndexLoader.loadIndex(resourceLoader.getClassLoader());</span>
+<span class="fc" id="L435">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L440" title="1 of 4 branches missed.">		if (this.loadTimeWeaver == null &amp;&amp; InstrumentationLoadTimeWeaver.isInstrumentationAvailable()) {</span>
+<span class="nc" id="L441">			this.loadTimeWeaver = new InstrumentationLoadTimeWeaver(this.resourcePatternResolver.getClassLoader());</span>
+		}
+<span class="fc" id="L443">		preparePersistenceUnitInfos();</span>
+<span class="fc" id="L444">	}</span>
+
+	/**
+	 * Prepare the PersistenceUnitInfos according to the configuration
+	 * of this manager: scanning for {@code persistence.xml} files,
+	 * parsing all matching files, configuring and post-processing them.
+	 * &lt;p&gt;PersistenceUnitInfos cannot be obtained before this preparation
+	 * method has been invoked.
+	 * @see #obtainDefaultPersistenceUnitInfo()
+	 * @see #obtainPersistenceUnitInfo(String)
+	 */
+	public void preparePersistenceUnitInfos() {
+<span class="fc" id="L456">		this.persistenceUnitInfoNames.clear();</span>
+<span class="fc" id="L457">		this.persistenceUnitInfos.clear();</span>
+
+<span class="fc" id="L459">		List&lt;SpringPersistenceUnitInfo&gt; puis = readPersistenceUnitInfos();</span>
+<span class="fc bfc" id="L460" title="All 2 branches covered.">		for (SpringPersistenceUnitInfo pui : puis) {</span>
+<span class="pc bpc" id="L461" title="1 of 2 branches missed.">			if (pui.getPersistenceUnitRootUrl() == null) {</span>
+<span class="fc" id="L462">				pui.setPersistenceUnitRootUrl(determineDefaultPersistenceUnitRootUrl());</span>
+			}
+<span class="pc bpc" id="L464" title="2 of 4 branches missed.">			if (pui.getJtaDataSource() == null &amp;&amp; this.defaultJtaDataSource != null) {</span>
+<span class="nc" id="L465">				pui.setJtaDataSource(this.defaultJtaDataSource);</span>
+			}
+<span class="pc bpc" id="L467" title="1 of 4 branches missed.">			if (pui.getNonJtaDataSource() == null &amp;&amp; this.defaultDataSource != null) {</span>
+<span class="fc" id="L468">				pui.setNonJtaDataSource(this.defaultDataSource);</span>
+			}
+<span class="pc bpc" id="L470" title="1 of 2 branches missed.">			if (this.sharedCacheMode != null) {</span>
+<span class="nc" id="L471">				pui.setSharedCacheMode(this.sharedCacheMode);</span>
+			}
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">			if (this.validationMode != null) {</span>
+<span class="nc" id="L474">				pui.setValidationMode(this.validationMode);</span>
+			}
+<span class="fc bfc" id="L476" title="All 2 branches covered.">			if (this.loadTimeWeaver != null) {</span>
+<span class="fc" id="L477">				pui.init(this.loadTimeWeaver);</span>
+			}
+			else {
+<span class="fc" id="L480">				pui.init(this.resourcePatternResolver.getClassLoader());</span>
+			}
+<span class="fc" id="L482">			postProcessPersistenceUnitInfo(pui);</span>
+<span class="fc" id="L483">			String name = pui.getPersistenceUnitName();</span>
+<span class="pc bpc" id="L484" title="3 of 4 branches missed.">			if (!this.persistenceUnitInfoNames.add(name) &amp;&amp; !isPersistenceUnitOverrideAllowed()) {</span>
+<span class="nc" id="L485">				StringBuilder msg = new StringBuilder();</span>
+<span class="nc" id="L486">				msg.append(&quot;Conflicting persistence unit definitions for name '&quot;).append(name).append(&quot;': &quot;);</span>
+<span class="nc" id="L487">				msg.append(pui.getPersistenceUnitRootUrl()).append(&quot;, &quot;);</span>
+<span class="nc" id="L488">				msg.append(this.persistenceUnitInfos.get(name).getPersistenceUnitRootUrl());</span>
+<span class="nc" id="L489">				throw new IllegalStateException(msg.toString());</span>
+			}
+<span class="fc" id="L491">			this.persistenceUnitInfos.put(name, pui);</span>
+<span class="fc" id="L492">		}</span>
+<span class="fc" id="L493">	}</span>
+
+	/**
+	 * Read all persistence unit infos from {@code persistence.xml},
+	 * as defined in the JPA specification.
+	 */
+	private List&lt;SpringPersistenceUnitInfo&gt; readPersistenceUnitInfos() {
+<span class="fc" id="L500">		List&lt;SpringPersistenceUnitInfo&gt; infos = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L501">		String defaultName = this.defaultPersistenceUnitName;</span>
+<span class="pc bpc" id="L502" title="1 of 4 branches missed.">		boolean buildDefaultUnit = (this.packagesToScan != null || this.mappingResources != null);</span>
+<span class="fc" id="L503">		boolean foundDefaultUnit = false;</span>
+
+<span class="fc" id="L505">		PersistenceUnitReader reader = new PersistenceUnitReader(this.resourcePatternResolver, this.dataSourceLookup);</span>
+<span class="fc" id="L506">		SpringPersistenceUnitInfo[] readInfos = reader.readPersistenceUnitInfos(this.persistenceXmlLocations);</span>
+<span class="fc bfc" id="L507" title="All 2 branches covered.">		for (SpringPersistenceUnitInfo readInfo : readInfos) {</span>
+<span class="fc" id="L508">			infos.add(readInfo);</span>
+<span class="pc bpc" id="L509" title="1 of 4 branches missed.">			if (defaultName != null &amp;&amp; defaultName.equals(readInfo.getPersistenceUnitName())) {</span>
+<span class="fc" id="L510">				foundDefaultUnit = true;</span>
+			}
+		}
+
+<span class="fc bfc" id="L514" title="All 2 branches covered.">		if (buildDefaultUnit) {</span>
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">			if (foundDefaultUnit) {</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L517">					logger.debug(&quot;Found explicit default unit with name '&quot; + defaultName + &quot;' in persistence.xml - &quot; +</span>
+							&quot;overriding local default unit settings ('packagesToScan'/'mappingResources')&quot;);
+				}
+			}
+			else {
+<span class="fc" id="L522">				infos.add(buildDefaultPersistenceUnitInfo());</span>
+			}
+		}
+<span class="fc" id="L525">		return infos;</span>
+	}
+
+	/**
+	 * Perform Spring-based scanning for entity classes.
+	 * @see #setPackagesToScan
+	 */
+	private SpringPersistenceUnitInfo buildDefaultPersistenceUnitInfo() {
+<span class="fc" id="L533">		SpringPersistenceUnitInfo scannedUnit = new SpringPersistenceUnitInfo();</span>
+<span class="pc bpc" id="L534" title="1 of 2 branches missed.">		if (this.defaultPersistenceUnitName != null) {</span>
+<span class="fc" id="L535">			scannedUnit.setPersistenceUnitName(this.defaultPersistenceUnitName);</span>
+		}
+<span class="fc" id="L537">		scannedUnit.setExcludeUnlistedClasses(true);</span>
+
+<span class="pc bpc" id="L539" title="1 of 2 branches missed.">		if (this.packagesToScan != null) {</span>
+<span class="fc bfc" id="L540" title="All 2 branches covered.">			for (String pkg : this.packagesToScan) {</span>
+<span class="fc" id="L541">				scanPackage(scannedUnit, pkg);</span>
+			}
+		}
+
+<span class="pc bpc" id="L545" title="1 of 2 branches missed.">		if (this.mappingResources != null) {</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">			for (String mappingFileName : this.mappingResources) {</span>
+<span class="nc" id="L547">				scannedUnit.addMappingFileName(mappingFileName);</span>
+			}
+		}
+		else {
+<span class="fc" id="L551">			Resource ormXml = getOrmXmlForDefaultPersistenceUnit();</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">			if (ormXml != null) {</span>
+<span class="nc" id="L553">				scannedUnit.addMappingFileName(DEFAULT_ORM_XML_RESOURCE);</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">				if (scannedUnit.getPersistenceUnitRootUrl() == null) {</span>
+					try {
+<span class="nc" id="L556">						scannedUnit.setPersistenceUnitRootUrl(</span>
+<span class="nc" id="L557">								PersistenceUnitReader.determinePersistenceUnitRootUrl(ormXml));</span>
+					}
+<span class="nc" id="L559">					catch (IOException ex) {</span>
+<span class="nc" id="L560">						logger.debug(&quot;Failed to determine persistence unit root URL from orm.xml location&quot;, ex);</span>
+<span class="nc" id="L561">					}</span>
+				}
+			}
+		}
+
+<span class="fc" id="L566">		return scannedUnit;</span>
+	}
+
+	private void scanPackage(SpringPersistenceUnitInfo scannedUnit, String pkg) {
+<span class="fc bfc" id="L570" title="All 2 branches covered.">		if (this.componentsIndex != null) {</span>
+<span class="fc" id="L571">			Set&lt;String&gt; candidates = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L572" title="All 2 branches covered.">			for (AnnotationTypeFilter filter : entityTypeFilters) {</span>
+<span class="fc" id="L573">				candidates.addAll(this.componentsIndex.getCandidateTypes(pkg, filter.getAnnotationType().getName()));</span>
+<span class="fc" id="L574">			}</span>
+<span class="fc" id="L575">			candidates.forEach(scannedUnit::addManagedClassName);</span>
+<span class="fc" id="L576">			Set&lt;String&gt; managedPackages = this.componentsIndex.getCandidateTypes(pkg, &quot;package-info&quot;);</span>
+<span class="fc" id="L577">			managedPackages.forEach(scannedUnit::addManagedPackage);</span>
+<span class="fc" id="L578">			return;</span>
+		}
+
+		try {
+<span class="fc" id="L582">			String pattern = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX +</span>
+<span class="fc" id="L583">					ClassUtils.convertClassNameToResourcePath(pkg) + CLASS_RESOURCE_PATTERN;</span>
+<span class="fc" id="L584">			Resource[] resources = this.resourcePatternResolver.getResources(pattern);</span>
+<span class="fc" id="L585">			MetadataReaderFactory readerFactory = new CachingMetadataReaderFactory(this.resourcePatternResolver);</span>
+<span class="fc bfc" id="L586" title="All 2 branches covered.">			for (Resource resource : resources) {</span>
+<span class="pc bpc" id="L587" title="1 of 2 branches missed.">				if (resource.isReadable()) {</span>
+<span class="fc" id="L588">					MetadataReader reader = readerFactory.getMetadataReader(resource);</span>
+<span class="fc" id="L589">					String className = reader.getClassMetadata().getClassName();</span>
+<span class="fc bfc" id="L590" title="All 2 branches covered.">					if (matchesFilter(reader, readerFactory)) {</span>
+<span class="fc" id="L591">						scannedUnit.addManagedClassName(className);</span>
+<span class="pc bpc" id="L592" title="1 of 2 branches missed.">						if (scannedUnit.getPersistenceUnitRootUrl() == null) {</span>
+<span class="fc" id="L593">							URL url = resource.getURL();</span>
+<span class="pc bpc" id="L594" title="1 of 2 branches missed.">							if (ResourceUtils.isJarURL(url)) {</span>
+<span class="nc" id="L595">								scannedUnit.setPersistenceUnitRootUrl(ResourceUtils.extractJarFileURL(url));</span>
+							}
+<span class="fc" id="L597">						}</span>
+					}
+<span class="pc bpc" id="L599" title="1 of 2 branches missed.">					else if (className.endsWith(PACKAGE_INFO_SUFFIX)) {</span>
+<span class="nc" id="L600">						scannedUnit.addManagedPackage(</span>
+<span class="nc" id="L601">								className.substring(0, className.length() - PACKAGE_INFO_SUFFIX.length()));</span>
+					}
+				}
+			}
+		}
+<span class="nc" id="L606">		catch (IOException ex) {</span>
+<span class="nc" id="L607">			throw new PersistenceException(&quot;Failed to scan classpath for unlisted entity classes&quot;, ex);</span>
+<span class="fc" id="L608">		}</span>
+<span class="fc" id="L609">	}</span>
+
+	/**
+	 * Check whether any of the configured entity type filters matches
+	 * the current class descriptor contained in the metadata reader.
+	 */
+	private boolean matchesFilter(MetadataReader reader, MetadataReaderFactory readerFactory) throws IOException {
+<span class="fc bfc" id="L616" title="All 2 branches covered.">		for (TypeFilter filter : entityTypeFilters) {</span>
+<span class="fc bfc" id="L617" title="All 2 branches covered.">			if (filter.match(reader, readerFactory)) {</span>
+<span class="fc" id="L618">				return true;</span>
+			}
+<span class="fc" id="L620">		}</span>
+<span class="fc" id="L621">		return false;</span>
+	}
+
+	/**
+	 * Try to determine the persistence unit root URL based on the given
+	 * &quot;defaultPersistenceUnitRootLocation&quot;.
+	 * @return the persistence unit root URL to pass to the JPA PersistenceProvider
+	 * @see #setDefaultPersistenceUnitRootLocation
+	 */
+	@Nullable
+	private URL determineDefaultPersistenceUnitRootUrl() {
+<span class="pc bpc" id="L632" title="1 of 2 branches missed.">		if (this.defaultPersistenceUnitRootLocation == null) {</span>
+<span class="nc" id="L633">			return null;</span>
+		}
+		try {
+<span class="fc" id="L636">			URL url = this.resourcePatternResolver.getResource(this.defaultPersistenceUnitRootLocation).getURL();</span>
+<span class="pc bpc" id="L637" title="1 of 2 branches missed.">			return (ResourceUtils.isJarURL(url) ? ResourceUtils.extractJarFileURL(url) : url);</span>
+		}
+<span class="nc" id="L639">		catch (IOException ex) {</span>
+<span class="nc" id="L640">			throw new PersistenceException(&quot;Unable to resolve persistence unit root URL&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Determine JPA's default &quot;META-INF/orm.xml&quot; resource for use with Spring's default
+	 * persistence unit, if any.
+	 * &lt;p&gt;Checks whether a &quot;META-INF/orm.xml&quot; file exists in the classpath and uses it
+	 * if it is not co-located with a &quot;META-INF/persistence.xml&quot; file.
+	 */
+	@Nullable
+	private Resource getOrmXmlForDefaultPersistenceUnit() {
+<span class="fc" id="L652">		Resource ormXml = this.resourcePatternResolver.getResource(</span>
+				this.defaultPersistenceUnitRootLocation + DEFAULT_ORM_XML_RESOURCE);
+<span class="pc bpc" id="L654" title="1 of 2 branches missed.">		if (ormXml.exists()) {</span>
+			try {
+<span class="nc" id="L656">				Resource persistenceXml = ormXml.createRelative(PERSISTENCE_XML_FILENAME);</span>
+<span class="nc bnc" id="L657" title="All 2 branches missed.">				if (!persistenceXml.exists()) {</span>
+<span class="nc" id="L658">					return ormXml;</span>
+				}
+			}
+<span class="nc" id="L661">			catch (IOException ex) {</span>
+				// Cannot resolve relative persistence.xml file - let's assume it's not there.
+<span class="nc" id="L663">				return ormXml;</span>
+<span class="nc" id="L664">			}</span>
+		}
+<span class="fc" id="L666">		return null;</span>
+	}
+
+
+	/**
+	 * Return the specified PersistenceUnitInfo from this manager's cache
+	 * of processed persistence units, keeping it in the cache (i.e. not
+	 * 'obtaining' it for use but rather just accessing it for post-processing).
+	 * &lt;p&gt;This can be used in {@link #postProcessPersistenceUnitInfo} implementations,
+	 * detecting existing persistence units of the same name and potentially merging them.
+	 * @param persistenceUnitName the name of the desired persistence unit
+	 * @return the PersistenceUnitInfo in mutable form, or {@code null} if not available
+	 */
+	@Nullable
+	protected final MutablePersistenceUnitInfo getPersistenceUnitInfo(String persistenceUnitName) {
+<span class="nc" id="L681">		PersistenceUnitInfo pui = this.persistenceUnitInfos.get(persistenceUnitName);</span>
+<span class="nc" id="L682">		return (MutablePersistenceUnitInfo) pui;</span>
+	}
+
+	/**
+	 * Hook method allowing subclasses to customize each PersistenceUnitInfo.
+	 * &lt;p&gt;The default implementation delegates to all registered PersistenceUnitPostProcessors.
+	 * It is usually preferable to register further entity classes, jar files etc there
+	 * rather than in a subclass of this manager, to be able to reuse the post-processors.
+	 * @param pui the chosen PersistenceUnitInfo, as read from {@code persistence.xml}.
+	 * Passed in as MutablePersistenceUnitInfo.
+	 * @see #setPersistenceUnitPostProcessors
+	 */
+	protected void postProcessPersistenceUnitInfo(MutablePersistenceUnitInfo pui) {
+<span class="fc" id="L695">		PersistenceUnitPostProcessor[] postProcessors = getPersistenceUnitPostProcessors();</span>
+<span class="pc bpc" id="L696" title="1 of 2 branches missed.">		if (postProcessors != null) {</span>
+<span class="nc bnc" id="L697" title="All 2 branches missed.">			for (PersistenceUnitPostProcessor postProcessor : postProcessors) {</span>
+<span class="nc" id="L698">				postProcessor.postProcessPersistenceUnitInfo(pui);</span>
+			}
+		}
+<span class="fc" id="L701">	}</span>
+
+	/**
+	 * Return whether an override of a same-named persistence unit is allowed.
+	 * &lt;p&gt;Default is {@code false}. May be overridden to return {@code true},
+	 * for example if {@link #postProcessPersistenceUnitInfo} is able to handle that case.
+	 */
+	protected boolean isPersistenceUnitOverrideAllowed() {
+<span class="nc" id="L709">		return false;</span>
+	}
+
+
+	@Override
+	public PersistenceUnitInfo obtainDefaultPersistenceUnitInfo() {
+<span class="pc bpc" id="L715" title="1 of 2 branches missed.">		if (this.persistenceUnitInfoNames.isEmpty()) {</span>
+<span class="nc" id="L716">			throw new IllegalStateException(&quot;No persistence units parsed from &quot; +</span>
+<span class="nc" id="L717">					ObjectUtils.nullSafeToString(this.persistenceXmlLocations));</span>
+		}
+<span class="pc bpc" id="L719" title="1 of 2 branches missed.">		if (this.persistenceUnitInfos.isEmpty()) {</span>
+<span class="nc" id="L720">			throw new IllegalStateException(&quot;All persistence units from &quot; +</span>
+<span class="nc" id="L721">					ObjectUtils.nullSafeToString(this.persistenceXmlLocations) + &quot; already obtained&quot;);</span>
+		}
+<span class="pc bpc" id="L723" title="3 of 4 branches missed.">		if (this.persistenceUnitInfos.size() &gt; 1 &amp;&amp; this.defaultPersistenceUnitName != null) {</span>
+<span class="nc" id="L724">			return obtainPersistenceUnitInfo(this.defaultPersistenceUnitName);</span>
+		}
+<span class="fc" id="L726">		PersistenceUnitInfo pui = this.persistenceUnitInfos.values().iterator().next();</span>
+<span class="fc" id="L727">		this.persistenceUnitInfos.clear();</span>
+<span class="fc" id="L728">		return pui;</span>
+	}
+
+	@Override
+	public PersistenceUnitInfo obtainPersistenceUnitInfo(String persistenceUnitName) {
+<span class="fc" id="L733">		PersistenceUnitInfo pui = this.persistenceUnitInfos.remove(persistenceUnitName);</span>
+<span class="fc bfc" id="L734" title="All 2 branches covered.">		if (pui == null) {</span>
+<span class="pc bpc" id="L735" title="1 of 2 branches missed.">			if (!this.persistenceUnitInfoNames.contains(persistenceUnitName)) {</span>
+<span class="fc" id="L736">				throw new IllegalArgumentException(</span>
+						&quot;No persistence unit with name '&quot; + persistenceUnitName + &quot;' found&quot;);
+			}
+			else {
+<span class="nc" id="L740">				throw new IllegalStateException(</span>
+						&quot;Persistence unit with name '&quot; + persistenceUnitName + &quot;' already obtained&quot;);
+			}
+		}
+<span class="fc" id="L744">		return pui;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

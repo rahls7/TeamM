@@ -1,0 +1,683 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MessageHeaderAccessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.support</a> &gt; <span class="el_source">MessageHeaderAccessor.java</span></div><h1>MessageHeaderAccessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.support;
+
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.util.Assert;
+import org.springframework.util.IdGenerator;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.PatternMatchUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * A base for classes providing strongly typed getters and setters as well as
+ * behavior around specific categories of headers (e.g. STOMP headers).
+ * Supports creating new headers, modifying existing headers (when still mutable),
+ * or copying and modifying existing headers.
+ *
+ * &lt;p&gt;The method {@link #getMessageHeaders()} provides access to the underlying,
+ * fully-prepared {@link MessageHeaders} that can then be used as-is (i.e.
+ * without copying) to create a single message as follows:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * MessageHeaderAccessor accessor = new MessageHeaderAccessor();
+ * accessor.setHeader(&quot;foo&quot;, &quot;bar&quot;);
+ * Message message = MessageBuilder.createMessage(&quot;payload&quot;, accessor.getMessageHeaders());
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;After the above, by default the {@code MessageHeaderAccessor} becomes
+ * immutable. However it is possible to leave it mutable for further initialization
+ * in the same thread, for example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * MessageHeaderAccessor accessor = new MessageHeaderAccessor();
+ * accessor.setHeader(&quot;foo&quot;, &quot;bar&quot;);
+ * accessor.setLeaveMutable(true);
+ * Message message = MessageBuilder.createMessage(&quot;payload&quot;, accessor.getMessageHeaders());
+ *
+ * // later on in the same thread...
+ *
+ * MessageHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message);
+ * accessor.setHeader(&quot;bar&quot;, &quot;baz&quot;);
+ * accessor.setImmutable();
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;The method {@link #toMap()} returns a copy of the underlying headers. It can
+ * be used to prepare multiple messages from the same {@code MessageHeaderAccessor}
+ * instance:
+ * &lt;pre class=&quot;code&quot;&gt;
+ * MessageHeaderAccessor accessor = new MessageHeaderAccessor();
+ * MessageBuilder builder = MessageBuilder.withPayload(&quot;payload&quot;).setHeaders(accessor);
+ *
+ * accessor.setHeader(&quot;foo&quot;, &quot;bar1&quot;);
+ * Message message1 = builder.build();
+ *
+ * accessor.setHeader(&quot;foo&quot;, &quot;bar2&quot;);
+ * Message message2 = builder.build();
+ *
+ * accessor.setHeader(&quot;foo&quot;, &quot;bar3&quot;);
+ * Message  message3 = builder.build();
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;However note that with the above style, the header accessor is shared and
+ * cannot be re-obtained later on. Alternatively it is also possible to create
+ * one {@code MessageHeaderAccessor} per message:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * MessageHeaderAccessor accessor1 = new MessageHeaderAccessor();
+ * accessor.set(&quot;foo&quot;, &quot;bar1&quot;);
+ * Message message1 = MessageBuilder.createMessage(&quot;payload&quot;, accessor1.getMessageHeaders());
+ *
+ * MessageHeaderAccessor accessor2 = new MessageHeaderAccessor();
+ * accessor.set(&quot;foo&quot;, &quot;bar2&quot;);
+ * Message message2 = MessageBuilder.createMessage(&quot;payload&quot;, accessor2.getMessageHeaders());
+ *
+ * MessageHeaderAccessor accessor3 = new MessageHeaderAccessor();
+ * accessor.set(&quot;foo&quot;, &quot;bar3&quot;);
+ * Message message3 = MessageBuilder.createMessage(&quot;payload&quot;, accessor3.getMessageHeaders());
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;Note that the above examples aim to demonstrate the general idea of using
+ * header accessors. The most likely usage however is through subclasses.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 4.0
+ */
+public class MessageHeaderAccessor {
+
+	/**
+	 * The default charset used for headers.
+	 */
+<span class="fc" id="L121">	public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;</span>
+
+<span class="fc" id="L123">	private static final MimeType[] READABLE_MIME_TYPES = new MimeType[] {</span>
+			MimeTypeUtils.APPLICATION_JSON, MimeTypeUtils.APPLICATION_XML,
+			new MimeType(&quot;text&quot;, &quot;*&quot;), new MimeType(&quot;application&quot;, &quot;*+json&quot;), new MimeType(&quot;application&quot;, &quot;*+xml&quot;)
+	};
+
+
+	private final MutableMessageHeaders headers;
+
+<span class="fc" id="L131">	private boolean leaveMutable = false;</span>
+
+<span class="fc" id="L133">	private boolean modified = false;</span>
+
+<span class="fc" id="L135">	private boolean enableTimestamp = false;</span>
+
+	@Nullable
+	private IdGenerator idGenerator;
+
+
+	/**
+	 * A constructor to create new headers.
+	 */
+	public MessageHeaderAccessor() {
+<span class="fc" id="L145">		this(null);</span>
+<span class="fc" id="L146">	}</span>
+
+	/**
+	 * A constructor accepting the headers of an existing message to copy.
+	 * @param message a message to copy the headers from, or {@code null} if none
+	 */
+<span class="fc" id="L152">	public MessageHeaderAccessor(@Nullable Message&lt;?&gt; message) {</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">		this.headers = new MutableMessageHeaders(message != null ? message.getHeaders() : null);</span>
+<span class="fc" id="L154">	}</span>
+
+
+	/**
+	 * Build a 'nested' accessor for the given message.
+	 * @param message the message to build a new accessor for
+	 * @return the nested accessor (typically a specific subclass)
+	 */
+	protected MessageHeaderAccessor createAccessor(Message&lt;?&gt; message) {
+<span class="nc" id="L163">		return new MessageHeaderAccessor(message);</span>
+	}
+
+
+	// Configuration properties
+
+	/**
+	 * By default when {@link #getMessageHeaders()} is called, {@code &quot;this&quot;}
+	 * {@code MessageHeaderAccessor} instance can no longer be used to modify the
+	 * underlying message headers and the returned {@code MessageHeaders} is immutable.
+	 * &lt;p&gt;However when this is set to {@code true}, the returned (underlying)
+	 * {@code MessageHeaders} instance remains mutable. To make further modifications
+	 * continue to use the same accessor instance or re-obtain it via:&lt;br&gt;
+	 * {@link MessageHeaderAccessor#getAccessor(Message, Class)
+	 * MessageHeaderAccessor.getAccessor(Message, Class)}
+	 * &lt;p&gt;When modifications are complete use {@link #setImmutable()} to prevent
+	 * further changes. The intended use case for this mechanism is initialization
+	 * of a Message within a single thread.
+	 * &lt;p&gt;By default this is set to {@code false}.
+	 * @since 4.1
+	 */
+	public void setLeaveMutable(boolean leaveMutable) {
+<span class="fc" id="L185">		Assert.state(this.headers.isMutable(), &quot;Already immutable&quot;);</span>
+<span class="fc" id="L186">		this.leaveMutable = leaveMutable;</span>
+<span class="fc" id="L187">	}</span>
+
+	/**
+	 * By default when {@link #getMessageHeaders()} is called, {@code &quot;this&quot;}
+	 * {@code MessageHeaderAccessor} instance can no longer be used to modify the
+	 * underlying message headers. However if {@link #setLeaveMutable(boolean)}
+	 * is used, this method is necessary to indicate explicitly when the
+	 * {@code MessageHeaders} instance should no longer be modified.
+	 * @since 4.1
+	 */
+	public void setImmutable() {
+<span class="fc" id="L198">		this.headers.setImmutable();</span>
+<span class="fc" id="L199">	}</span>
+
+	/**
+	 * Whether the underlying headers can still be modified.
+	 * @since 4.1
+	 */
+	public boolean isMutable() {
+<span class="fc" id="L206">		return this.headers.isMutable();</span>
+	}
+
+	/**
+	 * Mark the underlying message headers as modified.
+	 * @param modified typically {@code true}, or {@code false} to reset the flag
+	 * @since 4.1
+	 */
+	protected void setModified(boolean modified) {
+<span class="fc" id="L215">		this.modified = modified;</span>
+<span class="fc" id="L216">	}</span>
+
+	/**
+	 * Check whether the underlying message headers have been marked as modified.
+	 * @return {@code true} if the flag has been set, {@code false} otherwise
+	 */
+	public boolean isModified() {
+<span class="fc" id="L223">		return this.modified;</span>
+	}
+
+	/**
+	 * A package private mechanism to enables the automatic addition of the
+	 * {@link org.springframework.messaging.MessageHeaders#TIMESTAMP} header.
+	 * &lt;p&gt;By default, this property is set to {@code false}.
+	 * @see IdTimestampMessageHeaderInitializer
+	 */
+	void setEnableTimestamp(boolean enableTimestamp) {
+<span class="fc" id="L233">		this.enableTimestamp = enableTimestamp;</span>
+<span class="fc" id="L234">	}</span>
+
+	/**
+	 * A package-private mechanism to configure the IdGenerator strategy to use.
+	 * &lt;p&gt;By default this property is not set in which case the default IdGenerator
+	 * in {@link org.springframework.messaging.MessageHeaders} is used.
+	 * @see IdTimestampMessageHeaderInitializer
+	 */
+	void setIdGenerator(IdGenerator idGenerator) {
+<span class="fc" id="L243">		this.idGenerator = idGenerator;</span>
+<span class="fc" id="L244">	}</span>
+
+
+	// Accessors for the resulting MessageHeaders
+
+	/**
+	 * Return the underlying {@code MessageHeaders} instance.
+	 * &lt;p&gt;Unless {@link #setLeaveMutable(boolean)} was set to {@code true}, after
+	 * this call, the headers are immutable and this accessor can no longer
+	 * modify them.
+	 * &lt;p&gt;This method always returns the same {@code MessageHeaders} instance if
+	 * invoked multiples times. To obtain a copy of the underlying headers, use
+	 * {@link #toMessageHeaders()} or {@link #toMap()} instead.
+	 * @since 4.1
+	 */
+	public MessageHeaders getMessageHeaders() {
+<span class="fc bfc" id="L260" title="All 2 branches covered.">		if (!this.leaveMutable) {</span>
+<span class="fc" id="L261">			setImmutable();</span>
+		}
+<span class="fc" id="L263">		return this.headers;</span>
+	}
+
+	/**
+	 * Return a copy of the underlying header values as a {@link MessageHeaders} object.
+	 * &lt;p&gt;This method can be invoked many times, with modifications in between
+	 * where each new call returns a fresh copy of the current header values.
+	 * @since 4.1
+	 */
+	public MessageHeaders toMessageHeaders() {
+<span class="fc" id="L273">		return new MessageHeaders(this.headers);</span>
+	}
+
+	/**
+	 * Return a copy of the underlying header values as a plain {@link Map} object.
+	 * &lt;p&gt;This method can be invoked many times, with modifications in between
+	 * where each new call returns a fresh copy of the current header values.
+	 */
+	public Map&lt;String, Object&gt; toMap() {
+<span class="fc" id="L282">		return new HashMap&lt;&gt;(this.headers);</span>
+	}
+
+
+	// Generic header accessors
+
+	/**
+	 * Retrieve the value for the header with the given name.
+	 * @param headerName the name of the header
+	 * @return the associated value, or {@code null} if none found
+	 */
+	@Nullable
+	public Object getHeader(String headerName) {
+<span class="fc" id="L295">		return this.headers.get(headerName);</span>
+	}
+
+	/**
+	 * Set the value for the given header name.
+	 * &lt;p&gt;If the provided value is {@code null}, the header will be removed.
+	 */
+	public void setHeader(String name, @Nullable Object value) {
+<span class="fc bfc" id="L303" title="All 2 branches covered.">		if (isReadOnly(name)) {</span>
+<span class="fc" id="L304">			throw new IllegalArgumentException(&quot;'&quot; + name + &quot;' header is read-only&quot;);</span>
+		}
+<span class="fc" id="L306">		verifyType(name, value);</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">		if (value != null) {</span>
+			// Modify header if necessary
+<span class="fc bfc" id="L309" title="All 2 branches covered.">			if (!ObjectUtils.nullSafeEquals(value, getHeader(name))) {</span>
+<span class="fc" id="L310">				this.modified = true;</span>
+<span class="fc" id="L311">				this.headers.getRawHeaders().put(name, value);</span>
+			}
+		}
+		else {
+			// Remove header if available
+<span class="fc bfc" id="L316" title="All 2 branches covered.">			if (this.headers.containsKey(name)) {</span>
+<span class="fc" id="L317">				this.modified = true;</span>
+<span class="fc" id="L318">				this.headers.getRawHeaders().remove(name);</span>
+			}
+		}
+<span class="fc" id="L321">	}</span>
+
+	protected void verifyType(@Nullable String headerName, @Nullable Object headerValue) {
+<span class="pc bpc" id="L324" title="1 of 4 branches missed.">		if (headerName != null &amp;&amp; headerValue != null) {</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">			if (MessageHeaders.ERROR_CHANNEL.equals(headerName) ||</span>
+<span class="fc bfc" id="L326" title="All 2 branches covered.">					MessageHeaders.REPLY_CHANNEL.endsWith(headerName)) {</span>
+<span class="pc bpc" id="L327" title="3 of 4 branches missed.">				if (!(headerValue instanceof MessageChannel || headerValue instanceof String)) {</span>
+<span class="nc" id="L328">					throw new IllegalArgumentException(</span>
+							&quot;'&quot; + headerName + &quot;' header value must be a MessageChannel or String&quot;);
+				}
+			}
+		}
+<span class="fc" id="L333">	}</span>
+
+	/**
+	 * Set the value for the given header name only if the header name is not
+	 * already associated with a value.
+	 */
+	public void setHeaderIfAbsent(String name, Object value) {
+<span class="fc bfc" id="L340" title="All 2 branches covered.">		if (getHeader(name) == null) {</span>
+<span class="fc" id="L341">			setHeader(name, value);</span>
+		}
+<span class="fc" id="L343">	}</span>
+
+	/**
+	 * Remove the value for the given header name.
+	 */
+	public void removeHeader(String headerName) {
+<span class="pc bpc" id="L349" title="2 of 4 branches missed.">		if (StringUtils.hasLength(headerName) &amp;&amp; !isReadOnly(headerName)) {</span>
+<span class="fc" id="L350">			setHeader(headerName, null);</span>
+		}
+<span class="fc" id="L352">	}</span>
+
+	/**
+	 * Removes all headers provided via array of 'headerPatterns'.
+	 * &lt;p&gt;As the name suggests, array may contain simple matching patterns for header
+	 * names. Supported pattern styles are: &quot;xxx*&quot;, &quot;*xxx&quot;, &quot;*xxx*&quot; and &quot;xxx*yyy&quot;.
+	 */
+	public void removeHeaders(String... headerPatterns) {
+<span class="fc" id="L360">		List&lt;String&gt; headersToRemove = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L361" title="All 2 branches covered.">		for (String pattern : headerPatterns) {</span>
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">			if (StringUtils.hasLength(pattern)){</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">				if (pattern.contains(&quot;*&quot;)){</span>
+<span class="fc" id="L364">					headersToRemove.addAll(getMatchingHeaderNames(pattern, this.headers));</span>
+				}
+				else {
+<span class="nc" id="L367">					headersToRemove.add(pattern);</span>
+				}
+			}
+		}
+<span class="fc bfc" id="L371" title="All 2 branches covered.">		for (String headerToRemove : headersToRemove) {</span>
+<span class="fc" id="L372">			removeHeader(headerToRemove);</span>
+<span class="fc" id="L373">		}</span>
+<span class="fc" id="L374">	}</span>
+
+	private List&lt;String&gt; getMatchingHeaderNames(String pattern, @Nullable Map&lt;String, Object&gt; headers) {
+<span class="pc bpc" id="L377" title="1 of 2 branches missed.">		if (headers == null) {</span>
+<span class="nc" id="L378">			return Collections.emptyList();</span>
+		}
+<span class="fc" id="L380">		List&lt;String&gt; matchingHeaderNames = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L381" title="All 2 branches covered.">		for (String key : headers.keySet()) {</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">			if (PatternMatchUtils.simpleMatch(pattern, key)) {</span>
+<span class="fc" id="L383">				matchingHeaderNames.add(key);</span>
+			}
+<span class="fc" id="L385">		}</span>
+<span class="fc" id="L386">		return matchingHeaderNames;</span>
+	}
+
+	/**
+	 * Copy the name-value pairs from the provided Map.
+	 * &lt;p&gt;This operation will overwrite any existing values. Use
+	 * {@link #copyHeadersIfAbsent(Map)} to avoid overwriting values.
+	 */
+	public void copyHeaders(@Nullable Map&lt;String, ?&gt; headersToCopy) {
+<span class="fc bfc" id="L395" title="All 2 branches covered.">		if (headersToCopy != null) {</span>
+<span class="fc" id="L396">			headersToCopy.forEach((key, value) -&gt; {</span>
+<span class="fc bfc" id="L397" title="All 2 branches covered.">				if (!isReadOnly(key)) {</span>
+<span class="fc" id="L398">					setHeader(key, value);</span>
+				}
+<span class="fc" id="L400">			});</span>
+		}
+<span class="fc" id="L402">	}</span>
+
+	/**
+	 * Copy the name-value pairs from the provided Map.
+	 * &lt;p&gt;This operation will &lt;em&gt;not&lt;/em&gt; overwrite any existing values.
+	 */
+	public void copyHeadersIfAbsent(@Nullable Map&lt;String, ?&gt; headersToCopy) {
+<span class="fc bfc" id="L409" title="All 2 branches covered.">		if (headersToCopy != null) {</span>
+<span class="fc" id="L410">			headersToCopy.forEach((key, value) -&gt; {</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">				if (!isReadOnly(key)) {</span>
+<span class="fc" id="L412">					setHeaderIfAbsent(key, value);</span>
+				}
+<span class="fc" id="L414">			});</span>
+		}
+<span class="fc" id="L416">	}</span>
+
+	protected boolean isReadOnly(String headerName) {
+<span class="fc bfc" id="L419" title="All 4 branches covered.">		return (MessageHeaders.ID.equals(headerName) || MessageHeaders.TIMESTAMP.equals(headerName));</span>
+	}
+
+
+	// Specific header accessors
+
+	@Nullable
+	public UUID getId() {
+<span class="fc" id="L427">		Object value = getHeader(MessageHeaders.ID);</span>
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">		if (value == null) {</span>
+<span class="fc" id="L429">			return null;</span>
+		}
+<span class="nc bnc" id="L431" title="All 2 branches missed.">		return (value instanceof UUID ? (UUID) value : UUID.fromString(value.toString()));</span>
+	}
+
+	@Nullable
+	public Long getTimestamp() {
+<span class="fc" id="L436">		Object value = getHeader(MessageHeaders.TIMESTAMP);</span>
+<span class="pc bpc" id="L437" title="1 of 2 branches missed.">		if (value == null) {</span>
+<span class="fc" id="L438">			return null;</span>
+		}
+<span class="nc bnc" id="L440" title="All 2 branches missed.">		return (value instanceof Long ? (Long) value : Long.parseLong(value.toString()));</span>
+	}
+
+	public void setContentType(MimeType contentType) {
+<span class="fc" id="L444">		setHeader(MessageHeaders.CONTENT_TYPE, contentType);</span>
+<span class="fc" id="L445">	}</span>
+
+	@Nullable
+	public MimeType getContentType() {
+<span class="fc" id="L449">		Object value = getHeader(MessageHeaders.CONTENT_TYPE);</span>
+<span class="fc bfc" id="L450" title="All 2 branches covered.">		if (value == null) {</span>
+<span class="fc" id="L451">			return null;</span>
+		}
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">		return (value instanceof MimeType ? (MimeType) value : MimeType.valueOf(value.toString()));</span>
+	}
+
+	private Charset getCharset() {
+<span class="fc" id="L457">		MimeType contentType = getContentType();</span>
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">		Charset charset = (contentType != null ? contentType.getCharset() : null);</span>
+<span class="pc bpc" id="L459" title="1 of 2 branches missed.">		return (charset != null ? charset : DEFAULT_CHARSET);</span>
+	}
+
+	public void setReplyChannelName(String replyChannelName) {
+<span class="nc" id="L463">		setHeader(MessageHeaders.REPLY_CHANNEL, replyChannelName);</span>
+<span class="nc" id="L464">	}</span>
+
+	public void setReplyChannel(MessageChannel replyChannel) {
+<span class="fc" id="L467">		setHeader(MessageHeaders.REPLY_CHANNEL, replyChannel);</span>
+<span class="fc" id="L468">	}</span>
+
+	@Nullable
+	public Object getReplyChannel() {
+<span class="nc" id="L472">		return getHeader(MessageHeaders.REPLY_CHANNEL);</span>
+	}
+
+	public void setErrorChannelName(String errorChannelName) {
+<span class="nc" id="L476">		setHeader(MessageHeaders.ERROR_CHANNEL, errorChannelName);</span>
+<span class="nc" id="L477">	}</span>
+
+	public void setErrorChannel(MessageChannel errorChannel) {
+<span class="fc" id="L480">		setHeader(MessageHeaders.ERROR_CHANNEL, errorChannel);</span>
+<span class="fc" id="L481">	}</span>
+
+	@Nullable
+	public Object getErrorChannel() {
+<span class="nc" id="L485">		return getHeader(MessageHeaders.ERROR_CHANNEL);</span>
+	}
+
+
+	// Log message stuff
+
+	/**
+	 * Return a concise message for logging purposes.
+	 * @param payload the payload that corresponds to the headers.
+	 * @return the message
+	 */
+	public String getShortLogMessage(Object payload) {
+<span class="fc" id="L497">		return &quot;headers=&quot; + this.headers.toString() + getShortPayloadLogMessage(payload);</span>
+	}
+
+	/**
+	 * Return a more detailed message for logging purposes.
+	 * @param payload the payload that corresponds to the headers.
+	 * @return the message
+	 */
+	public String getDetailedLogMessage(@Nullable Object payload) {
+<span class="fc" id="L506">		return &quot;headers=&quot; + this.headers.toString() + getDetailedPayloadLogMessage(payload);</span>
+	}
+
+	protected String getShortPayloadLogMessage(Object payload) {
+<span class="fc bfc" id="L510" title="All 2 branches covered.">		if (payload instanceof String) {</span>
+<span class="fc" id="L511">			String payloadText = (String) payload;</span>
+<span class="fc bfc" id="L512" title="All 2 branches covered.">			return (payloadText.length() &lt; 80) ?</span>
+				&quot; payload=&quot; + payloadText :
+<span class="fc" id="L514">				&quot; payload=&quot; + payloadText.substring(0, 80) + &quot;...(truncated)&quot;;</span>
+		}
+<span class="fc bfc" id="L516" title="All 2 branches covered.">		else if (payload instanceof byte[]) {</span>
+<span class="fc" id="L517">			byte[] bytes = (byte[]) payload;</span>
+<span class="pc bpc" id="L518" title="1 of 2 branches missed.">			if (isReadableContentType()) {</span>
+<span class="fc bfc" id="L519" title="All 2 branches covered.">				return (bytes.length &lt; 80) ?</span>
+<span class="fc" id="L520">						&quot; payload=&quot; + new String(bytes, getCharset()) :</span>
+<span class="fc" id="L521">						&quot; payload=&quot; + new String(Arrays.copyOf(bytes, 80), getCharset()) + &quot;...(truncated)&quot;;</span>
+			}
+			else {
+<span class="nc" id="L524">				return &quot; payload=byte[&quot; + bytes.length + &quot;]&quot;;</span>
+			}
+		}
+		else {
+<span class="fc" id="L528">			String payloadText = payload.toString();</span>
+<span class="fc bfc" id="L529" title="All 2 branches covered.">			return (payloadText.length() &lt; 80) ?</span>
+					&quot; payload=&quot; + payloadText :
+<span class="fc" id="L531">					&quot; payload=&quot; + ObjectUtils.identityToString(payload);</span>
+		}
+	}
+
+	protected String getDetailedPayloadLogMessage(@Nullable Object payload) {
+<span class="fc bfc" id="L536" title="All 2 branches covered.">		if (payload instanceof String) {</span>
+<span class="fc" id="L537">			return &quot; payload=&quot; + payload;</span>
+		}
+<span class="fc bfc" id="L539" title="All 2 branches covered.">		else if (payload instanceof byte[]) {</span>
+<span class="fc" id="L540">			byte[] bytes = (byte[]) payload;</span>
+<span class="pc bpc" id="L541" title="1 of 2 branches missed.">			if (isReadableContentType()) {</span>
+<span class="fc" id="L542">				return &quot; payload=&quot; + new String(bytes, getCharset());</span>
+			}
+			else {
+<span class="nc" id="L545">				return &quot; payload=byte[&quot; + bytes.length + &quot;]&quot;;</span>
+			}
+		}
+		else {
+<span class="fc" id="L549">			return &quot; payload=&quot; + payload;</span>
+		}
+	}
+
+	protected boolean isReadableContentType() {
+<span class="fc" id="L554">		MimeType contentType = getContentType();</span>
+<span class="pc bpc" id="L555" title="1 of 2 branches missed.">		for (MimeType mimeType : READABLE_MIME_TYPES) {</span>
+<span class="fc bfc" id="L556" title="All 2 branches covered.">			if (mimeType.includes(contentType)) {</span>
+<span class="fc" id="L557">				return true;</span>
+			}
+		}
+<span class="nc" id="L560">		return false;</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="fc" id="L565">		return getClass().getSimpleName() + &quot; [headers=&quot; + this.headers + &quot;]&quot;;</span>
+	}
+
+
+	// Static factory methods
+
+	/**
+	 * Return the original {@code MessageHeaderAccessor} used to create the headers
+	 * of the given {@code Message}, or {@code null} if that's not available or if
+	 * its type does not match the required type.
+	 * &lt;p&gt;This is for cases where the existence of an accessor is strongly expected
+	 * (followed up with an assertion) or where an accessor will be created otherwise.
+	 * @param message the message to get an accessor for
+	 * @param requiredType the required accessor type (or {@code null} for any)
+	 * @return an accessor instance of the specified type, or {@code null} if none
+	 * @since 4.1
+	 */
+	@Nullable
+	public static &lt;T extends MessageHeaderAccessor&gt; T getAccessor(Message&lt;?&gt; message, @Nullable Class&lt;T&gt; requiredType) {
+<span class="fc" id="L584">		return getAccessor(message.getHeaders(), requiredType);</span>
+	}
+
+	/**
+	 * A variation of {@link #getAccessor(org.springframework.messaging.Message, Class)}
+	 * with a {@code MessageHeaders} instance instead of a {@code Message}.
+	 * &lt;p&gt;This is for cases when a full message may not have been created yet.
+	 * @param messageHeaders the message headers to get an accessor for
+	 * @param requiredType the required accessor type (or {@code null} for any)
+	 * @return an accessor instance of the specified type, or {@code null} if none
+	 * @since 4.1
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Nullable
+	public static &lt;T extends MessageHeaderAccessor&gt; T getAccessor(
+			MessageHeaders messageHeaders, @Nullable Class&lt;T&gt; requiredType) {
+
+<span class="fc bfc" id="L601" title="All 2 branches covered.">		if (messageHeaders instanceof MutableMessageHeaders) {</span>
+<span class="fc" id="L602">			MutableMessageHeaders mutableHeaders = (MutableMessageHeaders) messageHeaders;</span>
+<span class="fc" id="L603">			MessageHeaderAccessor headerAccessor = mutableHeaders.getAccessor();</span>
+<span class="pc bpc" id="L604" title="2 of 4 branches missed.">			if (requiredType == null || requiredType.isInstance(headerAccessor))  {</span>
+<span class="fc" id="L605">				return (T) headerAccessor;</span>
+			}
+		}
+<span class="fc" id="L608">		return null;</span>
+	}
+
+	/**
+	 * Return a mutable {@code MessageHeaderAccessor} for the given message attempting
+	 * to match the type of accessor used to create the message headers, or otherwise
+	 * wrapping the message with a {@code MessageHeaderAccessor} instance.
+	 * &lt;p&gt;This is for cases where a header needs to be updated in generic code
+	 * while preserving the accessor type for downstream processing.
+	 * @return an accessor of the required type (never {@code null})
+	 * @since 4.1
+	 */
+	public static MessageHeaderAccessor getMutableAccessor(Message&lt;?&gt; message) {
+<span class="fc bfc" id="L621" title="All 2 branches covered.">		if (message.getHeaders() instanceof MutableMessageHeaders) {</span>
+<span class="fc" id="L622">			MutableMessageHeaders mutableHeaders = (MutableMessageHeaders) message.getHeaders();</span>
+<span class="fc" id="L623">			MessageHeaderAccessor accessor = mutableHeaders.getAccessor();</span>
+<span class="fc bfc" id="L624" title="All 2 branches covered.">			return (accessor.isMutable() ? accessor : accessor.createAccessor(message));</span>
+		}
+<span class="fc" id="L626">		return new MessageHeaderAccessor(message);</span>
+	}
+
+
+	@SuppressWarnings(&quot;serial&quot;)
+	private class MutableMessageHeaders extends MessageHeaders {
+
+<span class="fc" id="L633">		private boolean mutable = true;</span>
+
+<span class="fc" id="L635">		public MutableMessageHeaders(@Nullable Map&lt;String, Object&gt; headers) {</span>
+<span class="fc" id="L636">			super(headers, MessageHeaders.ID_VALUE_NONE, -1L);</span>
+<span class="fc" id="L637">		}</span>
+
+		@Override
+		public Map&lt;String, Object&gt; getRawHeaders() {
+<span class="fc" id="L641">			Assert.state(this.mutable, &quot;Already immutable&quot;);</span>
+<span class="fc" id="L642">			return super.getRawHeaders();</span>
+		}
+
+		public void setImmutable() {
+<span class="fc bfc" id="L646" title="All 2 branches covered.">			if (!this.mutable) {</span>
+<span class="fc" id="L647">				return;</span>
+			}
+
+<span class="pc bpc" id="L650" title="1 of 2 branches missed.">			if (getId() == null) {</span>
+<span class="fc bfc" id="L651" title="All 2 branches covered.">				IdGenerator idGenerator = (MessageHeaderAccessor.this.idGenerator != null ?</span>
+<span class="fc" id="L652">						MessageHeaderAccessor.this.idGenerator : MessageHeaders.getIdGenerator());</span>
+<span class="fc" id="L653">				UUID id = idGenerator.generateId();</span>
+<span class="fc bfc" id="L654" title="All 2 branches covered.">				if (id != MessageHeaders.ID_VALUE_NONE) {</span>
+<span class="fc" id="L655">					getRawHeaders().put(ID, id);</span>
+				}
+			}
+
+<span class="pc bpc" id="L659" title="1 of 2 branches missed.">			if (getTimestamp() == null) {</span>
+<span class="fc bfc" id="L660" title="All 2 branches covered.">				if (MessageHeaderAccessor.this.enableTimestamp) {</span>
+<span class="fc" id="L661">					getRawHeaders().put(TIMESTAMP, System.currentTimeMillis());</span>
+				}
+			}
+
+<span class="fc" id="L665">			this.mutable = false;</span>
+<span class="fc" id="L666">		}</span>
+
+		public boolean isMutable() {
+<span class="fc" id="L669">			return this.mutable;</span>
+		}
+
+		public MessageHeaderAccessor getAccessor() {
+<span class="fc" id="L673">			return MessageHeaderAccessor.this;</span>
+		}
+
+		protected Object writeReplace() {
+			// Serialize as regular MessageHeaders (without MessageHeaderAccessor reference)
+<span class="fc" id="L678">			return new MessageHeaders(this);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

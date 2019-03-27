@@ -1,0 +1,450 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConnectionFactoryUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.connection</a> &gt; <span class="el_source">ConnectionFactoryUtils.java</span></div><h1>ConnectionFactoryUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2017 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.connection;
+
+import javax.jms.Connection;
+import javax.jms.ConnectionFactory;
+import javax.jms.JMSException;
+import javax.jms.QueueConnection;
+import javax.jms.QueueConnectionFactory;
+import javax.jms.QueueSession;
+import javax.jms.Session;
+import javax.jms.TopicConnection;
+import javax.jms.TopicConnectionFactory;
+import javax.jms.TopicSession;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.support.ResourceHolderSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+
+/**
+ * Helper class for managing a JMS {@link javax.jms.ConnectionFactory}, in particular
+ * for obtaining transactional JMS resources for a given ConnectionFactory.
+ *
+ * &lt;p&gt;Mainly for internal use within the framework. Used by
+ * {@link org.springframework.jms.core.JmsTemplate} as well as
+ * {@link org.springframework.jms.listener.DefaultMessageListenerContainer}.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see SmartConnectionFactory
+ */
+<span class="nc" id="L50">public abstract class ConnectionFactoryUtils {</span>
+
+<span class="fc" id="L52">	private static final Log logger = LogFactory.getLog(ConnectionFactoryUtils.class);</span>
+
+
+	/**
+	 * Release the given Connection, stopping it (if necessary) and eventually closing it.
+	 * &lt;p&gt;Checks {@link SmartConnectionFactory#shouldStop}, if available.
+	 * This is essentially a more sophisticated version of
+	 * {@link org.springframework.jms.support.JmsUtils#closeConnection}.
+	 * @param con the Connection to release
+	 * (if this is {@code null}, the call will be ignored)
+	 * @param cf the ConnectionFactory that the Connection was obtained from
+	 * (may be {@code null})
+	 * @param started whether the Connection might have been started by the application
+	 * @see SmartConnectionFactory#shouldStop
+	 * @see org.springframework.jms.support.JmsUtils#closeConnection
+	 */
+	public static void releaseConnection(@Nullable Connection con, @Nullable ConnectionFactory cf, boolean started) {
+<span class="fc bfc" id="L69" title="All 2 branches covered.">		if (con == null) {</span>
+<span class="fc" id="L70">			return;</span>
+		}
+<span class="pc bpc" id="L72" title="3 of 6 branches missed.">		if (started &amp;&amp; cf instanceof SmartConnectionFactory &amp;&amp; ((SmartConnectionFactory) cf).shouldStop(con)) {</span>
+			try {
+<span class="nc" id="L74">				con.stop();</span>
+			}
+<span class="nc" id="L76">			catch (Throwable ex) {</span>
+<span class="nc" id="L77">				logger.debug(&quot;Could not stop JMS Connection before closing it&quot;, ex);</span>
+<span class="nc" id="L78">			}</span>
+		}
+		try {
+<span class="fc" id="L81">			con.close();</span>
+		}
+<span class="nc" id="L83">		catch (Throwable ex) {</span>
+<span class="nc" id="L84">			logger.debug(&quot;Could not close JMS Connection&quot;, ex);</span>
+<span class="fc" id="L85">		}</span>
+<span class="fc" id="L86">	}</span>
+
+	/**
+	 * Return the innermost target Session of the given Session. If the given
+	 * Session is a proxy, it will be unwrapped until a non-proxy Session is
+	 * found. Otherwise, the passed-in Session will be returned as-is.
+	 * @param session the Session proxy to unwrap
+	 * @return the innermost target Session, or the passed-in one if no proxy
+	 * @see SessionProxy#getTargetSession()
+	 */
+	public static Session getTargetSession(Session session) {
+<span class="nc" id="L97">		Session sessionToUse = session;</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">		while (sessionToUse instanceof SessionProxy) {</span>
+<span class="nc" id="L99">			sessionToUse = ((SessionProxy) sessionToUse).getTargetSession();</span>
+		}
+<span class="nc" id="L101">		return sessionToUse;</span>
+	}
+
+
+
+	/**
+	 * Determine whether the given JMS Session is transactional, that is,
+	 * bound to the current thread by Spring's transaction facilities.
+	 * @param session the JMS Session to check
+	 * @param cf the JMS ConnectionFactory that the Session originated from
+	 * @return whether the Session is transactional
+	 */
+	public static boolean isSessionTransactional(@Nullable Session session, @Nullable ConnectionFactory cf) {
+<span class="pc bpc" id="L114" title="2 of 4 branches missed.">		if (session == null || cf == null) {</span>
+<span class="nc" id="L115">			return false;</span>
+		}
+<span class="fc" id="L117">		JmsResourceHolder resourceHolder = (JmsResourceHolder) TransactionSynchronizationManager.getResource(cf);</span>
+<span class="pc bpc" id="L118" title="3 of 4 branches missed.">		return (resourceHolder != null &amp;&amp; resourceHolder.containsSession(session));</span>
+	}
+
+
+	/**
+	 * Obtain a JMS Session that is synchronized with the current transaction, if any.
+	 * @param cf the ConnectionFactory to obtain a Session for
+	 * @param existingCon the existing JMS Connection to obtain a Session for
+	 * (may be {@code null})
+	 * @param synchedLocalTransactionAllowed whether to allow for a local JMS transaction
+	 * that is synchronized with a Spring-managed transaction (where the main transaction
+	 * might be a JDBC-based one for a specific DataSource, for example), with the JMS
+	 * transaction committing right after the main transaction. If not allowed, the given
+	 * ConnectionFactory needs to handle transaction enlistment underneath the covers.
+	 * @return the transactional Session, or {@code null} if none found
+	 * @throws JMSException in case of JMS failure
+	 */
+	@Nullable
+	public static Session getTransactionalSession(final ConnectionFactory cf,
+			@Nullable final Connection existingCon, final boolean synchedLocalTransactionAllowed)
+			throws JMSException {
+
+<span class="fc" id="L140">		return doGetTransactionalSession(cf, new ResourceFactory() {</span>
+			@Override
+			@Nullable
+			public Session getSession(JmsResourceHolder holder) {
+<span class="fc" id="L144">				return holder.getSession(Session.class, existingCon);</span>
+			}
+			@Override
+			@Nullable
+			public Connection getConnection(JmsResourceHolder holder) {
+<span class="fc bfc" id="L149" title="All 2 branches covered.">				return (existingCon != null ? existingCon : holder.getConnection());</span>
+			}
+			@Override
+			public Connection createConnection() throws JMSException {
+<span class="nc" id="L153">				return cf.createConnection();</span>
+			}
+			@Override
+			public Session createSession(Connection con) throws JMSException {
+<span class="nc" id="L157">				return con.createSession(synchedLocalTransactionAllowed, Session.AUTO_ACKNOWLEDGE);</span>
+			}
+			@Override
+			public boolean isSynchedLocalTransactionAllowed() {
+<span class="nc" id="L161">				return synchedLocalTransactionAllowed;</span>
+			}
+		}, true);
+	}
+
+	/**
+	 * Obtain a JMS QueueSession that is synchronized with the current transaction, if any.
+	 * &lt;p&gt;Mainly intended for use with the JMS 1.0.2 API.
+	 * @param cf the ConnectionFactory to obtain a Session for
+	 * @param existingCon the existing JMS Connection to obtain a Session for
+	 * (may be {@code null})
+	 * @param synchedLocalTransactionAllowed whether to allow for a local JMS transaction
+	 * that is synchronized with a Spring-managed transaction (where the main transaction
+	 * might be a JDBC-based one for a specific DataSource, for example), with the JMS
+	 * transaction committing right after the main transaction. If not allowed, the given
+	 * ConnectionFactory needs to handle transaction enlistment underneath the covers.
+	 * @return the transactional Session, or {@code null} if none found
+	 * @throws JMSException in case of JMS failure
+	 */
+	@Nullable
+	public static QueueSession getTransactionalQueueSession(final QueueConnectionFactory cf,
+			@Nullable final QueueConnection existingCon, final boolean synchedLocalTransactionAllowed)
+			throws JMSException {
+
+<span class="nc" id="L185">		return (QueueSession) doGetTransactionalSession(cf, new ResourceFactory() {</span>
+			@Override
+			@Nullable
+			public Session getSession(JmsResourceHolder holder) {
+<span class="nc" id="L189">				return holder.getSession(QueueSession.class, existingCon);</span>
+			}
+			@Override
+			@Nullable
+			public Connection getConnection(JmsResourceHolder holder) {
+<span class="nc bnc" id="L194" title="All 2 branches missed.">				return (existingCon != null ? existingCon : holder.getConnection(QueueConnection.class));</span>
+			}
+			@Override
+			public Connection createConnection() throws JMSException {
+<span class="nc" id="L198">				return cf.createQueueConnection();</span>
+			}
+			@Override
+			public Session createSession(Connection con) throws JMSException {
+<span class="nc" id="L202">				return ((QueueConnection) con).createQueueSession(synchedLocalTransactionAllowed, Session.AUTO_ACKNOWLEDGE);</span>
+			}
+			@Override
+			public boolean isSynchedLocalTransactionAllowed() {
+<span class="nc" id="L206">				return synchedLocalTransactionAllowed;</span>
+			}
+		}, true);
+	}
+
+	/**
+	 * Obtain a JMS TopicSession that is synchronized with the current transaction, if any.
+	 * &lt;p&gt;Mainly intended for use with the JMS 1.0.2 API.
+	 * @param cf the ConnectionFactory to obtain a Session for
+	 * @param existingCon the existing JMS Connection to obtain a Session for
+	 * (may be {@code null})
+	 * @param synchedLocalTransactionAllowed whether to allow for a local JMS transaction
+	 * that is synchronized with a Spring-managed transaction (where the main transaction
+	 * might be a JDBC-based one for a specific DataSource, for example), with the JMS
+	 * transaction committing right after the main transaction. If not allowed, the given
+	 * ConnectionFactory needs to handle transaction enlistment underneath the covers.
+	 * @return the transactional Session, or {@code null} if none found
+	 * @throws JMSException in case of JMS failure
+	 */
+	@Nullable
+	public static TopicSession getTransactionalTopicSession(final TopicConnectionFactory cf,
+			@Nullable final TopicConnection existingCon, final boolean synchedLocalTransactionAllowed)
+			throws JMSException {
+
+<span class="nc" id="L230">		return (TopicSession) doGetTransactionalSession(cf, new ResourceFactory() {</span>
+			@Override
+			@Nullable
+			public Session getSession(JmsResourceHolder holder) {
+<span class="nc" id="L234">				return holder.getSession(TopicSession.class, existingCon);</span>
+			}
+			@Override
+			@Nullable
+			public Connection getConnection(JmsResourceHolder holder) {
+<span class="nc bnc" id="L239" title="All 2 branches missed.">				return (existingCon != null ? existingCon : holder.getConnection(TopicConnection.class));</span>
+			}
+			@Override
+			public Connection createConnection() throws JMSException {
+<span class="nc" id="L243">				return cf.createTopicConnection();</span>
+			}
+			@Override
+			public Session createSession(Connection con) throws JMSException {
+<span class="nc" id="L247">				return ((TopicConnection) con).createTopicSession(</span>
+						synchedLocalTransactionAllowed, Session.AUTO_ACKNOWLEDGE);
+			}
+			@Override
+			public boolean isSynchedLocalTransactionAllowed() {
+<span class="nc" id="L252">				return synchedLocalTransactionAllowed;</span>
+			}
+		}, true);
+	}
+
+	/**
+	 * Obtain a JMS Session that is synchronized with the current transaction, if any.
+	 * &lt;p&gt;This {@code doGetTransactionalSession} variant always starts the underlying
+	 * JMS Connection, assuming that the Session will be used for receiving messages.
+	 * @param connectionFactory the JMS ConnectionFactory to bind for
+	 * (used as TransactionSynchronizationManager key)
+	 * @param resourceFactory the ResourceFactory to use for extracting or creating
+	 * JMS resources
+	 * @return the transactional Session, or {@code null} if none found
+	 * @throws JMSException in case of JMS failure
+	 * @see #doGetTransactionalSession(javax.jms.ConnectionFactory, ResourceFactory, boolean)
+	 */
+	@Nullable
+	public static Session doGetTransactionalSession(
+			ConnectionFactory connectionFactory, ResourceFactory resourceFactory) throws JMSException {
+
+<span class="nc" id="L273">		return doGetTransactionalSession(connectionFactory, resourceFactory, true);</span>
+	}
+
+	/**
+	 * Obtain a JMS Session that is synchronized with the current transaction, if any.
+	 * @param connectionFactory the JMS ConnectionFactory to bind for
+	 * (used as TransactionSynchronizationManager key)
+	 * @param resourceFactory the ResourceFactory to use for extracting or creating
+	 * JMS resources
+	 * @param startConnection whether the underlying JMS Connection approach should be
+	 * started in order to allow for receiving messages. Note that a reused Connection
+	 * may already have been started before, even if this flag is {@code false}.
+	 * @return the transactional Session, or {@code null} if none found
+	 * @throws JMSException in case of JMS failure
+	 */
+	@Nullable
+	public static Session doGetTransactionalSession(
+			ConnectionFactory connectionFactory, ResourceFactory resourceFactory, boolean startConnection)
+			throws JMSException {
+
+<span class="fc" id="L293">		Assert.notNull(connectionFactory, &quot;ConnectionFactory must not be null&quot;);</span>
+<span class="fc" id="L294">		Assert.notNull(resourceFactory, &quot;ResourceFactory must not be null&quot;);</span>
+
+<span class="fc" id="L296">		JmsResourceHolder resourceHolder =</span>
+<span class="fc" id="L297">				(JmsResourceHolder) TransactionSynchronizationManager.getResource(connectionFactory);</span>
+<span class="fc bfc" id="L298" title="All 2 branches covered.">		if (resourceHolder != null) {</span>
+<span class="fc" id="L299">			Session session = resourceFactory.getSession(resourceHolder);</span>
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">			if (session != null) {</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">				if (startConnection) {</span>
+<span class="fc" id="L302">					Connection con = resourceFactory.getConnection(resourceHolder);</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">					if (con != null) {</span>
+<span class="fc" id="L304">						con.start();</span>
+					}
+				}
+<span class="fc" id="L307">				return session;</span>
+			}
+<span class="nc bnc" id="L309" title="All 2 branches missed.">			if (resourceHolder.isFrozen()) {</span>
+<span class="nc" id="L310">				return null;</span>
+			}
+		}
+<span class="fc bfc" id="L313" title="All 2 branches covered.">		if (!TransactionSynchronizationManager.isSynchronizationActive()) {</span>
+<span class="fc" id="L314">			return null;</span>
+		}
+<span class="fc" id="L316">		JmsResourceHolder resourceHolderToUse = resourceHolder;</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">		if (resourceHolderToUse == null) {</span>
+<span class="fc" id="L318">			resourceHolderToUse = new JmsResourceHolder(connectionFactory);</span>
+		}
+<span class="fc" id="L320">		Connection con = resourceFactory.getConnection(resourceHolderToUse);</span>
+<span class="fc" id="L321">		Session session = null;</span>
+		try {
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">			boolean isExistingCon = (con != null);</span>
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">			if (!isExistingCon) {</span>
+<span class="fc" id="L325">				con = resourceFactory.createConnection();</span>
+<span class="fc" id="L326">				resourceHolderToUse.addConnection(con);</span>
+			}
+<span class="fc" id="L328">			session = resourceFactory.createSession(con);</span>
+<span class="fc" id="L329">			resourceHolderToUse.addSession(session, con);</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">			if (startConnection) {</span>
+<span class="nc" id="L331">				con.start();</span>
+			}
+		}
+<span class="nc" id="L334">		catch (JMSException ex) {</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">			if (session != null) {</span>
+				try {
+<span class="nc" id="L337">					session.close();</span>
+				}
+<span class="nc" id="L339">				catch (Throwable ex2) {</span>
+					// ignore
+<span class="nc" id="L341">				}</span>
+			}
+<span class="nc bnc" id="L343" title="All 2 branches missed.">			if (con != null) {</span>
+				try {
+<span class="nc" id="L345">					con.close();</span>
+				}
+<span class="nc" id="L347">				catch (Throwable ex2) {</span>
+					// ignore
+<span class="nc" id="L349">				}</span>
+			}
+<span class="nc" id="L351">			throw ex;</span>
+<span class="fc" id="L352">		}</span>
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">		if (resourceHolderToUse != resourceHolder) {</span>
+<span class="fc" id="L354">			TransactionSynchronizationManager.registerSynchronization(</span>
+					new JmsResourceSynchronization(resourceHolderToUse, connectionFactory,
+<span class="fc" id="L356">							resourceFactory.isSynchedLocalTransactionAllowed()));</span>
+<span class="fc" id="L357">			resourceHolderToUse.setSynchronizedWithTransaction(true);</span>
+<span class="fc" id="L358">			TransactionSynchronizationManager.bindResource(connectionFactory, resourceHolderToUse);</span>
+		}
+<span class="fc" id="L360">		return session;</span>
+	}
+
+
+	/**
+	 * Callback interface for resource creation.
+	 * Serving as argument for the {@code doGetTransactionalSession} method.
+	 */
+	public interface ResourceFactory {
+
+		/**
+		 * Fetch an appropriate Session from the given JmsResourceHolder.
+		 * @param holder the JmsResourceHolder
+		 * @return an appropriate Session fetched from the holder,
+		 * or {@code null} if none found
+		 */
+		@Nullable
+		Session getSession(JmsResourceHolder holder);
+
+		/**
+		 * Fetch an appropriate Connection from the given JmsResourceHolder.
+		 * @param holder the JmsResourceHolder
+		 * @return an appropriate Connection fetched from the holder,
+		 * or {@code null} if none found
+		 */
+		@Nullable
+		Connection getConnection(JmsResourceHolder holder);
+
+		/**
+		 * Create a new JMS Connection for registration with a JmsResourceHolder.
+		 * @return the new JMS Connection
+		 * @throws JMSException if thrown by JMS API methods
+		 */
+		Connection createConnection() throws JMSException;
+
+		/**
+		 * Create a new JMS Session for registration with a JmsResourceHolder.
+		 * @param con the JMS Connection to create a Session for
+		 * @return the new JMS Session
+		 * @throws JMSException if thrown by JMS API methods
+		 */
+		Session createSession(Connection con) throws JMSException;
+
+		/**
+		 * Return whether to allow for a local JMS transaction that is synchronized with
+		 * a Spring-managed transaction (where the main transaction might be a JDBC-based
+		 * one for a specific DataSource, for example), with the JMS transaction
+		 * committing right after the main transaction.
+		 * @return whether to allow for synchronizing a local JMS transaction
+		 */
+		boolean isSynchedLocalTransactionAllowed();
+	}
+
+
+	/**
+	 * Callback for resource cleanup at the end of a non-native JMS transaction
+	 * (e.g. when participating in a JtaTransactionManager transaction).
+	 * @see org.springframework.transaction.jta.JtaTransactionManager
+	 */
+	private static class JmsResourceSynchronization extends ResourceHolderSynchronization&lt;JmsResourceHolder, Object&gt; {
+
+		private final boolean transacted;
+
+		public JmsResourceSynchronization(JmsResourceHolder resourceHolder, Object resourceKey, boolean transacted) {
+<span class="fc" id="L424">			super(resourceHolder, resourceKey);</span>
+<span class="fc" id="L425">			this.transacted = transacted;</span>
+<span class="fc" id="L426">		}</span>
+
+		@Override
+		protected boolean shouldReleaseBeforeCompletion() {
+<span class="fc bfc" id="L430" title="All 2 branches covered.">			return !this.transacted;</span>
+		}
+
+		@Override
+		protected void processResourceAfterCommit(JmsResourceHolder resourceHolder) {
+			try {
+<span class="fc" id="L436">				resourceHolder.commitAll();</span>
+			}
+<span class="nc" id="L438">			catch (JMSException ex) {</span>
+<span class="nc" id="L439">				throw new SynchedLocalTransactionFailedException(&quot;Local JMS transaction failed to commit&quot;, ex);</span>
+<span class="fc" id="L440">			}</span>
+<span class="fc" id="L441">		}</span>
+
+		@Override
+		protected void releaseResource(JmsResourceHolder resourceHolder, Object resourceKey) {
+<span class="fc" id="L445">			resourceHolder.closeAll();</span>
+<span class="fc" id="L446">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

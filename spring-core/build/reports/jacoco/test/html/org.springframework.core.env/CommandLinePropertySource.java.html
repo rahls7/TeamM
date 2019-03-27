@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CommandLinePropertySource.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.env</a> &gt; <span class="el_source">CommandLinePropertySource.java</span></div><h1>CommandLinePropertySource.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.env;
+
+import java.util.Collection;
+import java.util.List;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.StringUtils;
+
+/**
+ * Abstract base class for {@link PropertySource} implementations backed by command line
+ * arguments. The parameterized type {@code T} represents the underlying source of command
+ * line options. This may be as simple as a String array in the case of
+ * {@link SimpleCommandLinePropertySource}, or specific to a particular API such as JOpt's
+ * {@code OptionSet} in the case of {@link JOptCommandLinePropertySource}.
+ *
+ * &lt;h3&gt;Purpose and General Usage&lt;/h3&gt;
+ *
+ * For use in standalone Spring-based applications, i.e. those that are bootstrapped via
+ * a traditional {@code main} method accepting a {@code String[]} of arguments from the
+ * command line. In many cases, processing command-line arguments directly within the
+ * {@code main} method may be sufficient, but in other cases, it may be desirable to
+ * inject arguments as values into Spring beans. It is this latter set of cases in which
+ * a {@code CommandLinePropertySource} becomes useful. A {@code CommandLinePropertySource}
+ * will typically be added to the {@link Environment} of the Spring
+ * {@code ApplicationContext}, at which point all command line arguments become available
+ * through the {@link Environment#getProperty(String)} family of methods. For example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * public static void main(String[] args) {
+ *     CommandLinePropertySource clps = ...;
+ *     AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext();
+ *     ctx.getEnvironment().getPropertySources().addFirst(clps);
+ *     ctx.register(AppConfig.class);
+ *     ctx.refresh();
+ * }&lt;/pre&gt;
+ *
+ * With the bootstrap logic above, the {@code AppConfig} class may {@code @Inject} the
+ * Spring {@code Environment} and query it directly for properties:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;#064;Configuration
+ * public class AppConfig {
+ *
+ *     &amp;#064;Inject Environment env;
+ *
+ *     &amp;#064;Bean
+ *     public void DataSource dataSource() {
+ *         MyVendorDataSource dataSource = new MyVendorDataSource();
+ *         dataSource.setHostname(env.getProperty(&quot;db.hostname&quot;, &quot;localhost&quot;));
+ *         dataSource.setUsername(env.getRequiredProperty(&quot;db.username&quot;));
+ *         dataSource.setPassword(env.getRequiredProperty(&quot;db.password&quot;));
+ *         // ...
+ *         return dataSource;
+ *     }
+ * }&lt;/pre&gt;
+ *
+ * Because the {@code CommandLinePropertySource} was added to the {@code Environment}'s
+ * set of {@link MutablePropertySources} using the {@code #addFirst} method, it has
+ * highest search precedence, meaning that while &quot;db.hostname&quot; and other properties may
+ * exist in other property sources such as the system environment variables, it will be
+ * chosen from the command line property source first. This is a reasonable approach
+ * given that arguments specified on the command line are naturally more specific than
+ * those specified as environment variables.
+ *
+ * &lt;p&gt;As an alternative to injecting the {@code Environment}, Spring's {@code @Value}
+ * annotation may be used to inject these properties, given that a {@link
+ * PropertySourcesPropertyResolver} bean has been registered, either directly or through
+ * using the {@code &lt;context:property-placeholder&gt;} element. For example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;#064;Component
+ * public class MyComponent {
+ *
+ *     &amp;#064;Value(&quot;my.property:defaultVal&quot;)
+ *     private String myProperty;
+ *
+ *     public void getMyProperty() {
+ *         return this.myProperty;
+ *     }
+ *
+ *     // ...
+ * }&lt;/pre&gt;
+ *
+ * &lt;h3&gt;Working with option arguments&lt;/h3&gt;
+ *
+ * &lt;p&gt;Individual command line arguments are represented as properties through the usual
+ * {@link PropertySource#getProperty(String)} and
+ * {@link PropertySource#containsProperty(String)} methods. For example, given the
+ * following command line:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;--o1=v1 --o2&lt;/pre&gt;
+ *
+ * 'o1' and 'o2' are treated as &quot;option arguments&quot;, and the following assertions would
+ * evaluate true:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * CommandLinePropertySource&lt;?&gt; ps = ...
+ * assert ps.containsProperty(&quot;o1&quot;) == true;
+ * assert ps.containsProperty(&quot;o2&quot;) == true;
+ * assert ps.containsProperty(&quot;o3&quot;) == false;
+ * assert ps.getProperty(&quot;o1&quot;).equals(&quot;v1&quot;);
+ * assert ps.getProperty(&quot;o2&quot;).equals(&quot;&quot;);
+ * assert ps.getProperty(&quot;o3&quot;) == null;
+ * &lt;/pre&gt;
+ *
+ * Note that the 'o2' option has no argument, but {@code getProperty(&quot;o2&quot;)} resolves to
+ * empty string ({@code &quot;&quot;}) as opposed to {@code null}, while {@code getProperty(&quot;o3&quot;)}
+ * resolves to {@code null} because it was not specified. This behavior is consistent with
+ * the general contract to be followed by all {@code PropertySource} implementations.
+ *
+ * &lt;p&gt;Note also that while &quot;--&quot; was used in the examples above to denote an option
+ * argument, this syntax may vary across individual command line argument libraries. For
+ * example, a JOpt- or Commons CLI-based implementation may allow for single dash (&quot;-&quot;)
+ * &quot;short&quot; option arguments, etc.
+ *
+ * &lt;h3&gt;Working with non-option arguments&lt;/h3&gt;
+ *
+ * &lt;p&gt;Non-option arguments are also supported through this abstraction. Any arguments
+ * supplied without an option-style prefix such as &quot;-&quot; or &quot;--&quot; are considered &quot;non-option
+ * arguments&quot; and available through the special {@linkplain
+ * #DEFAULT_NON_OPTION_ARGS_PROPERTY_NAME &quot;nonOptionArgs&quot;} property.  If multiple
+ * non-option arguments are specified, the value of this property will be a
+ * comma-delimited string containing all of the arguments. This approach ensures a simple
+ * and consistent return type (String) for all properties from a {@code
+ * CommandLinePropertySource} and at the same time lends itself to conversion when used
+ * in conjunction with the Spring {@link Environment} and its built-in {@code
+ * ConversionService}. Consider the following example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;--o1=v1 --o2=v2 /path/to/file1 /path/to/file2&lt;/pre&gt;
+ *
+ * In this example, &quot;o1&quot; and &quot;o2&quot; would be considered &quot;option arguments&quot;, while the two
+ * filesystem paths qualify as &quot;non-option arguments&quot;.  As such, the following assertions
+ * will evaluate true:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * CommandLinePropertySource&lt;?&gt; ps = ...
+ * assert ps.containsProperty(&quot;o1&quot;) == true;
+ * assert ps.containsProperty(&quot;o2&quot;) == true;
+ * assert ps.containsProperty(&quot;nonOptionArgs&quot;) == true;
+ * assert ps.getProperty(&quot;o1&quot;).equals(&quot;v1&quot;);
+ * assert ps.getProperty(&quot;o2&quot;).equals(&quot;v2&quot;);
+ * assert ps.getProperty(&quot;nonOptionArgs&quot;).equals(&quot;/path/to/file1,/path/to/file2&quot;);
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;As mentioned above, when used in conjunction with the Spring {@code Environment}
+ * abstraction, this comma-delimited string may easily be converted to a String array or
+ * list:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * Environment env = applicationContext.getEnvironment();
+ * String[] nonOptionArgs = env.getProperty(&quot;nonOptionArgs&quot;, String[].class);
+ * assert nonOptionArgs[0].equals(&quot;/path/to/file1&quot;);
+ * assert nonOptionArgs[1].equals(&quot;/path/to/file2&quot;);
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;The name of the special &quot;non-option arguments&quot; property may be customized through
+ * the {@link #setNonOptionArgsPropertyName(String)} method. Doing so is recommended as
+ * it gives proper semantic value to non-option arguments. For example, if filesystem
+ * paths are being specified as non-option arguments, it is likely preferable to refer to
+ * these as something like &quot;file.locations&quot; than the default of &quot;nonOptionArgs&quot;:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * public static void main(String[] args) {
+ *     CommandLinePropertySource clps = ...;
+ *     clps.setNonOptionArgsPropertyName(&quot;file.locations&quot;);
+ *
+ *     AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext();
+ *     ctx.getEnvironment().getPropertySources().addFirst(clps);
+ *     ctx.register(AppConfig.class);
+ *     ctx.refresh();
+ * }&lt;/pre&gt;
+ *
+ * &lt;h3&gt;Limitations&lt;/h3&gt;
+ *
+ * This abstraction is not intended to expose the full power of underlying command line
+ * parsing APIs such as JOpt or Commons CLI. It's intent is rather just the opposite: to
+ * provide the simplest possible abstraction for accessing command line arguments
+ * &lt;em&gt;after&lt;/em&gt; they have been parsed. So the typical case will involve fully configuring
+ * the underlying command line parsing API, parsing the {@code String[]} of arguments
+ * coming into the main method, and then simply providing the parsing results to an
+ * implementation of {@code CommandLinePropertySource}. At that point, all arguments can
+ * be considered either 'option' or 'non-option' arguments and as described above can be
+ * accessed through the normal {@code PropertySource} and {@code Environment} APIs.
+ *
+ * @author Chris Beams
+ * @since 3.1
+ * @param &lt;T&gt; the source type
+ * @see PropertySource
+ * @see SimpleCommandLinePropertySource
+ * @see JOptCommandLinePropertySource
+ */
+public abstract class CommandLinePropertySource&lt;T&gt; extends EnumerablePropertySource&lt;T&gt; {
+
+	/** The default name given to {@link CommandLinePropertySource} instances: {@value}. */
+	public static final String COMMAND_LINE_PROPERTY_SOURCE_NAME = &quot;commandLineArgs&quot;;
+
+	/** The default name of the property representing non-option arguments: {@value}. */
+	public static final String DEFAULT_NON_OPTION_ARGS_PROPERTY_NAME = &quot;nonOptionArgs&quot;;
+
+
+<span class="fc" id="L217">	private String nonOptionArgsPropertyName = DEFAULT_NON_OPTION_ARGS_PROPERTY_NAME;</span>
+
+
+	/**
+	 * Create a new {@code CommandLinePropertySource} having the default name
+	 * {@value #COMMAND_LINE_PROPERTY_SOURCE_NAME} and backed by the given source object.
+	 */
+	public CommandLinePropertySource(T source) {
+<span class="fc" id="L225">		super(COMMAND_LINE_PROPERTY_SOURCE_NAME, source);</span>
+<span class="fc" id="L226">	}</span>
+
+	/**
+	 * Create a new {@link CommandLinePropertySource} having the given name
+	 * and backed by the given source object.
+	 */
+	public CommandLinePropertySource(String name, T source) {
+<span class="fc" id="L233">		super(name, source);</span>
+<span class="fc" id="L234">	}</span>
+
+
+	/**
+	 * Specify the name of the special &quot;non-option arguments&quot; property.
+	 * The default is {@value #DEFAULT_NON_OPTION_ARGS_PROPERTY_NAME}.
+	 */
+	public void setNonOptionArgsPropertyName(String nonOptionArgsPropertyName) {
+<span class="fc" id="L242">		this.nonOptionArgsPropertyName = nonOptionArgsPropertyName;</span>
+<span class="fc" id="L243">	}</span>
+
+	/**
+	 * This implementation first checks to see if the name specified is the special
+	 * {@linkplain #setNonOptionArgsPropertyName(String) &quot;non-option arguments&quot; property},
+	 * and if so delegates to the abstract {@link #getNonOptionArgs()} method
+	 * checking to see whether it returns an empty collection. Otherwise delegates to and
+	 * returns the value of the abstract {@link #containsOption(String)} method.
+	 */
+	@Override
+	public final boolean containsProperty(String name) {
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		if (this.nonOptionArgsPropertyName.equals(name)) {</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">			return !this.getNonOptionArgs().isEmpty();</span>
+		}
+<span class="fc" id="L257">		return this.containsOption(name);</span>
+	}
+
+	/**
+	 * This implementation first checks to see if the name specified is the special
+	 * {@linkplain #setNonOptionArgsPropertyName(String) &quot;non-option arguments&quot; property},
+	 * and if so delegates to the abstract {@link #getNonOptionArgs()} method. If so
+	 * and the collection of non-option arguments is empty, this method returns {@code
+	 * null}. If not empty, it returns a comma-separated String of all non-option
+	 * arguments. Otherwise delegates to and returns the result of the abstract {@link
+	 * #getOptionValues(String)} method.
+	 */
+	@Override
+	@Nullable
+	public final String getProperty(String name) {
+<span class="fc bfc" id="L272" title="All 2 branches covered.">		if (this.nonOptionArgsPropertyName.equals(name)) {</span>
+<span class="fc" id="L273">			Collection&lt;String&gt; nonOptionArguments = this.getNonOptionArgs();</span>
+<span class="fc bfc" id="L274" title="All 2 branches covered.">			if (nonOptionArguments.isEmpty()) {</span>
+<span class="fc" id="L275">				return null;</span>
+			}
+			else {
+<span class="fc" id="L278">				return StringUtils.collectionToCommaDelimitedString(nonOptionArguments);</span>
+			}
+		}
+<span class="fc" id="L281">		Collection&lt;String&gt; optionValues = this.getOptionValues(name);</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">		if (optionValues == null) {</span>
+<span class="fc" id="L283">			return null;</span>
+		}
+		else {
+<span class="fc" id="L286">			return StringUtils.collectionToCommaDelimitedString(optionValues);</span>
+		}
+	}
+
+
+	/**
+	 * Return whether the set of option arguments parsed from the command line contains
+	 * an option with the given name.
+	 */
+	protected abstract boolean containsOption(String name);
+
+	/**
+	 * Return the collection of values associated with the command line option having the
+	 * given name.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;if the option is present and has no argument (e.g.: &quot;--foo&quot;), return an empty
+	 * collection ({@code []})&lt;/li&gt;
+	 * &lt;li&gt;if the option is present and has a single value (e.g. &quot;--foo=bar&quot;), return a
+	 * collection having one element ({@code [&quot;bar&quot;]})&lt;/li&gt;
+	 * &lt;li&gt;if the option is present and the underlying command line parsing library
+	 * supports multiple arguments (e.g. &quot;--foo=bar --foo=baz&quot;), return a collection
+	 * having elements for each value ({@code [&quot;bar&quot;, &quot;baz&quot;]})&lt;/li&gt;
+	 * &lt;li&gt;if the option is not present, return {@code null}&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 */
+	@Nullable
+	protected abstract List&lt;String&gt; getOptionValues(String name);
+
+	/**
+	 * Return the collection of non-option arguments parsed from the command line.
+	 * Never {@code null}.
+	 */
+	protected abstract List&lt;String&gt; getNonOptionArgs();
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

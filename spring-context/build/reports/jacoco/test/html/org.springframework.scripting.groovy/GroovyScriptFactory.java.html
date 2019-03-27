@@ -1,0 +1,369 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GroovyScriptFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scripting.groovy</a> &gt; <span class="el_source">GroovyScriptFactory.java</span></div><h1>GroovyScriptFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2017 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scripting.groovy;
+
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+
+import groovy.lang.GroovyClassLoader;
+import groovy.lang.GroovyObject;
+import groovy.lang.MetaClass;
+import groovy.lang.Script;
+import org.codehaus.groovy.control.CompilationFailedException;
+import org.codehaus.groovy.control.CompilerConfiguration;
+import org.codehaus.groovy.control.customizers.CompilationCustomizer;
+
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.lang.Nullable;
+import org.springframework.scripting.ScriptCompilationException;
+import org.springframework.scripting.ScriptFactory;
+import org.springframework.scripting.ScriptSource;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * {@link org.springframework.scripting.ScriptFactory} implementation
+ * for a Groovy script.
+ *
+ * &lt;p&gt;Typically used in combination with a
+ * {@link org.springframework.scripting.support.ScriptFactoryPostProcessor};
+ * see the latter's javadoc for a configuration example.
+ *
+ * &lt;p&gt;Note: Spring 4.0 supports Groovy 1.8 and higher.
+ *
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Rod Johnson
+ * @since 2.0
+ * @see groovy.lang.GroovyClassLoader
+ * @see org.springframework.scripting.support.ScriptFactoryPostProcessor
+ */
+public class GroovyScriptFactory implements ScriptFactory, BeanFactoryAware, BeanClassLoaderAware {
+
+	private final String scriptSourceLocator;
+
+	@Nullable
+	private GroovyObjectCustomizer groovyObjectCustomizer;
+
+	@Nullable
+	private CompilerConfiguration compilerConfiguration;
+
+	@Nullable
+	private GroovyClassLoader groovyClassLoader;
+
+	@Nullable
+	private Class&lt;?&gt; scriptClass;
+
+	@Nullable
+	private Class&lt;?&gt; scriptResultClass;
+
+	@Nullable
+	private CachedResultHolder cachedResult;
+
+<span class="fc" id="L82">	private final Object scriptClassMonitor = new Object();</span>
+
+<span class="fc" id="L84">	private boolean wasModifiedForTypeCheck = false;</span>
+
+
+	/**
+	 * Create a new GroovyScriptFactory for the given script source.
+	 * &lt;p&gt;We don't need to specify script interfaces here, since
+	 * a Groovy script defines its Java interfaces itself.
+	 * @param scriptSourceLocator a locator that points to the source of the script.
+	 * Interpreted by the post-processor that actually creates the script.
+	 */
+<span class="fc" id="L94">	public GroovyScriptFactory(String scriptSourceLocator) {</span>
+<span class="fc" id="L95">		Assert.hasText(scriptSourceLocator, &quot;'scriptSourceLocator' must not be empty&quot;);</span>
+<span class="fc" id="L96">		this.scriptSourceLocator = scriptSourceLocator;</span>
+<span class="fc" id="L97">	}</span>
+
+	/**
+	 * Create a new GroovyScriptFactory for the given script source,
+	 * specifying a strategy interface that can create a custom MetaClass
+	 * to supply missing methods and otherwise change the behavior of the object.
+	 * @param scriptSourceLocator a locator that points to the source of the script.
+	 * Interpreted by the post-processor that actually creates the script.
+	 * @param groovyObjectCustomizer a customizer that can set a custom metaclass
+	 * or make other changes to the GroovyObject created by this factory
+	 * (may be {@code null})
+	 * @see GroovyObjectCustomizer#customize
+	 */
+	public GroovyScriptFactory(String scriptSourceLocator, @Nullable GroovyObjectCustomizer groovyObjectCustomizer) {
+<span class="fc" id="L111">		this(scriptSourceLocator);</span>
+<span class="fc" id="L112">		this.groovyObjectCustomizer = groovyObjectCustomizer;</span>
+<span class="fc" id="L113">	}</span>
+
+	/**
+	 * Create a new GroovyScriptFactory for the given script source,
+	 * specifying a strategy interface that can create a custom MetaClass
+	 * to supply missing methods and otherwise change the behavior of the object.
+	 * @param scriptSourceLocator a locator that points to the source of the script.
+	 * Interpreted by the post-processor that actually creates the script.
+	 * @param compilerConfiguration a custom compiler configuration to be applied
+	 * to the GroovyClassLoader (may be {@code null})
+	 * @since 4.3.3
+	 * @see GroovyClassLoader#GroovyClassLoader(ClassLoader, CompilerConfiguration)
+	 */
+	public GroovyScriptFactory(String scriptSourceLocator, @Nullable CompilerConfiguration compilerConfiguration) {
+<span class="fc" id="L127">		this(scriptSourceLocator);</span>
+<span class="fc" id="L128">		this.compilerConfiguration = compilerConfiguration;</span>
+<span class="fc" id="L129">	}</span>
+
+	/**
+	 * Create a new GroovyScriptFactory for the given script source,
+	 * specifying a strategy interface that can customize Groovy's compilation
+	 * process within the underlying GroovyClassLoader.
+	 * @param scriptSourceLocator a locator that points to the source of the script.
+	 * Interpreted by the post-processor that actually creates the script.
+	 * @param compilationCustomizers one or more customizers to be applied to the
+	 * GroovyClassLoader compiler configuration
+	 * @since 4.3.3
+	 * @see CompilerConfiguration#addCompilationCustomizers
+	 * @see org.codehaus.groovy.control.customizers.ImportCustomizer
+	 */
+	public GroovyScriptFactory(String scriptSourceLocator, CompilationCustomizer... compilationCustomizers) {
+<span class="fc" id="L144">		this(scriptSourceLocator);</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">		if (!ObjectUtils.isEmpty(compilationCustomizers)) {</span>
+<span class="fc" id="L146">			this.compilerConfiguration = new CompilerConfiguration();</span>
+<span class="fc" id="L147">			this.compilerConfiguration.addCompilationCustomizers(compilationCustomizers);</span>
+		}
+<span class="fc" id="L149">	}</span>
+
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">		if (beanFactory instanceof ConfigurableListableBeanFactory) {</span>
+<span class="fc" id="L155">			((ConfigurableListableBeanFactory) beanFactory).ignoreDependencyType(MetaClass.class);</span>
+		}
+<span class="fc" id="L157">	}</span>
+
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+<span class="fc" id="L161">		this.groovyClassLoader = buildGroovyClassLoader(classLoader);</span>
+<span class="fc" id="L162">	}</span>
+
+	/**
+	 * Return the GroovyClassLoader used by this script factory.
+	 */
+	public GroovyClassLoader getGroovyClassLoader() {
+<span class="fc" id="L168">		synchronized (this.scriptClassMonitor) {</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">			if (this.groovyClassLoader == null) {</span>
+<span class="fc" id="L170">				this.groovyClassLoader = buildGroovyClassLoader(ClassUtils.getDefaultClassLoader());</span>
+			}
+<span class="fc" id="L172">			return this.groovyClassLoader;</span>
+		}
+	}
+
+	/**
+	 * Build a {@link GroovyClassLoader} for the given {@code ClassLoader}.
+	 * @param classLoader the ClassLoader to build a GroovyClassLoader for
+	 * @since 4.3.3
+	 */
+	protected GroovyClassLoader buildGroovyClassLoader(@Nullable ClassLoader classLoader) {
+<span class="fc bfc" id="L182" title="All 2 branches covered.">		return (this.compilerConfiguration != null ?</span>
+				new GroovyClassLoader(classLoader, this.compilerConfiguration) : new GroovyClassLoader(classLoader));
+	}
+
+
+	@Override
+	public String getScriptSourceLocator() {
+<span class="fc" id="L189">		return this.scriptSourceLocator;</span>
+	}
+
+	/**
+	 * Groovy scripts determine their interfaces themselves,
+	 * hence we don't need to explicitly expose interfaces here.
+	 * @return {@code null} always
+	 */
+	@Override
+	@Nullable
+	public Class&lt;?&gt;[] getScriptInterfaces() {
+<span class="fc" id="L200">		return null;</span>
+	}
+
+	/**
+	 * Groovy scripts do not need a config interface,
+	 * since they expose their setters as public methods.
+	 */
+	@Override
+	public boolean requiresConfigInterface() {
+<span class="fc" id="L209">		return false;</span>
+	}
+
+
+	/**
+	 * Loads and parses the Groovy script via the GroovyClassLoader.
+	 * @see groovy.lang.GroovyClassLoader
+	 */
+	@Override
+	@Nullable
+	public Object getScriptedObject(ScriptSource scriptSource, @Nullable Class&lt;?&gt;... actualInterfaces)
+			throws IOException, ScriptCompilationException {
+
+<span class="fc" id="L222">		synchronized (this.scriptClassMonitor) {</span>
+			try {
+				Class&lt;?&gt; scriptClassToExecute;
+<span class="fc" id="L225">				this.wasModifiedForTypeCheck = false;</span>
+
+<span class="fc bfc" id="L227" title="All 2 branches covered.">				if (this.cachedResult != null) {</span>
+<span class="fc" id="L228">					Object result = this.cachedResult.object;</span>
+<span class="fc" id="L229">					this.cachedResult = null;</span>
+<span class="fc" id="L230">					return result;</span>
+				}
+
+<span class="pc bpc" id="L233" title="1 of 4 branches missed.">				if (this.scriptClass == null || scriptSource.isModified()) {</span>
+					// New script content...
+<span class="fc" id="L235">					this.scriptClass = getGroovyClassLoader().parseClass(</span>
+<span class="fc" id="L236">							scriptSource.getScriptAsString(), scriptSource.suggestedClassName());</span>
+
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">					if (Script.class.isAssignableFrom(this.scriptClass)) {</span>
+						// A Groovy script, probably creating an instance: let's execute it.
+<span class="nc" id="L240">						Object result = executeScript(scriptSource, this.scriptClass);</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">						this.scriptResultClass = (result != null ? result.getClass() : null);</span>
+<span class="nc" id="L242">						return result;</span>
+					}
+					else {
+<span class="fc" id="L245">						this.scriptResultClass = this.scriptClass;</span>
+					}
+				}
+<span class="fc" id="L248">				scriptClassToExecute = this.scriptClass;</span>
+
+				// Process re-execution outside of the synchronized block.
+<span class="fc" id="L251">				return executeScript(scriptSource, scriptClassToExecute);</span>
+			}
+<span class="nc" id="L253">			catch (CompilationFailedException ex) {</span>
+<span class="nc" id="L254">				this.scriptClass = null;</span>
+<span class="nc" id="L255">				this.scriptResultClass = null;</span>
+<span class="nc" id="L256">				throw new ScriptCompilationException(scriptSource, ex);</span>
+			}
+		}
+	}
+
+	@Override
+	@Nullable
+	public Class&lt;?&gt; getScriptedObjectType(ScriptSource scriptSource)
+			throws IOException, ScriptCompilationException {
+
+<span class="fc" id="L266">		synchronized (this.scriptClassMonitor) {</span>
+			try {
+<span class="pc bpc" id="L268" title="1 of 4 branches missed.">				if (this.scriptClass == null || scriptSource.isModified()) {</span>
+					// New script content...
+<span class="fc" id="L270">					this.wasModifiedForTypeCheck = true;</span>
+<span class="fc" id="L271">					this.scriptClass = getGroovyClassLoader().parseClass(</span>
+<span class="fc" id="L272">							scriptSource.getScriptAsString(), scriptSource.suggestedClassName());</span>
+
+<span class="fc bfc" id="L274" title="All 2 branches covered.">					if (Script.class.isAssignableFrom(this.scriptClass)) {</span>
+						// A Groovy script, probably creating an instance: let's execute it.
+<span class="fc" id="L276">						Object result = executeScript(scriptSource, this.scriptClass);</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">						this.scriptResultClass = (result != null ? result.getClass() : null);</span>
+<span class="fc" id="L278">						this.cachedResult = new CachedResultHolder(result);</span>
+<span class="fc" id="L279">					}</span>
+					else {
+<span class="fc" id="L281">						this.scriptResultClass = this.scriptClass;</span>
+					}
+				}
+<span class="fc" id="L284">				return this.scriptResultClass;</span>
+			}
+<span class="fc" id="L286">			catch (CompilationFailedException ex) {</span>
+<span class="fc" id="L287">				this.scriptClass = null;</span>
+<span class="fc" id="L288">				this.scriptResultClass = null;</span>
+<span class="fc" id="L289">				this.cachedResult = null;</span>
+<span class="fc" id="L290">				throw new ScriptCompilationException(scriptSource, ex);</span>
+			}
+		}
+	}
+
+	@Override
+	public boolean requiresScriptedObjectRefresh(ScriptSource scriptSource) {
+<span class="fc" id="L297">		synchronized (this.scriptClassMonitor) {</span>
+<span class="pc bpc" id="L298" title="2 of 4 branches missed.">			return (scriptSource.isModified() || this.wasModifiedForTypeCheck);</span>
+		}
+	}
+
+
+	/**
+	 * Instantiate the given Groovy script class and run it if necessary.
+	 * @param scriptSource the source for the underlying script
+	 * @param scriptClass the Groovy script class
+	 * @return the result object (either an instance of the script class
+	 * or the result of running the script instance)
+	 * @throws ScriptCompilationException in case of instantiation failure
+	 */
+	@Nullable
+	protected Object executeScript(ScriptSource scriptSource, Class&lt;?&gt; scriptClass) throws ScriptCompilationException {
+		try {
+<span class="fc" id="L314">			GroovyObject goo = (GroovyObject) ReflectionUtils.accessibleConstructor(scriptClass).newInstance();</span>
+
+<span class="fc bfc" id="L316" title="All 2 branches covered.">			if (this.groovyObjectCustomizer != null) {</span>
+				// Allow metaclass and other customization.
+<span class="fc" id="L318">				this.groovyObjectCustomizer.customize(goo);</span>
+			}
+
+<span class="fc bfc" id="L321" title="All 2 branches covered.">			if (goo instanceof Script) {</span>
+				// A Groovy script, probably creating an instance: let's execute it.
+<span class="fc" id="L323">				return ((Script) goo).run();</span>
+			}
+			else {
+				// An instance of the scripted class: let's return it as-is.
+<span class="fc" id="L327">				return goo;</span>
+			}
+		}
+<span class="fc" id="L330">		catch (NoSuchMethodException ex) {</span>
+<span class="fc" id="L331">			throw new ScriptCompilationException(</span>
+<span class="fc" id="L332">					&quot;No default constructor on Groovy script class: &quot; + scriptClass.getName(), ex);</span>
+		}
+<span class="nc" id="L334">		catch (InstantiationException ex) {</span>
+<span class="nc" id="L335">			throw new ScriptCompilationException(</span>
+<span class="nc" id="L336">					scriptSource, &quot;Unable to instantiate Groovy script class: &quot; + scriptClass.getName(), ex);</span>
+		}
+<span class="nc" id="L338">		catch (IllegalAccessException ex) {</span>
+<span class="nc" id="L339">			throw new ScriptCompilationException(</span>
+<span class="nc" id="L340">					scriptSource, &quot;Could not access Groovy script constructor: &quot; + scriptClass.getName(), ex);</span>
+		}
+<span class="nc" id="L342">		catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L343">			throw new ScriptCompilationException(</span>
+<span class="nc" id="L344">					&quot;Failed to invoke Groovy script constructor: &quot; + scriptClass.getName(), ex.getTargetException());</span>
+		}
+	}
+
+
+	@Override
+	public String toString() {
+<span class="fc" id="L351">		return &quot;GroovyScriptFactory: script source locator [&quot; + this.scriptSourceLocator + &quot;]&quot;;</span>
+	}
+
+
+	/**
+	 * Wrapper that holds a temporarily cached result object.
+	 */
+	private static class CachedResultHolder {
+
+		@Nullable
+		public final Object object;
+
+<span class="fc" id="L363">		public CachedResultHolder(@Nullable Object object) {</span>
+<span class="fc" id="L364">			this.object = object;</span>
+<span class="fc" id="L365">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

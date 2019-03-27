@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SimpleMessageListenerContainer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.listener</a> &gt; <span class="el_source">SimpleMessageListenerContainer.java</span></div><h1>SimpleMessageListenerContainer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.listener;
+
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.Executor;
+import javax.jms.Connection;
+import javax.jms.ConnectionFactory;
+import javax.jms.Destination;
+import javax.jms.ExceptionListener;
+import javax.jms.JMSException;
+import javax.jms.Message;
+import javax.jms.MessageConsumer;
+import javax.jms.Session;
+
+import org.springframework.jms.support.JmsUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+
+/**
+ * Message listener container that uses the plain JMS client API's
+ * {@code MessageConsumer.setMessageListener()} method to
+ * create concurrent MessageConsumers for the specified listeners.
+ *
+ * &lt;p&gt;This is the simplest form of a message listener container.
+ * It creates a fixed number of JMS Sessions to invoke the listener,
+ * not allowing for dynamic adaptation to runtime demands. Its main
+ * advantage is its low level of complexity and the minimum requirements
+ * on the JMS provider: Not even the ServerSessionPool facility is required.
+ *
+ * &lt;p&gt;See the {@link AbstractMessageListenerContainer} javadoc for details
+ * on acknowledge modes and transaction options. Note that this container
+ * exposes standard JMS behavior for the default &quot;AUTO_ACKNOWLEDGE&quot; mode:
+ * that is, automatic message acknowledgment after listener execution,
+ * with no redelivery in case of a user exception thrown but potential
+ * redelivery in case of the JVM dying during listener execution.
+ *
+ * &lt;p&gt;For a different style of MessageListener handling, through looped
+ * {@code MessageConsumer.receive()} calls that also allow for
+ * transactional reception of messages (registering them with XA transactions),
+ * see {@link DefaultMessageListenerContainer}.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see javax.jms.MessageConsumer#setMessageListener
+ * @see DefaultMessageListenerContainer
+ * @see org.springframework.jms.listener.endpoint.JmsMessageEndpointManager
+ */
+<span class="fc" id="L65">public class SimpleMessageListenerContainer extends AbstractMessageListenerContainer implements ExceptionListener {</span>
+
+<span class="fc" id="L67">	private boolean connectLazily = false;</span>
+
+<span class="fc" id="L69">	private int concurrentConsumers = 1;</span>
+
+	@Nullable
+	private Executor taskExecutor;
+
+	@Nullable
+	private Set&lt;Session&gt; sessions;
+
+	@Nullable
+	private Set&lt;MessageConsumer&gt; consumers;
+
+<span class="fc" id="L80">	private final Object consumersMonitor = new Object();</span>
+
+
+	/**
+	 * Specify whether to connect lazily, i.e. whether to establish the JMS Connection
+	 * and the corresponding Sessions and MessageConsumers as late as possible -
+	 * in the start phase of this container.
+	 * &lt;p&gt;Default is &quot;false&quot;: connecting early, i.e. during the bean initialization phase.
+	 * Set this flag to &quot;true&quot; in order to switch to lazy connecting if your target broker
+	 * is likely to not have started up yet and you prefer to not even try a connection.
+	 * @see #start()
+	 * @see #initialize()
+	 */
+	public void setConnectLazily(boolean connectLazily) {
+<span class="nc" id="L94">		this.connectLazily = connectLazily;</span>
+<span class="nc" id="L95">	}</span>
+
+	/**
+	 * Specify concurrency limits via a &quot;lower-upper&quot; String, e.g. &quot;5-10&quot;, or a simple
+	 * upper limit String, e.g. &quot;10&quot;.
+	 * &lt;p&gt;This listener container will always hold on to the maximum number of
+	 * consumers {@link #setConcurrentConsumers} since it is unable to scale.
+	 * &lt;p&gt;This property is primarily supported for configuration compatibility with
+	 * {@link DefaultMessageListenerContainer}. For this local listener container,
+	 * generally use {@link #setConcurrentConsumers} instead.
+	 */
+	@Override
+	public void setConcurrency(String concurrency) {
+		try {
+<span class="fc" id="L109">			int separatorIndex = concurrency.indexOf('-');</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">			if (separatorIndex != -1) {</span>
+<span class="fc" id="L111">				setConcurrentConsumers(Integer.parseInt(concurrency.substring(separatorIndex + 1, concurrency.length())));</span>
+			}
+			else {
+<span class="nc" id="L114">				setConcurrentConsumers(Integer.parseInt(concurrency));</span>
+			}
+		}
+<span class="nc" id="L117">		catch (NumberFormatException ex) {</span>
+<span class="nc" id="L118">			throw new IllegalArgumentException(&quot;Invalid concurrency value [&quot; + concurrency + &quot;]: only &quot; +</span>
+					&quot;single maximum integer (e.g. \&quot;5\&quot;) and minimum-maximum combo (e.g. \&quot;3-5\&quot;) supported. &quot; +
+					&quot;Note that SimpleMessageListenerContainer will effectively ignore the minimum value and &quot; +
+					&quot;always keep a fixed number of consumers according to the maximum value.&quot;);
+<span class="fc" id="L122">		}</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Specify the number of concurrent consumers to create. Default is 1.
+	 * &lt;p&gt;Raising the number of concurrent consumers is recommendable in order
+	 * to scale the consumption of messages coming in from a queue. However,
+	 * note that any ordering guarantees are lost once multiple consumers are
+	 * registered. In general, stick with 1 consumer for low-volume queues.
+	 * &lt;p&gt;&lt;b&gt;Do not raise the number of concurrent consumers for a topic.&lt;/b&gt;
+	 * This would lead to concurrent consumption of the same message,
+	 * which is hardly ever desirable.
+	 */
+	public void setConcurrentConsumers(int concurrentConsumers) {
+<span class="fc bfc" id="L136" title="All 2 branches covered.">		Assert.isTrue(concurrentConsumers &gt; 0, &quot;'concurrentConsumers' value must be at least 1 (one)&quot;);</span>
+<span class="fc" id="L137">		this.concurrentConsumers = concurrentConsumers;</span>
+<span class="fc" id="L138">	}</span>
+
+	/**
+	 * Set the Spring TaskExecutor to use for executing the listener once
+	 * a message has been received by the provider.
+	 * &lt;p&gt;Default is none, that is, to run in the JMS provider's own receive thread,
+	 * blocking the provider's receive endpoint while executing the listener.
+	 * &lt;p&gt;Specify a TaskExecutor for executing the listener in a different thread,
+	 * rather than blocking the JMS provider, usually integrating with an existing
+	 * thread pool. This allows to keep the number of concurrent consumers low (1)
+	 * while still processing messages concurrently (decoupled from receiving!).
+	 * &lt;p&gt;&lt;b&gt;NOTE: Specifying a TaskExecutor for listener execution affects
+	 * acknowledgement semantics.&lt;/b&gt; Messages will then always get acknowledged
+	 * before listener execution, with the underlying Session immediately reused
+	 * for receiving the next message. Using this in combination with a transacted
+	 * session or with client acknowledgement will lead to unspecified results!
+	 * &lt;p&gt;&lt;b&gt;NOTE: Concurrent listener execution via a TaskExecutor will lead
+	 * to concurrent processing of messages that have been received by the same
+	 * underlying Session.&lt;/b&gt; As a consequence, it is not recommended to use
+	 * this setting with a {@link SessionAwareMessageListener}, at least not
+	 * if the latter performs actual work on the given Session. A standard
+	 * {@link javax.jms.MessageListener} will work fine, in general.
+	 * @see #setConcurrentConsumers
+	 * @see org.springframework.core.task.SimpleAsyncTaskExecutor
+	 * @see org.springframework.scheduling.commonj.WorkManagerTaskExecutor
+	 */
+	public void setTaskExecutor(Executor taskExecutor) {
+<span class="fc" id="L165">		this.taskExecutor = taskExecutor;</span>
+<span class="fc" id="L166">	}</span>
+
+	@Override
+	protected void validateConfiguration() {
+<span class="fc" id="L170">		super.validateConfiguration();</span>
+<span class="pc bpc" id="L171" title="3 of 4 branches missed.">		if (isSubscriptionDurable() &amp;&amp; this.concurrentConsumers != 1) {</span>
+<span class="nc" id="L172">			throw new IllegalArgumentException(&quot;Only 1 concurrent consumer supported for durable subscription&quot;);</span>
+		}
+<span class="fc" id="L174">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Implementation of AbstractMessageListenerContainer's template methods
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Always use a shared JMS Connection.
+	 */
+	@Override
+	protected final boolean sharedConnectionEnabled() {
+<span class="fc" id="L186">		return true;</span>
+	}
+
+	/**
+	 * Creates the specified number of concurrent consumers,
+	 * in the form of a JMS Session plus associated MessageConsumer.
+	 * @see #createListenerConsumer
+	 */
+	@Override
+	protected void doInitialize() throws JMSException {
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">		if (!this.connectLazily) {</span>
+			try {
+<span class="fc" id="L198">				establishSharedConnection();</span>
+			}
+<span class="nc" id="L200">			catch (JMSException ex) {</span>
+<span class="nc" id="L201">				logger.debug(&quot;Could not connect on initialization - registering message consumers lazily&quot;, ex);</span>
+<span class="nc" id="L202">				return;</span>
+<span class="fc" id="L203">			}</span>
+<span class="fc" id="L204">			initializeConsumers();</span>
+		}
+<span class="fc" id="L206">	}</span>
+
+	/**
+	 * Re-initializes this container's JMS message consumers,
+	 * if not initialized already.
+	 */
+	@Override
+	protected void doStart() throws JMSException {
+<span class="fc" id="L214">		super.doStart();</span>
+<span class="fc" id="L215">		initializeConsumers();</span>
+<span class="fc" id="L216">	}</span>
+
+	/**
+	 * Registers this listener container as JMS ExceptionListener on the shared connection.
+	 */
+	@Override
+	protected void prepareSharedConnection(Connection connection) throws JMSException {
+<span class="fc" id="L223">		super.prepareSharedConnection(connection);</span>
+<span class="fc" id="L224">		connection.setExceptionListener(this);</span>
+<span class="fc" id="L225">	}</span>
+
+	/**
+	 * JMS ExceptionListener implementation, invoked by the JMS provider in
+	 * case of connection failures. Re-initializes this listener container's
+	 * shared connection and its sessions and consumers.
+	 * @param ex the reported connection exception
+	 */
+	@Override
+	public void onException(JMSException ex) {
+		// First invoke the user-specific ExceptionListener, if any.
+<span class="nc" id="L236">		invokeExceptionListener(ex);</span>
+
+		// Now try to recover the shared Connection and all consumers...
+<span class="nc bnc" id="L239" title="All 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L240">			logger.debug(&quot;Trying to recover from JMS Connection exception: &quot; + ex);</span>
+		}
+		try {
+<span class="nc" id="L243">			synchronized (this.consumersMonitor) {</span>
+<span class="nc" id="L244">				this.sessions = null;</span>
+<span class="nc" id="L245">				this.consumers = null;</span>
+<span class="nc" id="L246">			}</span>
+<span class="nc" id="L247">			refreshSharedConnection();</span>
+<span class="nc" id="L248">			initializeConsumers();</span>
+<span class="nc" id="L249">			logger.debug(&quot;Successfully refreshed JMS Connection&quot;);</span>
+		}
+<span class="nc" id="L251">		catch (JMSException recoverEx) {</span>
+<span class="nc" id="L252">			logger.debug(&quot;Failed to recover JMS Connection&quot;, recoverEx);</span>
+<span class="nc" id="L253">			logger.error(&quot;Encountered non-recoverable JMSException&quot;, ex);</span>
+<span class="nc" id="L254">		}</span>
+<span class="nc" id="L255">	}</span>
+
+	/**
+	 * Initialize the JMS Sessions and MessageConsumers for this container.
+	 * @throws JMSException in case of setup failure
+	 */
+	protected void initializeConsumers() throws JMSException {
+		// Register Sessions and MessageConsumers.
+<span class="fc" id="L263">		synchronized (this.consumersMonitor) {</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">			if (this.consumers == null) {</span>
+<span class="fc" id="L265">				this.sessions = new HashSet&lt;&gt;(this.concurrentConsumers);</span>
+<span class="fc" id="L266">				this.consumers = new HashSet&lt;&gt;(this.concurrentConsumers);</span>
+<span class="fc" id="L267">				Connection con = getSharedConnection();</span>
+<span class="fc bfc" id="L268" title="All 2 branches covered.">				for (int i = 0; i &lt; this.concurrentConsumers; i++) {</span>
+<span class="fc" id="L269">					Session session = createSession(con);</span>
+<span class="fc" id="L270">					MessageConsumer consumer = createListenerConsumer(session);</span>
+<span class="fc" id="L271">					this.sessions.add(session);</span>
+<span class="fc" id="L272">					this.consumers.add(consumer);</span>
+				}
+			}
+<span class="fc" id="L275">		}</span>
+<span class="fc" id="L276">	}</span>
+
+	/**
+	 * Create a MessageConsumer for the given JMS Session,
+	 * registering a MessageListener for the specified listener.
+	 * @param session the JMS Session to work on
+	 * @return the MessageConsumer
+	 * @throws JMSException if thrown by JMS methods
+	 * @see #executeListener
+	 */
+	protected MessageConsumer createListenerConsumer(final Session session) throws JMSException {
+<span class="fc" id="L287">		Destination destination = getDestination();</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">		if (destination == null) {</span>
+<span class="fc" id="L289">			String destinationName = getDestinationName();</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">			Assert.state(destinationName != null, &quot;No destination set&quot;);</span>
+<span class="fc" id="L291">			destination = resolveDestinationName(session, destinationName);</span>
+		}
+<span class="fc" id="L293">		MessageConsumer consumer = createConsumer(session, destination);</span>
+
+<span class="fc bfc" id="L295" title="All 2 branches covered.">		if (this.taskExecutor != null) {</span>
+<span class="fc" id="L296">			consumer.setMessageListener(message -&gt; this.taskExecutor.execute(() -&gt; processMessage(message, session)));</span>
+		}
+		else {
+<span class="fc" id="L299">			consumer.setMessageListener(message -&gt; processMessage(message, session));</span>
+		}
+
+<span class="fc" id="L302">		return consumer;</span>
+	}
+
+	/**
+	 * Process a message received from the provider.
+	 * &lt;p&gt;Executes the listener, exposing the current JMS Session as
+	 * thread-bound resource (if &quot;exposeListenerSession&quot; is &quot;true&quot;).
+	 * @param message the received JMS Message
+	 * @param session the JMS Session to operate on
+	 * @see #executeListener
+	 * @see #setExposeListenerSession
+	 */
+	protected void processMessage(Message message, Session session) {
+<span class="fc" id="L315">		ConnectionFactory connectionFactory = getConnectionFactory();</span>
+<span class="pc bpc" id="L316" title="2 of 4 branches missed.">		boolean exposeResource = (connectionFactory != null &amp;&amp; isExposeListenerSession());</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">		if (exposeResource) {</span>
+<span class="fc" id="L318">			TransactionSynchronizationManager.bindResource(</span>
+					connectionFactory, new LocallyExposedJmsResourceHolder(session));
+		}
+		try {
+<span class="fc" id="L322">			executeListener(session, message);</span>
+		}
+		finally {
+<span class="pc bpc" id="L325" title="1 of 2 branches missed.">			if (exposeResource) {</span>
+<span class="fc" id="L326">				TransactionSynchronizationManager.unbindResource(getConnectionFactory());</span>
+			}
+		}
+<span class="fc" id="L329">	}</span>
+
+	/**
+	 * Destroy the registered JMS Sessions and associated MessageConsumers.
+	 */
+	@Override
+	protected void doShutdown() throws JMSException {
+<span class="fc" id="L336">		synchronized (this.consumersMonitor) {</span>
+<span class="pc bpc" id="L337" title="1 of 2 branches missed.">			if (this.consumers != null) {</span>
+<span class="fc" id="L338">				logger.debug(&quot;Closing JMS MessageConsumers&quot;);</span>
+<span class="fc bfc" id="L339" title="All 2 branches covered.">				for (MessageConsumer consumer : this.consumers) {</span>
+<span class="fc" id="L340">					JmsUtils.closeMessageConsumer(consumer);</span>
+<span class="fc" id="L341">				}</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">				if (this.sessions != null) {</span>
+<span class="fc" id="L343">					logger.debug(&quot;Closing JMS Sessions&quot;);</span>
+<span class="fc bfc" id="L344" title="All 2 branches covered.">					for (Session session : this.sessions) {</span>
+<span class="fc" id="L345">						JmsUtils.closeSession(session);</span>
+<span class="fc" id="L346">					}</span>
+				}
+			}
+<span class="fc" id="L349">		}</span>
+<span class="fc" id="L350">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

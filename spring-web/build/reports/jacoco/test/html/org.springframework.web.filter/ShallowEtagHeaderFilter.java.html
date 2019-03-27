@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ShallowEtagHeaderFilter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.filter</a> &gt; <span class="el_source">ShallowEtagHeaderFilter.java</span></div><h1>ShallowEtagHeaderFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.filter;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintWriter;
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.ServletOutputStream;
+import javax.servlet.ServletRequest;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.springframework.http.HttpMethod;
+import org.springframework.util.Assert;
+import org.springframework.util.DigestUtils;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+import org.springframework.web.util.WebUtils;
+
+/**
+ * {@link javax.servlet.Filter} that generates an {@code ETag} value based on the
+ * content on the response. This ETag is compared to the {@code If-None-Match}
+ * header of the request. If these headers are equal, the response content is
+ * not sent, but rather a {@code 304 &quot;Not Modified&quot;} status instead.
+ *
+ * &lt;p&gt;Since the ETag is based on the response content, the response
+ * (e.g. a {@link org.springframework.web.servlet.View}) is still rendered.
+ * As such, this filter only saves bandwidth, not server performance.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; As of Spring Framework 5.0, this filter uses request/response
+ * decorators built on the Servlet 3.1 API.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Juergen Hoeller
+ * @since 3.0
+ */
+<span class="fc" id="L54">public class ShallowEtagHeaderFilter extends OncePerRequestFilter {</span>
+
+	private static final String HEADER_ETAG = &quot;ETag&quot;;
+
+	private static final String HEADER_IF_NONE_MATCH = &quot;If-None-Match&quot;;
+
+	private static final String HEADER_CACHE_CONTROL = &quot;Cache-Control&quot;;
+
+	private static final String DIRECTIVE_NO_STORE = &quot;no-store&quot;;
+
+<span class="fc" id="L64">	private static final String STREAMING_ATTRIBUTE = ShallowEtagHeaderFilter.class.getName() + &quot;.STREAMING&quot;;</span>
+
+
+<span class="fc" id="L67">	private boolean writeWeakETag = false;</span>
+
+
+	/**
+	 * Set whether the ETag value written to the response should be weak, as per RFC 7232.
+	 * &lt;p&gt;Should be configured using an {@code &lt;init-param&gt;} for parameter name
+	 * &quot;writeWeakETag&quot; in the filter definition in {@code web.xml}.
+	 * @since 4.3
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7232#section-2.3&quot;&gt;RFC 7232 section 2.3&lt;/a&gt;
+	 */
+	public void setWriteWeakETag(boolean writeWeakETag) {
+<span class="fc" id="L78">		this.writeWeakETag = writeWeakETag;</span>
+<span class="fc" id="L79">	}</span>
+
+	/**
+	 * Return whether the ETag value written to the response should be weak, as per RFC 7232.
+	 * @since 4.3
+	 */
+	public boolean isWriteWeakETag() {
+<span class="nc" id="L86">		return this.writeWeakETag;</span>
+	}
+
+
+	/**
+	 * The default value is {@code false} so that the filter may delay the generation
+	 * of an ETag until the last asynchronously dispatched thread.
+	 */
+	@Override
+	protected boolean shouldNotFilterAsyncDispatch() {
+<span class="nc" id="L96">		return false;</span>
+	}
+
+	@Override
+	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+			throws ServletException, IOException {
+
+<span class="fc" id="L103">		HttpServletResponse responseToUse = response;</span>
+<span class="pc bpc" id="L104" title="2 of 4 branches missed.">		if (!isAsyncDispatch(request) &amp;&amp; !(response instanceof ContentCachingResponseWrapper)) {</span>
+<span class="fc" id="L105">			responseToUse = new HttpStreamingAwareContentCachingResponseWrapper(response, request);</span>
+		}
+
+<span class="fc" id="L108">		filterChain.doFilter(request, responseToUse);</span>
+
+<span class="pc bpc" id="L110" title="1 of 4 branches missed.">		if (!isAsyncStarted(request) &amp;&amp; !isContentCachingDisabled(request)) {</span>
+<span class="fc" id="L111">			updateResponse(request, responseToUse);</span>
+		}
+<span class="fc" id="L113">	}</span>
+
+	private void updateResponse(HttpServletRequest request, HttpServletResponse response) throws IOException {
+<span class="fc" id="L116">		ContentCachingResponseWrapper responseWrapper =</span>
+<span class="fc" id="L117">				WebUtils.getNativeResponse(response, ContentCachingResponseWrapper.class);</span>
+<span class="fc" id="L118">		Assert.notNull(responseWrapper, &quot;ContentCachingResponseWrapper not found&quot;);</span>
+<span class="fc" id="L119">		HttpServletResponse rawResponse = (HttpServletResponse) responseWrapper.getResponse();</span>
+<span class="fc" id="L120">		int statusCode = responseWrapper.getStatusCode();</span>
+
+<span class="fc bfc" id="L122" title="All 2 branches covered.">		if (rawResponse.isCommitted()) {</span>
+<span class="fc" id="L123">			responseWrapper.copyBodyToResponse();</span>
+		}
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">		else if (isEligibleForEtag(request, responseWrapper, statusCode, responseWrapper.getContentInputStream())) {</span>
+<span class="fc" id="L126">			String responseETag = generateETagHeaderValue(responseWrapper.getContentInputStream(), this.writeWeakETag);</span>
+<span class="fc" id="L127">			rawResponse.setHeader(HEADER_ETAG, responseETag);</span>
+<span class="fc" id="L128">			String requestETag = request.getHeader(HEADER_IF_NONE_MATCH);</span>
+<span class="pc bpc" id="L129" title="2 of 6 branches missed.">			if (requestETag != null &amp;&amp; (&quot;*&quot;.equals(requestETag) || compareETagHeaderValue(requestETag, responseETag))) {</span>
+<span class="fc" id="L130">				rawResponse.setStatus(HttpServletResponse.SC_NOT_MODIFIED);</span>
+			}
+			else {
+<span class="fc" id="L133">				responseWrapper.copyBodyToResponse();</span>
+			}
+<span class="fc" id="L135">		}</span>
+		else {
+<span class="nc" id="L137">			responseWrapper.copyBodyToResponse();</span>
+		}
+<span class="fc" id="L139">	}</span>
+
+	/**
+	 * Indicates whether the given request and response are eligible for ETag generation.
+	 * &lt;p&gt;The default implementation returns {@code true} if all conditions match:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;response status codes in the {@code 2xx} series&lt;/li&gt;
+	 * &lt;li&gt;request method is a GET&lt;/li&gt;
+	 * &lt;li&gt;response Cache-Control header is not set or does not contain a &quot;no-store&quot; directive&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * @param request the HTTP request
+	 * @param response the HTTP response
+	 * @param responseStatusCode the HTTP response status code
+	 * @param inputStream the response body
+	 * @return {@code true} if eligible for ETag generation, {@code false} otherwise
+	 */
+	protected boolean isEligibleForEtag(HttpServletRequest request, HttpServletResponse response,
+			int responseStatusCode, InputStream inputStream) {
+
+<span class="fc" id="L158">		String method = request.getMethod();</span>
+<span class="pc bpc" id="L159" title="1 of 6 branches missed.">		if (responseStatusCode &gt;= 200 &amp;&amp; responseStatusCode &lt; 300 &amp;&amp; HttpMethod.GET.matches(method)) {</span>
+<span class="fc" id="L160">			String cacheControl = response.getHeader(HEADER_CACHE_CONTROL);</span>
+<span class="pc bpc" id="L161" title="3 of 4 branches missed.">			return (cacheControl == null || !cacheControl.contains(DIRECTIVE_NO_STORE));</span>
+		}
+<span class="fc" id="L163">		return false;</span>
+	}
+
+	/**
+	 * Generate the ETag header value from the given response body byte array.
+	 * &lt;p&gt;The default implementation generates an MD5 hash.
+	 * @param inputStream the response body as an InputStream
+	 * @param isWeak whether the generated ETag should be weak
+	 * @return the ETag header value
+	 * @see org.springframework.util.DigestUtils
+	 */
+	protected String generateETagHeaderValue(InputStream inputStream, boolean isWeak) throws IOException {
+		// length of W/ + &quot; + 0 + 32bits md5 hash + &quot;
+<span class="fc" id="L176">		StringBuilder builder = new StringBuilder(37);</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">		if (isWeak) {</span>
+<span class="fc" id="L178">			builder.append(&quot;W/&quot;);</span>
+		}
+<span class="fc" id="L180">		builder.append(&quot;\&quot;0&quot;);</span>
+<span class="fc" id="L181">		DigestUtils.appendMd5DigestAsHex(inputStream, builder);</span>
+<span class="fc" id="L182">		builder.append('&quot;');</span>
+<span class="fc" id="L183">		return builder.toString();</span>
+	}
+
+	private boolean compareETagHeaderValue(String requestETag, String responseETag) {
+<span class="fc bfc" id="L187" title="All 2 branches covered.">		if (requestETag.startsWith(&quot;W/&quot;)) {</span>
+<span class="fc" id="L188">			requestETag = requestETag.substring(2);</span>
+		}
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">		if (responseETag.startsWith(&quot;W/&quot;)) {</span>
+<span class="nc" id="L191">			responseETag = responseETag.substring(2);</span>
+		}
+<span class="fc" id="L193">		return requestETag.equals(responseETag);</span>
+	}
+
+
+	/**
+	 * This method can be used to disable the content caching response wrapper
+	 * of the ShallowEtagHeaderFilter. This can be done before the start of HTTP
+	 * streaming for example where the response will be written to asynchronously
+	 * and not in the context of a Servlet container thread.
+	 * @since 4.2
+	 */
+	public static void disableContentCaching(ServletRequest request) {
+<span class="fc" id="L205">		Assert.notNull(request, &quot;ServletRequest must not be null&quot;);</span>
+<span class="fc" id="L206">		request.setAttribute(STREAMING_ATTRIBUTE, true);</span>
+<span class="fc" id="L207">	}</span>
+
+	private static boolean isContentCachingDisabled(HttpServletRequest request) {
+<span class="fc bfc" id="L210" title="All 2 branches covered.">		return (request.getAttribute(STREAMING_ATTRIBUTE) != null);</span>
+	}
+
+
+	private static class HttpStreamingAwareContentCachingResponseWrapper extends ContentCachingResponseWrapper {
+
+		private final HttpServletRequest request;
+
+		public HttpStreamingAwareContentCachingResponseWrapper(HttpServletResponse response, HttpServletRequest request) {
+<span class="fc" id="L219">			super(response);</span>
+<span class="fc" id="L220">			this.request = request;</span>
+<span class="fc" id="L221">		}</span>
+
+		@Override
+		public ServletOutputStream getOutputStream() throws IOException {
+<span class="fc bfc" id="L225" title="All 2 branches covered.">			return (useRawResponse() ? getResponse().getOutputStream() : super.getOutputStream());</span>
+		}
+
+		@Override
+		public PrintWriter getWriter() throws IOException {
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">			return (useRawResponse() ? getResponse().getWriter() : super.getWriter());</span>
+		}
+
+		private boolean useRawResponse() {
+<span class="fc" id="L234">			return isContentCachingDisabled(this.request);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

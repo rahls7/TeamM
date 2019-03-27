@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ParameterResolutionDelegate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.annotation</a> &gt; <span class="el_source">ParameterResolutionDelegate.java</span></div><h1>ParameterResolutionDelegate.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.annotation;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Parameter;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.SynthesizingMethodParameter;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Public delegate for resolving autowirable parameters on externally managed
+ * constructors and methods.
+ *
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @since 5.2
+ * @see #isAutowirable
+ * @see #resolveDependency
+ */
+public final class ParameterResolutionDelegate {
+
+<span class="fc" id="L47">	private static final AnnotatedElement EMPTY_ANNOTATED_ELEMENT = new AnnotatedElement() {</span>
+		@Override
+		@Nullable
+		public &lt;T extends Annotation&gt; T getAnnotation(Class&lt;T&gt; annotationClass) {
+<span class="nc" id="L51">			return null;</span>
+		}
+		@Override
+		public Annotation[] getAnnotations() {
+<span class="nc" id="L55">			return new Annotation[0];</span>
+		}
+		@Override
+		public Annotation[] getDeclaredAnnotations() {
+<span class="nc" id="L59">			return new Annotation[0];</span>
+		}
+	};
+
+
+	private ParameterResolutionDelegate() {
+	}
+
+
+	/**
+	 * Determine if the supplied {@link Parameter} can &lt;em&gt;potentially&lt;/em&gt; be
+	 * autowired from an {@link AutowireCapableBeanFactory}.
+	 * &lt;p&gt;Returns {@code true} if the supplied parameter is annotated or
+	 * meta-annotated with {@link Autowired @Autowired},
+	 * {@link Qualifier @Qualifier}, or {@link Value @Value}.
+	 * &lt;p&gt;Note that {@link #resolveDependency} may still be able to resolve the
+	 * dependency for the supplied parameter even if this method returns {@code false}.
+	 * @param parameter the parameter whose dependency should be autowired
+	 * (must not be {@code null})
+	 * @param parameterIndex the index of the parameter in the constructor or method
+	 * that declares the parameter
+	 * @see #resolveDependency
+	 */
+	public static boolean isAutowirable(Parameter parameter, int parameterIndex) {
+<span class="fc" id="L83">		Assert.notNull(parameter, &quot;Parameter must not be null&quot;);</span>
+<span class="fc" id="L84">		AnnotatedElement annotatedParameter = getEffectiveAnnotatedParameter(parameter, parameterIndex);</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">		return (AnnotatedElementUtils.hasAnnotation(annotatedParameter, Autowired.class) ||</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">				AnnotatedElementUtils.hasAnnotation(annotatedParameter, Qualifier.class) ||</span>
+<span class="fc bfc" id="L87" title="All 2 branches covered.">				AnnotatedElementUtils.hasAnnotation(annotatedParameter, Value.class));</span>
+	}
+
+	/**
+	 * Resolve the dependency for the supplied {@link Parameter} from the
+	 * supplied {@link AutowireCapableBeanFactory}.
+	 * &lt;p&gt;Provides comprehensive autowiring support for individual method parameters
+	 * on par with Spring's dependency injection facilities for autowired fields and
+	 * methods, including support for {@link Autowired @Autowired},
+	 * {@link Qualifier @Qualifier}, and {@link Value @Value} with support for property
+	 * placeholders and SpEL expressions in {@code @Value} declarations.
+	 * &lt;p&gt;The dependency is required unless the parameter is annotated or meta-annotated
+	 * with {@link Autowired @Autowired} with the {@link Autowired#required required}
+	 * flag set to {@code false}.
+	 * &lt;p&gt;If an explicit &lt;em&gt;qualifier&lt;/em&gt; is not declared, the name of the parameter
+	 * will be used as the qualifier for resolving ambiguities.
+	 * @param parameter the parameter whose dependency should be resolved (must not be
+	 * {@code null})
+	 * @param parameterIndex the index of the parameter in the constructor or method
+	 * that declares the parameter
+	 * @param containingClass the concrete class that contains the parameter; this may
+	 * differ from the class that declares the parameter in that it may be a subclass
+	 * thereof, potentially substituting type variables (must not be {@code null})
+	 * @param beanFactory the {@code AutowireCapableBeanFactory} from which to resolve
+	 * the dependency (must not be {@code null})
+	 * @return the resolved object, or {@code null} if none found
+	 * @throws BeansException if dependency resolution failed
+	 * @see #isAutowirable
+	 * @see Autowired#required
+	 * @see SynthesizingMethodParameter#forExecutable(Executable, int)
+	 * @see AutowireCapableBeanFactory#resolveDependency(DependencyDescriptor, String)
+	 */
+	@Nullable
+	public static Object resolveDependency(
+			Parameter parameter, int parameterIndex, Class&lt;?&gt; containingClass, AutowireCapableBeanFactory beanFactory)
+			throws BeansException {
+
+<span class="fc" id="L124">		Assert.notNull(parameter, &quot;Parameter must not be null&quot;);</span>
+<span class="fc" id="L125">		Assert.notNull(containingClass, &quot;Containing class must not be null&quot;);</span>
+<span class="fc" id="L126">		Assert.notNull(beanFactory, &quot;AutowireCapableBeanFactory must not be null&quot;);</span>
+
+<span class="fc" id="L128">		AnnotatedElement annotatedParameter = getEffectiveAnnotatedParameter(parameter, parameterIndex);</span>
+<span class="fc" id="L129">		Autowired autowired = AnnotatedElementUtils.findMergedAnnotation(annotatedParameter, Autowired.class);</span>
+<span class="fc bfc" id="L130" title="All 4 branches covered.">		boolean required = (autowired == null || autowired.required());</span>
+
+<span class="fc" id="L132">		MethodParameter methodParameter = SynthesizingMethodParameter.forExecutable(</span>
+<span class="fc" id="L133">				parameter.getDeclaringExecutable(), parameterIndex);</span>
+<span class="fc" id="L134">		DependencyDescriptor descriptor = new DependencyDescriptor(methodParameter, required);</span>
+<span class="fc" id="L135">		descriptor.setContainingClass(containingClass);</span>
+<span class="fc" id="L136">		return beanFactory.resolveDependency(descriptor, null);</span>
+	}
+
+	/**
+	 * Due to a bug in {@code javac} on JDK versions prior to JDK 9, looking up
+	 * annotations directly on a {@link Parameter} will fail for inner class
+	 * constructors.
+	 * &lt;h4&gt;Bug in javac in JDK &amp;lt; 9&lt;/h4&gt;
+	 * &lt;p&gt;The parameter annotations array in the compiled byte code excludes an entry
+	 * for the implicit &lt;em&gt;enclosing instance&lt;/em&gt; parameter for an inner class
+	 * constructor.
+	 * &lt;h4&gt;Workaround&lt;/h4&gt;
+	 * &lt;p&gt;This method provides a workaround for this off-by-one error by allowing the
+	 * caller to access annotations on the preceding {@link Parameter} object (i.e.,
+	 * {@code index - 1}). If the supplied {@code index} is zero, this method returns
+	 * an empty {@code AnnotatedElement}.
+	 * &lt;h4&gt;WARNING&lt;/h4&gt;
+	 * &lt;p&gt;The {@code AnnotatedElement} returned by this method should never be cast and
+	 * treated as a {@code Parameter} since the metadata (e.g., {@link Parameter#getName()},
+	 * {@link Parameter#getType()}, etc.) will not match those for the declared parameter
+	 * at the given index in an inner class constructor.
+	 * @return the supplied {@code parameter} or the &lt;em&gt;effective&lt;/em&gt; {@code Parameter}
+	 * if the aforementioned bug is in effect
+	 */
+	private static AnnotatedElement getEffectiveAnnotatedParameter(Parameter parameter, int index) {
+<span class="fc" id="L161">		Executable executable = parameter.getDeclaringExecutable();</span>
+<span class="fc bfc" id="L162" title="All 4 branches covered.">		if (executable instanceof Constructor &amp;&amp; ClassUtils.isInnerClass(executable.getDeclaringClass()) &amp;&amp;</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">				executable.getParameterAnnotations().length == executable.getParameterCount() - 1) {</span>
+			// Bug in javac in JDK &lt;9: annotation array excludes enclosing instance parameter
+			// for inner classes, so access it with the actual parameter index lowered by 1
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">			return (index == 0 ? EMPTY_ANNOTATED_ELEMENT : executable.getParameters()[index - 1]);</span>
+		}
+<span class="fc" id="L168">		return parameter;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,741 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractAspectJAdvice.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.aspectj</a> &gt; <span class="el_source">AbstractAspectJAdvice.java</span></div><h1>AbstractAspectJAdvice.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.aspectj;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.Serializable;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Type;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.aopalliance.aop.Advice;
+import org.aopalliance.intercept.MethodInvocation;
+import org.aspectj.lang.JoinPoint;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.weaver.tools.JoinPointMatch;
+import org.aspectj.weaver.tools.PointcutParameter;
+
+import org.springframework.aop.AopInvocationException;
+import org.springframework.aop.MethodMatcher;
+import org.springframework.aop.Pointcut;
+import org.springframework.aop.ProxyMethodInvocation;
+import org.springframework.aop.interceptor.ExposeInvocationInterceptor;
+import org.springframework.aop.support.ComposablePointcut;
+import org.springframework.aop.support.MethodMatchers;
+import org.springframework.aop.support.StaticMethodMatcher;
+import org.springframework.core.DefaultParameterNameDiscoverer;
+import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Base class for AOP Alliance {@link org.aopalliance.aop.Advice} classes
+ * wrapping an AspectJ aspect or an AspectJ-annotated advice method.
+ *
+ * @author Rod Johnson
+ * @author Adrian Colyer
+ * @author Juergen Hoeller
+ * @author Ramnivas Laddad
+ * @since 2.0
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public abstract class AbstractAspectJAdvice implements Advice, AspectJPrecedenceInformation, Serializable {
+
+	/**
+	 * Key used in ReflectiveMethodInvocation userAttributes map for the current joinpoint.
+	 */
+<span class="fc" id="L68">	protected static final String JOIN_POINT_KEY = JoinPoint.class.getName();</span>
+
+
+	/**
+	 * Lazily instantiate joinpoint for the current invocation.
+	 * Requires MethodInvocation to be bound with ExposeInvocationInterceptor.
+	 * &lt;p&gt;Do not use if access is available to the current ReflectiveMethodInvocation
+	 * (in an around advice).
+	 * @return current AspectJ joinpoint, or through an exception if we're not in a
+	 * Spring AOP invocation.
+	 */
+	public static JoinPoint currentJoinPoint() {
+<span class="fc" id="L80">		MethodInvocation mi = ExposeInvocationInterceptor.currentInvocation();</span>
+<span class="pc bpc" id="L81" title="1 of 2 branches missed.">		if (!(mi instanceof ProxyMethodInvocation)) {</span>
+<span class="nc" id="L82">			throw new IllegalStateException(&quot;MethodInvocation is not a Spring ProxyMethodInvocation: &quot; + mi);</span>
+		}
+<span class="fc" id="L84">		ProxyMethodInvocation pmi = (ProxyMethodInvocation) mi;</span>
+<span class="fc" id="L85">		JoinPoint jp = (JoinPoint) pmi.getUserAttribute(JOIN_POINT_KEY);</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">		if (jp == null) {</span>
+<span class="fc" id="L87">			jp = new MethodInvocationProceedingJoinPoint(pmi);</span>
+<span class="fc" id="L88">			pmi.setUserAttribute(JOIN_POINT_KEY, jp);</span>
+		}
+<span class="fc" id="L90">		return jp;</span>
+	}
+
+
+	private final Class&lt;?&gt; declaringClass;
+
+	private final String methodName;
+
+	private final Class&lt;?&gt;[] parameterTypes;
+
+	protected transient Method aspectJAdviceMethod;
+
+	private final AspectJExpressionPointcut pointcut;
+
+	private final AspectInstanceFactory aspectInstanceFactory;
+
+	/**
+	 * The name of the aspect (ref bean) in which this advice was defined
+	 * (used when determining advice precedence so that we can determine
+	 * whether two pieces of advice come from the same aspect).
+	 */
+<span class="fc" id="L111">	private String aspectName = &quot;&quot;;</span>
+
+	/**
+	 * The order of declaration of this advice within the aspect.
+	 */
+	private int declarationOrder;
+
+	/**
+	 * This will be non-null if the creator of this advice object knows the argument names
+	 * and sets them explicitly.
+	 */
+	@Nullable
+	private String[] argumentNames;
+
+	/** Non-null if after throwing advice binds the thrown value. */
+	@Nullable
+	private String throwingName;
+
+	/** Non-null if after returning advice binds the return value. */
+	@Nullable
+	private String returningName;
+
+<span class="fc" id="L133">	private Class&lt;?&gt; discoveredReturningType = Object.class;</span>
+
+<span class="fc" id="L135">	private Class&lt;?&gt; discoveredThrowingType = Object.class;</span>
+
+	/**
+	 * Index for thisJoinPoint argument (currently only
+	 * supported at index 0 if present at all).
+	 */
+<span class="fc" id="L141">	private int joinPointArgumentIndex = -1;</span>
+
+	/**
+	 * Index for thisJoinPointStaticPart argument (currently only
+	 * supported at index 0 if present at all).
+	 */
+<span class="fc" id="L147">	private int joinPointStaticPartArgumentIndex = -1;</span>
+
+	@Nullable
+	private Map&lt;String, Integer&gt; argumentBindings;
+
+<span class="fc" id="L152">	private boolean argumentsIntrospected = false;</span>
+
+	@Nullable
+	private Type discoveredReturningGenericType;
+	// Note: Unlike return type, no such generic information is needed for the throwing type,
+	// since Java doesn't allow exception types to be parameterized.
+
+
+	/**
+	 * Create a new AbstractAspectJAdvice for the given advice method.
+	 * @param aspectJAdviceMethod the AspectJ-style advice method
+	 * @param pointcut the AspectJ expression pointcut
+	 * @param aspectInstanceFactory the factory for aspect instances
+	 */
+	public AbstractAspectJAdvice(
+<span class="fc" id="L167">			Method aspectJAdviceMethod, AspectJExpressionPointcut pointcut, AspectInstanceFactory aspectInstanceFactory) {</span>
+
+<span class="fc" id="L169">		Assert.notNull(aspectJAdviceMethod, &quot;Advice method must not be null&quot;);</span>
+<span class="fc" id="L170">		this.declaringClass = aspectJAdviceMethod.getDeclaringClass();</span>
+<span class="fc" id="L171">		this.methodName = aspectJAdviceMethod.getName();</span>
+<span class="fc" id="L172">		this.parameterTypes = aspectJAdviceMethod.getParameterTypes();</span>
+<span class="fc" id="L173">		this.aspectJAdviceMethod = aspectJAdviceMethod;</span>
+<span class="fc" id="L174">		this.pointcut = pointcut;</span>
+<span class="fc" id="L175">		this.aspectInstanceFactory = aspectInstanceFactory;</span>
+<span class="fc" id="L176">	}</span>
+
+
+	/**
+	 * Return the AspectJ-style advice method.
+	 */
+	public final Method getAspectJAdviceMethod() {
+<span class="nc" id="L183">		return this.aspectJAdviceMethod;</span>
+	}
+
+	/**
+	 * Return the AspectJ expression pointcut.
+	 */
+	public final AspectJExpressionPointcut getPointcut() {
+<span class="fc" id="L190">		calculateArgumentBindings();</span>
+<span class="fc" id="L191">		return this.pointcut;</span>
+	}
+
+	/**
+	 * Build a 'safe' pointcut that excludes the AspectJ advice method itself.
+	 * @return a composable pointcut that builds on the original AspectJ expression pointcut
+	 * @see #getPointcut()
+	 */
+	public final Pointcut buildSafePointcut() {
+<span class="fc" id="L200">		Pointcut pc = getPointcut();</span>
+<span class="fc" id="L201">		MethodMatcher safeMethodMatcher = MethodMatchers.intersection(</span>
+<span class="fc" id="L202">				new AdviceExcludingMethodMatcher(this.aspectJAdviceMethod), pc.getMethodMatcher());</span>
+<span class="fc" id="L203">		return new ComposablePointcut(pc.getClassFilter(), safeMethodMatcher);</span>
+	}
+
+	/**
+	 * Return the factory for aspect instances.
+	 */
+	public final AspectInstanceFactory getAspectInstanceFactory() {
+<span class="nc" id="L210">		return this.aspectInstanceFactory;</span>
+	}
+
+	/**
+	 * Return the ClassLoader for aspect instances.
+	 */
+	@Nullable
+	public final ClassLoader getAspectClassLoader() {
+<span class="nc" id="L218">		return this.aspectInstanceFactory.getAspectClassLoader();</span>
+	}
+
+	@Override
+	public int getOrder() {
+<span class="nc" id="L223">		return this.aspectInstanceFactory.getOrder();</span>
+	}
+
+
+	/**
+	 * Set the name of the aspect (bean) in which the advice was declared.
+	 */
+	public void setAspectName(String name) {
+<span class="fc" id="L231">		this.aspectName = name;</span>
+<span class="fc" id="L232">	}</span>
+
+	@Override
+	public String getAspectName() {
+<span class="fc" id="L236">		return this.aspectName;</span>
+	}
+
+	/**
+	 * Set the declaration order of this advice within the aspect.
+	 */
+	public void setDeclarationOrder(int order) {
+<span class="fc" id="L243">		this.declarationOrder = order;</span>
+<span class="fc" id="L244">	}</span>
+
+	@Override
+	public int getDeclarationOrder() {
+<span class="fc" id="L248">		return this.declarationOrder;</span>
+	}
+
+	/**
+	 * Set by creator of this advice object if the argument names are known.
+	 * &lt;p&gt;This could be for example because they have been explicitly specified in XML,
+	 * or in an advice annotation.
+	 * @param argNames comma delimited list of arg names
+	 */
+	public void setArgumentNames(String argNames) {
+<span class="nc" id="L258">		String[] tokens = StringUtils.commaDelimitedListToStringArray(argNames);</span>
+<span class="nc" id="L259">		setArgumentNamesFromStringArray(tokens);</span>
+<span class="nc" id="L260">	}</span>
+
+	public void setArgumentNamesFromStringArray(String... args) {
+<span class="fc" id="L263">		this.argumentNames = new String[args.length];</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L265">			this.argumentNames[i] = StringUtils.trimWhitespace(args[i]);</span>
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">			if (!isVariableName(this.argumentNames[i])) {</span>
+<span class="nc" id="L267">				throw new IllegalArgumentException(</span>
+						&quot;'argumentNames' property of AbstractAspectJAdvice contains an argument name '&quot; +
+						this.argumentNames[i] + &quot;' that is not a valid Java identifier&quot;);
+			}
+		}
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">		if (this.argumentNames != null) {</span>
+<span class="fc bfc" id="L273" title="All 2 branches covered.">			if (this.aspectJAdviceMethod.getParameterCount() == this.argumentNames.length + 1) {</span>
+				// May need to add implicit join point arg name...
+<span class="fc" id="L275">				Class&lt;?&gt; firstArgType = this.aspectJAdviceMethod.getParameterTypes()[0];</span>
+<span class="pc bpc" id="L276" title="3 of 6 branches missed.">				if (firstArgType == JoinPoint.class ||</span>
+						firstArgType == ProceedingJoinPoint.class ||
+						firstArgType == JoinPoint.StaticPart.class) {
+<span class="fc" id="L279">					String[] oldNames = this.argumentNames;</span>
+<span class="fc" id="L280">					this.argumentNames = new String[oldNames.length + 1];</span>
+<span class="fc" id="L281">					this.argumentNames[0] = &quot;THIS_JOIN_POINT&quot;;</span>
+<span class="fc" id="L282">					System.arraycopy(oldNames, 0, this.argumentNames, 1, oldNames.length);</span>
+				}
+			}
+		}
+<span class="fc" id="L286">	}</span>
+
+	public void setReturningName(String name) {
+<span class="nc" id="L289">		throw new UnsupportedOperationException(&quot;Only afterReturning advice can be used to bind a return value&quot;);</span>
+	}
+
+	/**
+	 * We need to hold the returning name at this level for argument binding calculations,
+	 * this method allows the afterReturning advice subclass to set the name.
+	 */
+	protected void setReturningNameNoCheck(String name) {
+		// name could be a variable or a type...
+<span class="nc bnc" id="L298" title="All 2 branches missed.">		if (isVariableName(name)) {</span>
+<span class="nc" id="L299">			this.returningName = name;</span>
+		}
+		else {
+			// assume a type
+			try {
+<span class="nc" id="L304">				this.discoveredReturningType = ClassUtils.forName(name, getAspectClassLoader());</span>
+			}
+<span class="nc" id="L306">			catch (Throwable ex) {</span>
+<span class="nc" id="L307">				throw new IllegalArgumentException(&quot;Returning name '&quot; + name  +</span>
+						&quot;' is neither a valid argument name nor the fully-qualified &quot; +
+						&quot;name of a Java type on the classpath. Root cause: &quot; + ex);
+<span class="nc" id="L310">			}</span>
+		}
+<span class="nc" id="L312">	}</span>
+
+	protected Class&lt;?&gt; getDiscoveredReturningType() {
+<span class="fc" id="L315">		return this.discoveredReturningType;</span>
+	}
+
+	@Nullable
+	protected Type getDiscoveredReturningGenericType() {
+<span class="fc" id="L320">		return this.discoveredReturningGenericType;</span>
+	}
+
+	public void setThrowingName(String name) {
+<span class="nc" id="L324">		throw new UnsupportedOperationException(&quot;Only afterThrowing advice can be used to bind a thrown exception&quot;);</span>
+	}
+
+	/**
+	 * We need to hold the throwing name at this level for argument binding calculations,
+	 * this method allows the afterThrowing advice subclass to set the name.
+	 */
+	protected void setThrowingNameNoCheck(String name) {
+		// name could be a variable or a type...
+<span class="nc bnc" id="L333" title="All 2 branches missed.">		if (isVariableName(name)) {</span>
+<span class="nc" id="L334">			this.throwingName = name;</span>
+		}
+		else {
+			// assume a type
+			try {
+<span class="nc" id="L339">				this.discoveredThrowingType = ClassUtils.forName(name, getAspectClassLoader());</span>
+			}
+<span class="nc" id="L341">			catch (Throwable ex) {</span>
+<span class="nc" id="L342">				throw new IllegalArgumentException(&quot;Throwing name '&quot; + name  +</span>
+						&quot;' is neither a valid argument name nor the fully-qualified &quot; +
+						&quot;name of a Java type on the classpath. Root cause: &quot; + ex);
+<span class="nc" id="L345">			}</span>
+		}
+<span class="nc" id="L347">	}</span>
+
+	protected Class&lt;?&gt; getDiscoveredThrowingType() {
+<span class="fc" id="L350">		return this.discoveredThrowingType;</span>
+	}
+
+	private boolean isVariableName(String name) {
+<span class="fc" id="L354">		char[] chars = name.toCharArray();</span>
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">		if (!Character.isJavaIdentifierStart(chars[0])) {</span>
+<span class="nc" id="L356">			return false;</span>
+		}
+<span class="fc bfc" id="L358" title="All 2 branches covered.">		for (int i = 1; i &lt; chars.length; i++) {</span>
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">			if (!Character.isJavaIdentifierPart(chars[i])) {</span>
+<span class="nc" id="L360">				return false;</span>
+			}
+		}
+<span class="fc" id="L363">		return true;</span>
+	}
+
+
+	/**
+	 * Do as much work as we can as part of the set-up so that argument binding
+	 * on subsequent advice invocations can be as fast as possible.
+	 * &lt;p&gt;If the first argument is of type JoinPoint or ProceedingJoinPoint then we
+	 * pass a JoinPoint in that position (ProceedingJoinPoint for around advice).
+	 * &lt;p&gt;If the first argument is of type {@code JoinPoint.StaticPart}
+	 * then we pass a {@code JoinPoint.StaticPart} in that position.
+	 * &lt;p&gt;Remaining arguments have to be bound by pointcut evaluation at
+	 * a given join point. We will get back a map from argument name to
+	 * value. We need to calculate which advice parameter needs to be bound
+	 * to which argument name. There are multiple strategies for determining
+	 * this binding, which are arranged in a ChainOfResponsibility.
+	 */
+	public final synchronized void calculateArgumentBindings() {
+		// The simple case... nothing to bind.
+<span class="fc bfc" id="L382" title="All 4 branches covered.">		if (this.argumentsIntrospected || this.parameterTypes.length == 0) {</span>
+<span class="fc" id="L383">			return;</span>
+		}
+
+<span class="fc" id="L386">		int numUnboundArgs = this.parameterTypes.length;</span>
+<span class="fc" id="L387">		Class&lt;?&gt;[] parameterTypes = this.aspectJAdviceMethod.getParameterTypes();</span>
+<span class="fc bfc" id="L388" title="All 4 branches covered.">		if (maybeBindJoinPoint(parameterTypes[0]) || maybeBindProceedingJoinPoint(parameterTypes[0]) ||</span>
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">				maybeBindJoinPointStaticPart(parameterTypes[0])) {</span>
+<span class="fc" id="L390">			numUnboundArgs--;</span>
+		}
+
+<span class="fc bfc" id="L393" title="All 2 branches covered.">		if (numUnboundArgs &gt; 0) {</span>
+			// need to bind arguments by name as returned from the pointcut match
+<span class="fc" id="L395">			bindArgumentsByName(numUnboundArgs);</span>
+		}
+
+<span class="fc" id="L398">		this.argumentsIntrospected = true;</span>
+<span class="fc" id="L399">	}</span>
+
+	private boolean maybeBindJoinPoint(Class&lt;?&gt; candidateParameterType) {
+<span class="fc bfc" id="L402" title="All 2 branches covered.">		if (JoinPoint.class == candidateParameterType) {</span>
+<span class="fc" id="L403">			this.joinPointArgumentIndex = 0;</span>
+<span class="fc" id="L404">			return true;</span>
+		}
+		else {
+<span class="fc" id="L407">			return false;</span>
+		}
+	}
+
+	private boolean maybeBindProceedingJoinPoint(Class&lt;?&gt; candidateParameterType) {
+<span class="fc bfc" id="L412" title="All 2 branches covered.">		if (ProceedingJoinPoint.class == candidateParameterType) {</span>
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">			if (!supportsProceedingJoinPoint()) {</span>
+<span class="nc" id="L414">				throw new IllegalArgumentException(&quot;ProceedingJoinPoint is only supported for around advice&quot;);</span>
+			}
+<span class="fc" id="L416">			this.joinPointArgumentIndex = 0;</span>
+<span class="fc" id="L417">			return true;</span>
+		}
+		else {
+<span class="fc" id="L420">			return false;</span>
+		}
+	}
+
+	protected boolean supportsProceedingJoinPoint() {
+<span class="nc" id="L425">		return false;</span>
+	}
+
+	private boolean maybeBindJoinPointStaticPart(Class&lt;?&gt; candidateParameterType) {
+<span class="pc bpc" id="L429" title="1 of 2 branches missed.">		if (JoinPoint.StaticPart.class == candidateParameterType) {</span>
+<span class="nc" id="L430">			this.joinPointStaticPartArgumentIndex = 0;</span>
+<span class="nc" id="L431">			return true;</span>
+		}
+		else {
+<span class="fc" id="L434">			return false;</span>
+		}
+	}
+
+	private void bindArgumentsByName(int numArgumentsExpectingToBind) {
+<span class="fc bfc" id="L439" title="All 2 branches covered.">		if (this.argumentNames == null) {</span>
+<span class="fc" id="L440">			this.argumentNames = createParameterNameDiscoverer().getParameterNames(this.aspectJAdviceMethod);</span>
+		}
+<span class="pc bpc" id="L442" title="1 of 2 branches missed.">		if (this.argumentNames != null) {</span>
+			// We have been able to determine the arg names.
+<span class="fc" id="L444">			bindExplicitArguments(numArgumentsExpectingToBind);</span>
+		}
+		else {
+<span class="nc" id="L447">			throw new IllegalStateException(&quot;Advice method [&quot; + this.aspectJAdviceMethod.getName() + &quot;] &quot; +</span>
+					&quot;requires &quot; + numArgumentsExpectingToBind + &quot; arguments to be bound by name, but &quot; +
+					&quot;the argument names were not specified and could not be discovered.&quot;);
+		}
+<span class="fc" id="L451">	}</span>
+
+	/**
+	 * Create a ParameterNameDiscoverer to be used for argument binding.
+	 * &lt;p&gt;The default implementation creates a {@link DefaultParameterNameDiscoverer}
+	 * and adds a specifically configured {@link AspectJAdviceParameterNameDiscoverer}.
+	 */
+	protected ParameterNameDiscoverer createParameterNameDiscoverer() {
+		// We need to discover them, or if that fails, guess,
+		// and if we can't guess with 100% accuracy, fail.
+<span class="fc" id="L461">		DefaultParameterNameDiscoverer discoverer = new DefaultParameterNameDiscoverer();</span>
+<span class="fc" id="L462">		AspectJAdviceParameterNameDiscoverer adviceParameterNameDiscoverer =</span>
+<span class="fc" id="L463">				new AspectJAdviceParameterNameDiscoverer(this.pointcut.getExpression());</span>
+<span class="fc" id="L464">		adviceParameterNameDiscoverer.setReturningName(this.returningName);</span>
+<span class="fc" id="L465">		adviceParameterNameDiscoverer.setThrowingName(this.throwingName);</span>
+		// Last in chain, so if we're called and we fail, that's bad...
+<span class="fc" id="L467">		adviceParameterNameDiscoverer.setRaiseExceptions(true);</span>
+<span class="fc" id="L468">		discoverer.addDiscoverer(adviceParameterNameDiscoverer);</span>
+<span class="fc" id="L469">		return discoverer;</span>
+	}
+
+	private void bindExplicitArguments(int numArgumentsLeftToBind) {
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">		Assert.state(this.argumentNames != null, &quot;No argument names available&quot;);</span>
+<span class="fc" id="L474">		this.argumentBindings = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L476">		int numExpectedArgumentNames = this.aspectJAdviceMethod.getParameterCount();</span>
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">		if (this.argumentNames.length != numExpectedArgumentNames) {</span>
+<span class="nc" id="L478">			throw new IllegalStateException(&quot;Expecting to find &quot; + numExpectedArgumentNames +</span>
+					&quot; arguments to bind by name in advice, but actually found &quot; +
+					this.argumentNames.length + &quot; arguments.&quot;);
+		}
+
+		// So we match in number...
+<span class="fc" id="L484">		int argumentIndexOffset = this.parameterTypes.length - numArgumentsLeftToBind;</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">		for (int i = argumentIndexOffset; i &lt; this.argumentNames.length; i++) {</span>
+<span class="fc" id="L486">			this.argumentBindings.put(this.argumentNames[i], i);</span>
+		}
+
+		// Check that returning and throwing were in the argument names list if
+		// specified, and find the discovered argument types.
+<span class="pc bpc" id="L491" title="1 of 2 branches missed.">		if (this.returningName != null) {</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">			if (!this.argumentBindings.containsKey(this.returningName)) {</span>
+<span class="nc" id="L493">				throw new IllegalStateException(&quot;Returning argument name '&quot; + this.returningName +</span>
+						&quot;' was not bound in advice arguments&quot;);
+			}
+			else {
+<span class="nc" id="L497">				Integer index = this.argumentBindings.get(this.returningName);</span>
+<span class="nc" id="L498">				this.discoveredReturningType = this.aspectJAdviceMethod.getParameterTypes()[index];</span>
+<span class="nc" id="L499">				this.discoveredReturningGenericType = this.aspectJAdviceMethod.getGenericParameterTypes()[index];</span>
+			}
+		}
+<span class="pc bpc" id="L502" title="1 of 2 branches missed.">		if (this.throwingName != null) {</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">			if (!this.argumentBindings.containsKey(this.throwingName)) {</span>
+<span class="nc" id="L504">				throw new IllegalStateException(&quot;Throwing argument name '&quot; + this.throwingName +</span>
+						&quot;' was not bound in advice arguments&quot;);
+			}
+			else {
+<span class="nc" id="L508">				Integer index = this.argumentBindings.get(this.throwingName);</span>
+<span class="nc" id="L509">				this.discoveredThrowingType = this.aspectJAdviceMethod.getParameterTypes()[index];</span>
+			}
+		}
+
+		// configure the pointcut expression accordingly.
+<span class="fc" id="L514">		configurePointcutParameters(this.argumentNames, argumentIndexOffset);</span>
+<span class="fc" id="L515">	}</span>
+
+	/**
+	 * All parameters from argumentIndexOffset onwards are candidates for
+	 * pointcut parameters - but returning and throwing vars are handled differently
+	 * and must be removed from the list if present.
+	 */
+	private void configurePointcutParameters(String[] argumentNames, int argumentIndexOffset) {
+<span class="fc" id="L523">		int numParametersToRemove = argumentIndexOffset;</span>
+<span class="pc bpc" id="L524" title="1 of 2 branches missed.">		if (this.returningName != null) {</span>
+<span class="nc" id="L525">			numParametersToRemove++;</span>
+		}
+<span class="pc bpc" id="L527" title="1 of 2 branches missed.">		if (this.throwingName != null) {</span>
+<span class="nc" id="L528">			numParametersToRemove++;</span>
+		}
+<span class="fc" id="L530">		String[] pointcutParameterNames = new String[argumentNames.length - numParametersToRemove];</span>
+<span class="fc" id="L531">		Class&lt;?&gt;[] pointcutParameterTypes = new Class&lt;?&gt;[pointcutParameterNames.length];</span>
+<span class="fc" id="L532">		Class&lt;?&gt;[] methodParameterTypes = this.aspectJAdviceMethod.getParameterTypes();</span>
+
+<span class="fc" id="L534">		int index = 0;</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">		for (int i = 0; i &lt; argumentNames.length; i++) {</span>
+<span class="fc bfc" id="L536" title="All 2 branches covered.">			if (i &lt; argumentIndexOffset) {</span>
+<span class="fc" id="L537">				continue;</span>
+			}
+<span class="pc bpc" id="L539" title="1 of 2 branches missed.">			if (argumentNames[i].equals(this.returningName) ||</span>
+<span class="pc bpc" id="L540" title="1 of 2 branches missed.">				argumentNames[i].equals(this.throwingName)) {</span>
+<span class="nc" id="L541">				continue;</span>
+			}
+<span class="fc" id="L543">			pointcutParameterNames[index] = argumentNames[i];</span>
+<span class="fc" id="L544">			pointcutParameterTypes[index] = methodParameterTypes[i];</span>
+<span class="fc" id="L545">			index++;</span>
+		}
+
+<span class="fc" id="L548">		this.pointcut.setParameterNames(pointcutParameterNames);</span>
+<span class="fc" id="L549">		this.pointcut.setParameterTypes(pointcutParameterTypes);</span>
+<span class="fc" id="L550">	}</span>
+
+	/**
+	 * Take the arguments at the method execution join point and output a set of arguments
+	 * to the advice method.
+	 * @param jp the current JoinPoint
+	 * @param jpMatch the join point match that matched this execution join point
+	 * @param returnValue the return value from the method execution (may be null)
+	 * @param ex the exception thrown by the method execution (may be null)
+	 * @return the empty array if there are no arguments
+	 */
+	protected Object[] argBinding(JoinPoint jp, @Nullable JoinPointMatch jpMatch,
+			@Nullable Object returnValue, @Nullable Throwable ex) {
+
+<span class="fc" id="L564">		calculateArgumentBindings();</span>
+
+		// AMC start
+<span class="fc" id="L567">		Object[] adviceInvocationArgs = new Object[this.parameterTypes.length];</span>
+<span class="fc" id="L568">		int numBound = 0;</span>
+
+<span class="fc bfc" id="L570" title="All 2 branches covered.">		if (this.joinPointArgumentIndex != -1) {</span>
+<span class="fc" id="L571">			adviceInvocationArgs[this.joinPointArgumentIndex] = jp;</span>
+<span class="fc" id="L572">			numBound++;</span>
+		}
+<span class="pc bpc" id="L574" title="1 of 2 branches missed.">		else if (this.joinPointStaticPartArgumentIndex != -1) {</span>
+<span class="nc" id="L575">			adviceInvocationArgs[this.joinPointStaticPartArgumentIndex] = jp.getStaticPart();</span>
+<span class="nc" id="L576">			numBound++;</span>
+		}
+
+<span class="fc bfc" id="L579" title="All 2 branches covered.">		if (!CollectionUtils.isEmpty(this.argumentBindings)) {</span>
+			// binding from pointcut match
+<span class="pc bpc" id="L581" title="1 of 2 branches missed.">			if (jpMatch != null) {</span>
+<span class="fc" id="L582">				PointcutParameter[] parameterBindings = jpMatch.getParameterBindings();</span>
+<span class="fc bfc" id="L583" title="All 2 branches covered.">				for (PointcutParameter parameter : parameterBindings) {</span>
+<span class="fc" id="L584">					String name = parameter.getName();</span>
+<span class="fc" id="L585">					Integer index = this.argumentBindings.get(name);</span>
+<span class="fc" id="L586">					adviceInvocationArgs[index] = parameter.getBinding();</span>
+<span class="fc" id="L587">					numBound++;</span>
+				}
+			}
+			// binding from returning clause
+<span class="pc bpc" id="L591" title="1 of 2 branches missed.">			if (this.returningName != null) {</span>
+<span class="nc" id="L592">				Integer index = this.argumentBindings.get(this.returningName);</span>
+<span class="nc" id="L593">				adviceInvocationArgs[index] = returnValue;</span>
+<span class="nc" id="L594">				numBound++;</span>
+			}
+			// binding from thrown exception
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">			if (this.throwingName != null) {</span>
+<span class="nc" id="L598">				Integer index = this.argumentBindings.get(this.throwingName);</span>
+<span class="nc" id="L599">				adviceInvocationArgs[index] = ex;</span>
+<span class="nc" id="L600">				numBound++;</span>
+			}
+		}
+
+<span class="pc bpc" id="L604" title="1 of 2 branches missed.">		if (numBound != this.parameterTypes.length) {</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">			throw new IllegalStateException(&quot;Required to bind &quot; + this.parameterTypes.length +</span>
+					&quot; arguments, but only bound &quot; + numBound + &quot; (JoinPointMatch &quot; +
+					(jpMatch == null ? &quot;was NOT&quot; : &quot;WAS&quot;) + &quot; bound in invocation)&quot;);
+		}
+
+<span class="fc" id="L610">		return adviceInvocationArgs;</span>
+	}
+
+
+	/**
+	 * Invoke the advice method.
+	 * @param jpMatch the JoinPointMatch that matched this execution join point
+	 * @param returnValue the return value from the method execution (may be null)
+	 * @param ex the exception thrown by the method execution (may be null)
+	 * @return the invocation result
+	 * @throws Throwable in case of invocation failure
+	 */
+	protected Object invokeAdviceMethod(
+			@Nullable JoinPointMatch jpMatch, @Nullable Object returnValue, @Nullable Throwable ex)
+			throws Throwable {
+
+<span class="fc" id="L626">		return invokeAdviceMethodWithGivenArgs(argBinding(getJoinPoint(), jpMatch, returnValue, ex));</span>
+	}
+
+	// As above, but in this case we are given the join point.
+	protected Object invokeAdviceMethod(JoinPoint jp, @Nullable JoinPointMatch jpMatch,
+			@Nullable Object returnValue, @Nullable Throwable t) throws Throwable {
+
+<span class="fc" id="L633">		return invokeAdviceMethodWithGivenArgs(argBinding(jp, jpMatch, returnValue, t));</span>
+	}
+
+	protected Object invokeAdviceMethodWithGivenArgs(Object[] args) throws Throwable {
+<span class="fc" id="L637">		Object[] actualArgs = args;</span>
+<span class="fc bfc" id="L638" title="All 2 branches covered.">		if (this.aspectJAdviceMethod.getParameterCount() == 0) {</span>
+<span class="fc" id="L639">			actualArgs = null;</span>
+		}
+		try {
+<span class="fc" id="L642">			ReflectionUtils.makeAccessible(this.aspectJAdviceMethod);</span>
+			// TODO AopUtils.invokeJoinpointUsingReflection
+<span class="fc" id="L644">			return this.aspectJAdviceMethod.invoke(this.aspectInstanceFactory.getAspectInstance(), actualArgs);</span>
+		}
+<span class="nc" id="L646">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L647">			throw new AopInvocationException(&quot;Mismatch on arguments to advice method [&quot; +</span>
+					this.aspectJAdviceMethod + &quot;]; pointcut expression [&quot; +
+<span class="nc" id="L649">					this.pointcut.getPointcutExpression() + &quot;]&quot;, ex);</span>
+		}
+<span class="fc" id="L651">		catch (InvocationTargetException ex) {</span>
+<span class="fc" id="L652">			throw ex.getTargetException();</span>
+		}
+	}
+
+	/**
+	 * Overridden in around advice to return proceeding join point.
+	 */
+	protected JoinPoint getJoinPoint() {
+<span class="fc" id="L660">		return currentJoinPoint();</span>
+	}
+
+	/**
+	 * Get the current join point match at the join point we are being dispatched on.
+	 */
+	@Nullable
+	protected JoinPointMatch getJoinPointMatch() {
+<span class="fc" id="L668">		MethodInvocation mi = ExposeInvocationInterceptor.currentInvocation();</span>
+<span class="pc bpc" id="L669" title="1 of 2 branches missed.">		if (!(mi instanceof ProxyMethodInvocation)) {</span>
+<span class="nc" id="L670">			throw new IllegalStateException(&quot;MethodInvocation is not a Spring ProxyMethodInvocation: &quot; + mi);</span>
+		}
+<span class="fc" id="L672">		return getJoinPointMatch((ProxyMethodInvocation) mi);</span>
+	}
+
+	// Note: We can't use JoinPointMatch.getClass().getName() as the key, since
+	// Spring AOP does all the matching at a join point, and then all the invocations.
+	// Under this scenario, if we just use JoinPointMatch as the key, then
+	// 'last man wins' which is not what we want at all.
+	// Using the expression is guaranteed to be safe, since 2 identical expressions
+	// are guaranteed to bind in exactly the same way.
+	@Nullable
+	protected JoinPointMatch getJoinPointMatch(ProxyMethodInvocation pmi) {
+<span class="fc" id="L683">		String expression = this.pointcut.getExpression();</span>
+<span class="pc bpc" id="L684" title="1 of 2 branches missed.">		return (expression != null ? (JoinPointMatch) pmi.getUserAttribute(expression) : null);</span>
+	}
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L690">		return getClass().getName() + &quot;: advice method [&quot; + this.aspectJAdviceMethod + &quot;]; &quot; +</span>
+				&quot;aspect name '&quot; + this.aspectName + &quot;'&quot;;
+	}
+
+	private void readObject(ObjectInputStream inputStream) throws IOException, ClassNotFoundException {
+<span class="fc" id="L695">		inputStream.defaultReadObject();</span>
+		try {
+<span class="fc" id="L697">			this.aspectJAdviceMethod = this.declaringClass.getMethod(this.methodName, this.parameterTypes);</span>
+		}
+<span class="nc" id="L699">		catch (NoSuchMethodException ex) {</span>
+<span class="nc" id="L700">			throw new IllegalStateException(&quot;Failed to find advice method on deserialization&quot;, ex);</span>
+<span class="fc" id="L701">		}</span>
+<span class="fc" id="L702">	}</span>
+
+
+	/**
+	 * MethodMatcher that excludes the specified advice method.
+	 * @see AbstractAspectJAdvice#buildSafePointcut()
+	 */
+	private static class AdviceExcludingMethodMatcher extends StaticMethodMatcher {
+
+		private final Method adviceMethod;
+
+<span class="fc" id="L713">		public AdviceExcludingMethodMatcher(Method adviceMethod) {</span>
+<span class="fc" id="L714">			this.adviceMethod = adviceMethod;</span>
+<span class="fc" id="L715">		}</span>
+
+		@Override
+		public boolean matches(Method method, Class&lt;?&gt; targetClass) {
+<span class="nc bnc" id="L719" title="All 2 branches missed.">			return !this.adviceMethod.equals(method);</span>
+		}
+
+		@Override
+		public boolean equals(Object other) {
+<span class="nc bnc" id="L724" title="All 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L725">				return true;</span>
+			}
+<span class="nc bnc" id="L727" title="All 2 branches missed.">			if (!(other instanceof AdviceExcludingMethodMatcher)) {</span>
+<span class="nc" id="L728">				return false;</span>
+			}
+<span class="nc" id="L730">			AdviceExcludingMethodMatcher otherMm = (AdviceExcludingMethodMatcher) other;</span>
+<span class="nc" id="L731">			return this.adviceMethod.equals(otherMm.adviceMethod);</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L736">			return this.adviceMethod.hashCode();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

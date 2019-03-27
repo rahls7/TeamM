@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResponseBodyEmitter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.mvc.method.annotation</a> &gt; <span class="el_source">ResponseBodyEmitter.java</span></div><h1>ResponseBodyEmitter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.mvc.method.annotation;
+
+import java.io.IOException;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.function.Consumer;
+
+import org.springframework.http.MediaType;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * A controller method return value type for asynchronous request processing
+ * where one or more objects are written to the response.
+ *
+ * &lt;p&gt;While {@link org.springframework.web.context.request.async.DeferredResult}
+ * is used to produce a single result, a {@code ResponseBodyEmitter} can be used
+ * to send multiple objects where each object is written with a compatible
+ * {@link org.springframework.http.converter.HttpMessageConverter}.
+ *
+ * &lt;p&gt;Supported as a return type on its own as well as within a
+ * {@link org.springframework.http.ResponseEntity}.
+ *
+ * &lt;pre&gt;
+ * &amp;#064;RequestMapping(value=&quot;/stream&quot;, method=RequestMethod.GET)
+ * public ResponseBodyEmitter handle() {
+ * 	   ResponseBodyEmitter emitter = new ResponseBodyEmitter();
+ * 	   // Pass the emitter to another component...
+ * 	   return emitter;
+ * }
+ *
+ * // in another thread
+ * emitter.send(foo1);
+ *
+ * // and again
+ * emitter.send(foo2);
+ *
+ * // and done
+ * emitter.complete();
+ * &lt;/pre&gt;
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 4.2
+ */
+public class ResponseBodyEmitter {
+
+	@Nullable
+	private final Long timeout;
+
+	@Nullable
+	private Handler handler;
+
+	/** Store send data before handler is initialized. */
+<span class="fc" id="L73">	private final Set&lt;DataWithMediaType&gt; earlySendAttempts = new LinkedHashSet&lt;&gt;(8);</span>
+
+	/** Store complete invocation before handler is initialized. */
+	private boolean complete;
+
+	/** Store completeWithError invocation before handler is initialized. */
+	@Nullable
+	private Throwable failure;
+
+	/**
+	 * After an IOException on send, the servlet container will provide an onError
+	 * callback that we'll handle as completeWithError (on container thread).
+	 * We use this flag to ignore competing attempts to completeWithError by
+	 * the application via try-catch. */
+	private boolean sendFailed;
+
+<span class="fc" id="L89">	private final DefaultCallback timeoutCallback = new DefaultCallback();</span>
+
+<span class="fc" id="L91">	private final ErrorCallback errorCallback = new ErrorCallback();</span>
+
+<span class="fc" id="L93">	private final DefaultCallback completionCallback = new DefaultCallback();</span>
+
+
+	/**
+	 * Create a new ResponseBodyEmitter instance.
+	 */
+<span class="fc" id="L99">	public ResponseBodyEmitter() {</span>
+<span class="fc" id="L100">		this.timeout = null;</span>
+<span class="fc" id="L101">	}</span>
+
+	/**
+	 * Create a ResponseBodyEmitter with a custom timeout value.
+	 * &lt;p&gt;By default not set in which case the default configured in the MVC
+	 * Java Config or the MVC namespace is used, or if that's not set, then the
+	 * timeout depends on the default of the underlying server.
+	 * @param timeout timeout value in milliseconds
+	 */
+<span class="fc" id="L110">	public ResponseBodyEmitter(Long timeout) {</span>
+<span class="fc" id="L111">		this.timeout = timeout;</span>
+<span class="fc" id="L112">	}</span>
+
+
+	/**
+	 * Return the configured timeout value, if any.
+	 */
+	@Nullable
+	public Long getTimeout() {
+<span class="fc" id="L120">		return this.timeout;</span>
+	}
+
+
+	synchronized void initialize(Handler handler) throws IOException {
+<span class="fc" id="L125">		this.handler = handler;</span>
+
+<span class="fc bfc" id="L127" title="All 2 branches covered.">		for (DataWithMediaType sendAttempt : this.earlySendAttempts) {</span>
+<span class="fc" id="L128">			sendInternal(sendAttempt.getData(), sendAttempt.getMediaType());</span>
+<span class="fc" id="L129">		}</span>
+<span class="fc" id="L130">		this.earlySendAttempts.clear();</span>
+
+<span class="fc bfc" id="L132" title="All 2 branches covered.">		if (this.complete) {</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">			if (this.failure != null) {</span>
+<span class="fc" id="L134">				this.handler.completeWithError(this.failure);</span>
+			}
+			else {
+<span class="fc" id="L137">				this.handler.complete();</span>
+			}
+		}
+		else {
+<span class="fc" id="L141">			this.handler.onTimeout(this.timeoutCallback);</span>
+<span class="fc" id="L142">			this.handler.onError(this.errorCallback);</span>
+<span class="fc" id="L143">			this.handler.onCompletion(this.completionCallback);</span>
+		}
+<span class="fc" id="L145">	}</span>
+
+	/**
+	 * Invoked after the response is updated with the status code and headers,
+	 * if the ResponseBodyEmitter is wrapped in a ResponseEntity, but before the
+	 * response is committed, i.e. before the response body has been written to.
+	 * &lt;p&gt;The default implementation is empty.
+	 */
+	protected void extendResponse(ServerHttpResponse outputMessage) {
+<span class="fc" id="L154">	}</span>
+
+	/**
+	 * Write the given object to the response.
+	 * &lt;p&gt;If any exception occurs a dispatch is made back to the app server where
+	 * Spring MVC will pass the exception through its exception handling mechanism.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; if the send fails with an IOException, you do
+	 * not need to call {@link #completeWithError(Throwable)} in order to clean
+	 * up. Instead the Servlet container creates a notification that results in a
+	 * dispatch where Spring MVC invokes exception resolvers and completes
+	 * processing.
+	 * @param object the object to write
+	 * @throws IOException raised when an I/O error occurs
+	 * @throws java.lang.IllegalStateException wraps any other errors
+	 */
+	public void send(Object object) throws IOException {
+<span class="fc" id="L170">		send(object, null);</span>
+<span class="fc" id="L171">	}</span>
+
+	/**
+	 * Overloaded variant of {@link #send(Object)} that also accepts a MediaType
+	 * hint for how to serialize the given Object.
+	 * @param object the object to write
+	 * @param mediaType a MediaType hint for selecting an HttpMessageConverter
+	 * @throws IOException raised when an I/O error occurs
+	 * @throws java.lang.IllegalStateException wraps any other errors
+	 */
+	public synchronized void send(Object object, @Nullable MediaType mediaType) throws IOException {
+<span class="fc bfc" id="L182" title="All 2 branches covered.">		Assert.state(!this.complete, &quot;ResponseBodyEmitter is already set complete&quot;);</span>
+<span class="fc" id="L183">		sendInternal(object, mediaType);</span>
+<span class="fc" id="L184">	}</span>
+
+	private void sendInternal(Object object, @Nullable MediaType mediaType) throws IOException {
+<span class="fc bfc" id="L187" title="All 2 branches covered.">		if (this.handler != null) {</span>
+			try {
+<span class="fc" id="L189">				this.handler.send(object, mediaType);</span>
+			}
+<span class="fc" id="L191">			catch (IOException ex) {</span>
+<span class="fc" id="L192">				this.sendFailed = true;</span>
+<span class="fc" id="L193">				throw ex;</span>
+			}
+<span class="nc" id="L195">			catch (Throwable ex) {</span>
+<span class="nc" id="L196">				this.sendFailed = true;</span>
+<span class="nc" id="L197">				throw new IllegalStateException(&quot;Failed to send &quot; + object, ex);</span>
+<span class="fc" id="L198">			}</span>
+		}
+		else {
+<span class="fc" id="L201">			this.earlySendAttempts.add(new DataWithMediaType(object, mediaType));</span>
+		}
+<span class="fc" id="L203">	}</span>
+
+	/**
+	 * Complete request processing by performing a dispatch into the servlet
+	 * container, where Spring MVC is invoked once more, and completes the
+	 * request processing lifecycle.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; this method should be called by the application
+	 * to complete request processing. It should not be used after container
+	 * related events such as an error while {@link #send(Object) sending}.
+	 */
+	public synchronized void complete() {
+		// Ignore, after send failure
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">		if (this.sendFailed) {</span>
+<span class="nc" id="L216">			return;</span>
+		}
+<span class="fc" id="L218">		this.complete = true;</span>
+<span class="fc bfc" id="L219" title="All 2 branches covered.">		if (this.handler != null) {</span>
+<span class="fc" id="L220">			this.handler.complete();</span>
+		}
+<span class="fc" id="L222">	}</span>
+
+	/**
+	 * Complete request processing with an error.
+	 * &lt;p&gt;A dispatch is made into the app server where Spring MVC will pass the
+	 * exception through its exception handling mechanism. Note however that
+	 * at this stage of request processing, the response is committed and the
+	 * response status can no longer be changed.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; this method should be called by the application
+	 * to complete request processing with an error. It should not be used after
+	 * container related events such as an error while
+	 * {@link #send(Object) sending}.
+	 */
+	public synchronized void completeWithError(Throwable ex) {
+		// Ignore, after send failure
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">		if (this.sendFailed) {</span>
+<span class="nc" id="L238">			return;</span>
+		}
+<span class="fc" id="L240">		this.complete = true;</span>
+<span class="fc" id="L241">		this.failure = ex;</span>
+<span class="fc bfc" id="L242" title="All 2 branches covered.">		if (this.handler != null) {</span>
+<span class="fc" id="L243">			this.handler.completeWithError(ex);</span>
+		}
+<span class="fc" id="L245">	}</span>
+
+	/**
+	 * Register code to invoke when the async request times out. This method is
+	 * called from a container thread when an async request times out.
+	 */
+	public synchronized void onTimeout(Runnable callback) {
+<span class="fc" id="L252">		this.timeoutCallback.setDelegate(callback);</span>
+<span class="fc" id="L253">	}</span>
+
+	/**
+	 * Register code to invoke for an error during async request processing.
+	 * This method is called from a container thread when an error occurred
+	 * while processing an async request.
+	 * @since 5.0
+	 */
+	public synchronized void onError(Consumer&lt;Throwable&gt; callback) {
+<span class="fc" id="L262">		this.errorCallback.setDelegate(callback);</span>
+<span class="fc" id="L263">	}</span>
+
+	/**
+	 * Register code to invoke when the async request completes. This method is
+	 * called from a container thread when an async request completed for any
+	 * reason including timeout and network error. This method is useful for
+	 * detecting that a {@code ResponseBodyEmitter} instance is no longer usable.
+	 */
+	public synchronized void onCompletion(Runnable callback) {
+<span class="fc" id="L272">		this.completionCallback.setDelegate(callback);</span>
+<span class="fc" id="L273">	}</span>
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L278">		return &quot;ResponseBodyEmitter@&quot; + ObjectUtils.getIdentityHexString(this);</span>
+	}
+
+
+	/**
+	 * Handle sent objects and complete request processing.
+	 */
+	interface Handler {
+
+		void send(Object data, @Nullable MediaType mediaType) throws IOException;
+
+		void complete();
+
+		void completeWithError(Throwable failure);
+
+		void onTimeout(Runnable callback);
+
+		void onError(Consumer&lt;Throwable&gt; callback);
+
+		void onCompletion(Runnable callback);
+	}
+
+
+	/**
+	 * A simple holder of data to be written along with a MediaType hint for
+	 * selecting a message converter to write with.
+	 */
+	public static class DataWithMediaType {
+
+		private final Object data;
+
+		@Nullable
+		private final MediaType mediaType;
+
+<span class="fc" id="L312">		public DataWithMediaType(Object data, @Nullable MediaType mediaType) {</span>
+<span class="fc" id="L313">			this.data = data;</span>
+<span class="fc" id="L314">			this.mediaType = mediaType;</span>
+<span class="fc" id="L315">		}</span>
+
+		public Object getData() {
+<span class="fc" id="L318">			return this.data;</span>
+		}
+
+		@Nullable
+		public MediaType getMediaType() {
+<span class="fc" id="L323">			return this.mediaType;</span>
+		}
+	}
+
+
+<span class="fc" id="L328">	private class DefaultCallback implements Runnable {</span>
+
+		@Nullable
+		private Runnable delegate;
+
+		public void setDelegate(Runnable delegate) {
+<span class="fc" id="L334">			this.delegate = delegate;</span>
+<span class="fc" id="L335">		}</span>
+
+		@Override
+		public void run() {
+<span class="fc" id="L339">			ResponseBodyEmitter.this.complete = true;</span>
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">			if (this.delegate != null) {</span>
+<span class="fc" id="L341">				this.delegate.run();</span>
+			}
+<span class="fc" id="L343">		}</span>
+	}
+
+
+<span class="fc" id="L347">	private class ErrorCallback implements Consumer&lt;Throwable&gt; {</span>
+
+		@Nullable
+		private Consumer&lt;Throwable&gt; delegate;
+
+		public void setDelegate(Consumer&lt;Throwable&gt; callback) {
+<span class="fc" id="L353">			this.delegate = callback;</span>
+<span class="fc" id="L354">		}</span>
+
+		@Override
+		public void accept(Throwable t) {
+<span class="nc" id="L358">			ResponseBodyEmitter.this.complete = true;</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">			if (this.delegate != null) {</span>
+<span class="nc" id="L360">				this.delegate.accept(t);</span>
+			}
+<span class="nc" id="L362">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

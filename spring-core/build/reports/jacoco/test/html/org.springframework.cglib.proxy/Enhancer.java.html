@@ -1,0 +1,1436 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Enhancer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.cglib.proxy</a> &gt; <span class="el_source">Enhancer.java</span></div><h1>Enhancer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002,2003,2004 The Apache Software Foundation
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.cglib.proxy;
+
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.security.ProtectionDomain;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.springframework.asm.ClassVisitor;
+import org.springframework.asm.Label;
+import org.springframework.asm.Type;
+import org.springframework.cglib.core.AbstractClassGenerator;
+import org.springframework.cglib.core.ClassEmitter;
+import org.springframework.cglib.core.CodeEmitter;
+import org.springframework.cglib.core.CodeGenerationException;
+import org.springframework.cglib.core.CollectionUtils;
+import org.springframework.cglib.core.Constants;
+import org.springframework.cglib.core.DuplicatesPredicate;
+import org.springframework.cglib.core.EmitUtils;
+import org.springframework.cglib.core.KeyFactory;
+import org.springframework.cglib.core.Local;
+import org.springframework.cglib.core.MethodInfo;
+import org.springframework.cglib.core.MethodInfoTransformer;
+import org.springframework.cglib.core.MethodWrapper;
+import org.springframework.cglib.core.ObjectSwitchCallback;
+import org.springframework.cglib.core.ProcessSwitchCallback;
+import org.springframework.cglib.core.ReflectUtils;
+import org.springframework.cglib.core.RejectModifierPredicate;
+import org.springframework.cglib.core.Signature;
+import org.springframework.cglib.core.Transformer;
+import org.springframework.cglib.core.TypeUtils;
+import org.springframework.cglib.core.VisibilityPredicate;
+import org.springframework.cglib.core.WeakCacheKey;
+
+/**
+ * Generates dynamic subclasses to enable method interception. This
+ * class started as a substitute for the standard Dynamic Proxy support
+ * included with JDK 1.3, but one that allowed the proxies to extend a
+ * concrete base class, in addition to implementing interfaces. The dynamically
+ * generated subclasses override the non-final methods of the superclass and
+ * have hooks which callback to user-defined interceptor
+ * implementations.
+ * &lt;p&gt;
+ * The original and most general callback type is the {@link MethodInterceptor}, which
+ * in AOP terms enables &quot;around advice&quot;--that is, you can invoke custom code both before
+ * and after the invocation of the &quot;super&quot; method. In addition you can modify the
+ * arguments before calling the super method, or not call it at all.
+ * &lt;p&gt;
+ * Although &lt;code&gt;MethodInterceptor&lt;/code&gt; is generic enough to meet any
+ * interception need, it is often overkill. For simplicity and performance, additional
+ * specialized callback types, such as {@link LazyLoader} are also available.
+ * Often a single callback will be used per enhanced class, but you can control
+ * which callback is used on a per-method basis with a {@link CallbackFilter}.
+ * &lt;p&gt;
+ * The most common uses of this class are embodied in the static helper methods. For
+ * advanced needs, such as customizing the &lt;code&gt;ClassLoader&lt;/code&gt; to use, you should create
+ * a new instance of &lt;code&gt;Enhancer&lt;/code&gt;. Other classes within CGLIB follow a similar pattern.
+ * &lt;p&gt;
+ * All enhanced objects implement the {@link Factory} interface, unless {@link #setUseFactory} is
+ * used to explicitly disable this feature. The &lt;code&gt;Factory&lt;/code&gt; interface provides an API
+ * to change the callbacks of an existing object, as well as a faster and easier way to create
+ * new instances of the same type.
+ * &lt;p&gt;
+ * For an almost drop-in replacement for
+ * &lt;code&gt;java.lang.reflect.Proxy&lt;/code&gt;, see the {@link Proxy} class.
+ */
+@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+public class Enhancer extends AbstractClassGenerator {
+
+<span class="nc" id="L95">	private static final CallbackFilter ALL_ZERO = new CallbackFilter() {</span>
+		public int accept(Method method) {
+<span class="nc" id="L97">			return 0;</span>
+		}
+	};
+
+<span class="nc" id="L101">	private static final Source SOURCE = new Source(Enhancer.class.getName());</span>
+
+<span class="nc" id="L103">	private static final EnhancerKey KEY_FACTORY =</span>
+<span class="nc" id="L104">			(EnhancerKey) KeyFactory.create(EnhancerKey.class, KeyFactory.HASH_ASM_TYPE, null);</span>
+
+	private static final String BOUND_FIELD = &quot;CGLIB$BOUND&quot;;
+
+	private static final String FACTORY_DATA_FIELD = &quot;CGLIB$FACTORY_DATA&quot;;
+
+	private static final String THREAD_CALLBACKS_FIELD = &quot;CGLIB$THREAD_CALLBACKS&quot;;
+
+	private static final String STATIC_CALLBACKS_FIELD = &quot;CGLIB$STATIC_CALLBACKS&quot;;
+
+	private static final String SET_THREAD_CALLBACKS_NAME = &quot;CGLIB$SET_THREAD_CALLBACKS&quot;;
+
+	private static final String SET_STATIC_CALLBACKS_NAME = &quot;CGLIB$SET_STATIC_CALLBACKS&quot;;
+
+	private static final String CONSTRUCTED_FIELD = &quot;CGLIB$CONSTRUCTED&quot;;
+
+	/**
+	 * {@link org.springframework.cglib.core.AbstractClassGenerator.ClassLoaderData#generatedClasses} requires to keep cache key
+	 * in a good shape (the keys should be up and running if the proxy class is alive), and one of the cache keys is
+	 * {@link CallbackFilter}. That is why the generated class contains static field that keeps strong reference to
+	 * the {@link #filter}.
+	 * &lt;p&gt;This dance achieves two goals: ensures generated class is reusable and available through generatedClasses
+	 * cache, and it enables to unload classloader and the related {@link CallbackFilter} in case user does not need
+	 * that&lt;/p&gt;
+	 */
+	private static final String CALLBACK_FILTER_FIELD = &quot;CGLIB$CALLBACK_FILTER&quot;;
+
+<span class="nc" id="L131">	private static final Type OBJECT_TYPE =</span>
+<span class="nc" id="L132">			TypeUtils.parseType(&quot;Object&quot;);</span>
+
+<span class="nc" id="L134">	private static final Type FACTORY =</span>
+<span class="nc" id="L135">			TypeUtils.parseType(&quot;org.springframework.cglib.proxy.Factory&quot;);</span>
+
+<span class="nc" id="L137">	private static final Type ILLEGAL_STATE_EXCEPTION =</span>
+<span class="nc" id="L138">			TypeUtils.parseType(&quot;IllegalStateException&quot;);</span>
+
+<span class="nc" id="L140">	private static final Type ILLEGAL_ARGUMENT_EXCEPTION =</span>
+<span class="nc" id="L141">			TypeUtils.parseType(&quot;IllegalArgumentException&quot;);</span>
+
+<span class="nc" id="L143">	private static final Type THREAD_LOCAL =</span>
+<span class="nc" id="L144">			TypeUtils.parseType(&quot;ThreadLocal&quot;);</span>
+
+<span class="nc" id="L146">	private static final Type CALLBACK =</span>
+<span class="nc" id="L147">			TypeUtils.parseType(&quot;org.springframework.cglib.proxy.Callback&quot;);</span>
+
+<span class="nc" id="L149">	private static final Type CALLBACK_ARRAY =</span>
+<span class="nc" id="L150">			Type.getType(Callback[].class);</span>
+
+<span class="nc" id="L152">	private static final Signature CSTRUCT_NULL =</span>
+<span class="nc" id="L153">			TypeUtils.parseConstructor(&quot;&quot;);</span>
+
+<span class="nc" id="L155">	private static final Signature SET_THREAD_CALLBACKS =</span>
+			new Signature(SET_THREAD_CALLBACKS_NAME, Type.VOID_TYPE, new Type[]{CALLBACK_ARRAY});
+
+<span class="nc" id="L158">	private static final Signature SET_STATIC_CALLBACKS =</span>
+			new Signature(SET_STATIC_CALLBACKS_NAME, Type.VOID_TYPE, new Type[]{CALLBACK_ARRAY});
+
+<span class="nc" id="L161">	private static final Signature NEW_INSTANCE =</span>
+			new Signature(&quot;newInstance&quot;, Constants.TYPE_OBJECT, new Type[]{CALLBACK_ARRAY});
+
+<span class="nc" id="L164">	private static final Signature MULTIARG_NEW_INSTANCE =</span>
+			new Signature(&quot;newInstance&quot;, Constants.TYPE_OBJECT, new Type[]{
+					Constants.TYPE_CLASS_ARRAY,
+					Constants.TYPE_OBJECT_ARRAY,
+					CALLBACK_ARRAY,
+			});
+
+<span class="nc" id="L171">	private static final Signature SINGLE_NEW_INSTANCE =</span>
+			new Signature(&quot;newInstance&quot;, Constants.TYPE_OBJECT, new Type[]{CALLBACK});
+
+<span class="nc" id="L174">	private static final Signature SET_CALLBACK =</span>
+			new Signature(&quot;setCallback&quot;, Type.VOID_TYPE, new Type[]{Type.INT_TYPE, CALLBACK});
+
+<span class="nc" id="L177">	private static final Signature GET_CALLBACK =</span>
+			new Signature(&quot;getCallback&quot;, CALLBACK, new Type[]{Type.INT_TYPE});
+
+<span class="nc" id="L180">	private static final Signature SET_CALLBACKS =</span>
+			new Signature(&quot;setCallbacks&quot;, Type.VOID_TYPE, new Type[]{CALLBACK_ARRAY});
+
+<span class="nc" id="L183">	private static final Signature GET_CALLBACKS =</span>
+			new Signature(&quot;getCallbacks&quot;, CALLBACK_ARRAY, new Type[0]);
+
+<span class="nc" id="L186">	private static final Signature THREAD_LOCAL_GET =</span>
+<span class="nc" id="L187">			TypeUtils.parseSignature(&quot;Object get()&quot;);</span>
+
+<span class="nc" id="L189">	private static final Signature THREAD_LOCAL_SET =</span>
+<span class="nc" id="L190">			TypeUtils.parseSignature(&quot;void set(Object)&quot;);</span>
+
+<span class="nc" id="L192">	private static final Signature BIND_CALLBACKS =</span>
+<span class="nc" id="L193">			TypeUtils.parseSignature(&quot;void CGLIB$BIND_CALLBACKS(Object)&quot;);</span>
+
+	private EnhancerFactoryData currentData;
+
+	private Object currentKey;
+
+
+	/**
+	 * Internal interface, only public due to ClassLoader issues.
+	 */
+	public interface EnhancerKey {
+
+		public Object newInstance(String type,
+				String[] interfaces,
+				WeakCacheKey&lt;CallbackFilter&gt; filter,
+				Type[] callbackTypes,
+				boolean useFactory,
+				boolean interceptDuringConstruction,
+				Long serialVersionUID);
+	}
+
+
+	private Class[] interfaces;
+
+	private CallbackFilter filter;
+
+	private Callback[] callbacks;
+
+	private Type[] callbackTypes;
+
+	private boolean validateCallbackTypes;
+
+	private boolean classOnly;
+
+	private Class superclass;
+
+	private Class[] argumentTypes;
+
+	private Object[] arguments;
+
+<span class="nc" id="L233">	private boolean useFactory = true;</span>
+
+	private Long serialVersionUID;
+
+<span class="nc" id="L237">	private boolean interceptDuringConstruction = true;</span>
+
+	/**
+	 * Create a new &lt;code&gt;Enhancer&lt;/code&gt;. A new &lt;code&gt;Enhancer&lt;/code&gt;
+	 * object should be used for each generated object, and should not
+	 * be shared across threads. To create additional instances of a
+	 * generated class, use the &lt;code&gt;Factory&lt;/code&gt; interface.
+	 * @see Factory
+	 */
+	public Enhancer() {
+<span class="nc" id="L247">		super(SOURCE);</span>
+<span class="nc" id="L248">	}</span>
+
+	/**
+	 * Set the class which the generated class will extend. As a convenience,
+	 * if the supplied superclass is actually an interface, &lt;code&gt;setInterfaces&lt;/code&gt;
+	 * will be called with the appropriate argument instead.
+	 * A non-interface argument must not be declared as final, and must have an
+	 * accessible constructor.
+	 * @param superclass class to extend or interface to implement
+	 * @see #setInterfaces(Class[])
+	 */
+	public void setSuperclass(Class superclass) {
+<span class="nc bnc" id="L260" title="All 4 branches missed.">		if (superclass != null &amp;&amp; superclass.isInterface()) {</span>
+<span class="nc" id="L261">			setInterfaces(new Class[]{superclass});</span>
+		}
+<span class="nc bnc" id="L263" title="All 4 branches missed.">		else if (superclass != null &amp;&amp; superclass.equals(Object.class)) {</span>
+			// affects choice of ClassLoader
+<span class="nc" id="L265">			this.superclass = null;</span>
+		}
+		else {
+<span class="nc" id="L268">			this.superclass = superclass;</span>
+			// SPRING PATCH BEGIN
+<span class="nc" id="L270">			setContextClass(superclass);</span>
+			// SPRING PATCH END
+		}
+<span class="nc" id="L273">	}</span>
+
+	/**
+	 * Set the interfaces to implement. The &lt;code&gt;Factory&lt;/code&gt; interface will
+	 * always be implemented regardless of what is specified here.
+	 * @param interfaces array of interfaces to implement, or null
+	 * @see Factory
+	 */
+	public void setInterfaces(Class[] interfaces) {
+<span class="nc" id="L282">		this.interfaces = interfaces;</span>
+<span class="nc" id="L283">	}</span>
+
+	/**
+	 * Set the {@link CallbackFilter} used to map the generated class' methods
+	 * to a particular callback index.
+	 * New object instances will always use the same mapping, but may use different
+	 * actual callback objects.
+	 * @param filter the callback filter to use when generating a new class
+	 * @see #setCallbacks
+	 */
+	public void setCallbackFilter(CallbackFilter filter) {
+<span class="nc" id="L294">		this.filter = filter;</span>
+<span class="nc" id="L295">	}</span>
+
+
+	/**
+	 * Set the single {@link Callback} to use.
+	 * Ignored if you use {@link #createClass}.
+	 * @param callback the callback to use for all methods
+	 * @see #setCallbacks
+	 */
+	public void setCallback(final Callback callback) {
+<span class="nc" id="L305">		setCallbacks(new Callback[]{callback});</span>
+<span class="nc" id="L306">	}</span>
+
+	/**
+	 * Set the array of callbacks to use.
+	 * Ignored if you use {@link #createClass}.
+	 * You must use a {@link CallbackFilter} to specify the index into this
+	 * array for each method in the proxied class.
+	 * @param callbacks the callback array
+	 * @see #setCallbackFilter
+	 * @see #setCallback
+	 */
+	public void setCallbacks(Callback[] callbacks) {
+<span class="nc bnc" id="L318" title="All 4 branches missed.">		if (callbacks != null &amp;&amp; callbacks.length == 0) {</span>
+<span class="nc" id="L319">			throw new IllegalArgumentException(&quot;Array cannot be empty&quot;);</span>
+		}
+<span class="nc" id="L321">		this.callbacks = callbacks;</span>
+<span class="nc" id="L322">	}</span>
+
+	/**
+	 * Set whether the enhanced object instances should implement
+	 * the {@link Factory} interface.
+	 * This was added for tools that need for proxies to be more
+	 * indistinguishable from their targets. Also, in some cases it may
+	 * be necessary to disable the &lt;code&gt;Factory&lt;/code&gt; interface to
+	 * prevent code from changing the underlying callbacks.
+	 * @param useFactory whether to implement &lt;code&gt;Factory&lt;/code&gt;; default is &lt;code&gt;true&lt;/code&gt;
+	 */
+	public void setUseFactory(boolean useFactory) {
+<span class="nc" id="L334">		this.useFactory = useFactory;</span>
+<span class="nc" id="L335">	}</span>
+
+	/**
+	 * Set whether methods called from within the proxy's constructer
+	 * will be intercepted. The default value is true. Unintercepted methods
+	 * will call the method of the proxy's base class, if it exists.
+	 * @param interceptDuringConstruction whether to intercept methods called from the constructor
+	 */
+	public void setInterceptDuringConstruction(boolean interceptDuringConstruction) {
+<span class="nc" id="L344">		this.interceptDuringConstruction = interceptDuringConstruction;</span>
+<span class="nc" id="L345">	}</span>
+
+	/**
+	 * Set the single type of {@link Callback} to use.
+	 * This may be used instead of {@link #setCallback} when calling
+	 * {@link #createClass}, since it may not be possible to have
+	 * an array of actual callback instances.
+	 * @param callbackType the type of callback to use for all methods
+	 * @see #setCallbackTypes
+	 */
+	public void setCallbackType(Class callbackType) {
+<span class="nc" id="L356">		setCallbackTypes(new Class[]{callbackType});</span>
+<span class="nc" id="L357">	}</span>
+
+	/**
+	 * Set the array of callback types to use.
+	 * This may be used instead of {@link #setCallbacks} when calling
+	 * {@link #createClass}, since it may not be possible to have
+	 * an array of actual callback instances.
+	 * You must use a {@link CallbackFilter} to specify the index into this
+	 * array for each method in the proxied class.
+	 * @param callbackTypes the array of callback types
+	 */
+	public void setCallbackTypes(Class[] callbackTypes) {
+<span class="nc bnc" id="L369" title="All 4 branches missed.">		if (callbackTypes != null &amp;&amp; callbackTypes.length == 0) {</span>
+<span class="nc" id="L370">			throw new IllegalArgumentException(&quot;Array cannot be empty&quot;);</span>
+		}
+<span class="nc" id="L372">		this.callbackTypes = CallbackInfo.determineTypes(callbackTypes);</span>
+<span class="nc" id="L373">	}</span>
+
+	/**
+	 * Generate a new class if necessary and uses the specified
+	 * callbacks (if any) to create a new object instance.
+	 * Uses the no-arg constructor of the superclass.
+	 * @return a new instance
+	 */
+	public Object create() {
+<span class="nc" id="L382">		classOnly = false;</span>
+<span class="nc" id="L383">		argumentTypes = null;</span>
+<span class="nc" id="L384">		return createHelper();</span>
+	}
+
+	/**
+	 * Generate a new class if necessary and uses the specified
+	 * callbacks (if any) to create a new object instance.
+	 * Uses the constructor of the superclass matching the &lt;code&gt;argumentTypes&lt;/code&gt;
+	 * parameter, with the given arguments.
+	 * @param argumentTypes constructor signature
+	 * @param arguments compatible wrapped arguments to pass to constructor
+	 * @return a new instance
+	 */
+	public Object create(Class[] argumentTypes, Object[] arguments) {
+<span class="nc" id="L397">		classOnly = false;</span>
+<span class="nc bnc" id="L398" title="All 6 branches missed.">		if (argumentTypes == null || arguments == null || argumentTypes.length != arguments.length) {</span>
+<span class="nc" id="L399">			throw new IllegalArgumentException(&quot;Arguments must be non-null and of equal length&quot;);</span>
+		}
+<span class="nc" id="L401">		this.argumentTypes = argumentTypes;</span>
+<span class="nc" id="L402">		this.arguments = arguments;</span>
+<span class="nc" id="L403">		return createHelper();</span>
+	}
+
+	/**
+	 * Generate a new class if necessary and return it without creating a new instance.
+	 * This ignores any callbacks that have been set.
+	 * To create a new instance you will have to use reflection, and methods
+	 * called during the constructor will not be intercepted. To avoid this problem,
+	 * use the multi-arg &lt;code&gt;create&lt;/code&gt; method.
+	 * @see #create(Class[], Object[])
+	 */
+	public Class createClass() {
+<span class="nc" id="L415">		classOnly = true;</span>
+<span class="nc" id="L416">		return (Class) createHelper();</span>
+	}
+
+	/**
+	 * Insert a static serialVersionUID field into the generated class.
+	 * @param sUID the field value, or null to avoid generating field.
+	 */
+	public void setSerialVersionUID(Long sUID) {
+<span class="nc" id="L424">		serialVersionUID = sUID;</span>
+<span class="nc" id="L425">	}</span>
+
+	private void preValidate() {
+<span class="nc bnc" id="L428" title="All 2 branches missed.">		if (callbackTypes == null) {</span>
+<span class="nc" id="L429">			callbackTypes = CallbackInfo.determineTypes(callbacks, false);</span>
+<span class="nc" id="L430">			validateCallbackTypes = true;</span>
+		}
+<span class="nc bnc" id="L432" title="All 2 branches missed.">		if (filter == null) {</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">			if (callbackTypes.length &gt; 1) {</span>
+<span class="nc" id="L434">				throw new IllegalStateException(&quot;Multiple callback types possible but no filter specified&quot;);</span>
+			}
+<span class="nc" id="L436">			filter = ALL_ZERO;</span>
+		}
+<span class="nc" id="L438">	}</span>
+
+	private void validate() {
+<span class="nc bnc" id="L441" title="All 4 branches missed.">		if (classOnly ^ (callbacks == null)) {</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">			if (classOnly) {</span>
+<span class="nc" id="L443">				throw new IllegalStateException(&quot;createClass does not accept callbacks&quot;);</span>
+			}
+			else {
+<span class="nc" id="L446">				throw new IllegalStateException(&quot;Callbacks are required&quot;);</span>
+			}
+		}
+<span class="nc bnc" id="L449" title="All 4 branches missed.">		if (classOnly &amp;&amp; (callbackTypes == null)) {</span>
+<span class="nc" id="L450">			throw new IllegalStateException(&quot;Callback types are required&quot;);</span>
+		}
+<span class="nc bnc" id="L452" title="All 2 branches missed.">		if (validateCallbackTypes) {</span>
+<span class="nc" id="L453">			callbackTypes = null;</span>
+		}
+<span class="nc bnc" id="L455" title="All 4 branches missed.">		if (callbacks != null &amp;&amp; callbackTypes != null) {</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">			if (callbacks.length != callbackTypes.length) {</span>
+<span class="nc" id="L457">				throw new IllegalStateException(&quot;Lengths of callback and callback types array must be the same&quot;);</span>
+			}
+<span class="nc" id="L459">			Type[] check = CallbackInfo.determineTypes(callbacks);</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">			for (int i = 0; i &lt; check.length; i++) {</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">				if (!check[i].equals(callbackTypes[i])) {</span>
+<span class="nc" id="L462">					throw new IllegalStateException(&quot;Callback &quot; + check[i] + &quot; is not assignable to &quot; + callbackTypes[i]);</span>
+				}
+			}
+<span class="nc" id="L465">		}</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">		else if (callbacks != null) {</span>
+<span class="nc" id="L467">			callbackTypes = CallbackInfo.determineTypes(callbacks);</span>
+		}
+<span class="nc bnc" id="L469" title="All 2 branches missed.">		if (interfaces != null) {</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">			for (int i = 0; i &lt; interfaces.length; i++) {</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">				if (interfaces[i] == null) {</span>
+<span class="nc" id="L472">					throw new IllegalStateException(&quot;Interfaces cannot be null&quot;);</span>
+				}
+<span class="nc bnc" id="L474" title="All 2 branches missed.">				if (!interfaces[i].isInterface()) {</span>
+<span class="nc" id="L475">					throw new IllegalStateException(interfaces[i] + &quot; is not an interface&quot;);</span>
+				}
+			}
+		}
+<span class="nc" id="L479">	}</span>
+
+	/**
+	 * The idea of the class is to cache relevant java.lang.reflect instances so
+	 * proxy-class can be instantiated faster that when using {@link ReflectUtils#newInstance(Class, Class[], Object[])}
+	 * and {@link Enhancer#setThreadCallbacks(Class, Callback[])}
+	 */
+	static class EnhancerFactoryData {
+
+		public final Class generatedClass;
+
+		private final Method setThreadCallbacks;
+
+		private final Class[] primaryConstructorArgTypes;
+
+		private final Constructor primaryConstructor;
+
+<span class="nc" id="L496">		public EnhancerFactoryData(Class generatedClass, Class[] primaryConstructorArgTypes, boolean classOnly) {</span>
+<span class="nc" id="L497">			this.generatedClass = generatedClass;</span>
+			try {
+<span class="nc" id="L499">				setThreadCallbacks = getCallbacksSetter(generatedClass, SET_THREAD_CALLBACKS_NAME);</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">				if (classOnly) {</span>
+<span class="nc" id="L501">					this.primaryConstructorArgTypes = null;</span>
+<span class="nc" id="L502">					this.primaryConstructor = null;</span>
+				}
+				else {
+<span class="nc" id="L505">					this.primaryConstructorArgTypes = primaryConstructorArgTypes;</span>
+<span class="nc" id="L506">					this.primaryConstructor = ReflectUtils.getConstructor(generatedClass, primaryConstructorArgTypes);</span>
+				}
+			}
+<span class="nc" id="L509">			catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L510">				throw new CodeGenerationException(e);</span>
+<span class="nc" id="L511">			}</span>
+<span class="nc" id="L512">		}</span>
+
+		/**
+		 * Creates proxy instance for given argument types, and assigns the callbacks.
+		 * Ideally, for each proxy class, just one set of argument types should be used,
+		 * otherwise it would have to spend time on constructor lookup.
+		 * Technically, it is a re-implementation of {@link Enhancer#createUsingReflection(Class)},
+		 * with &quot;cache {@link #setThreadCallbacks} and {@link #primaryConstructor}&quot;
+		 * @param argumentTypes constructor argument types
+		 * @param arguments constructor arguments
+		 * @param callbacks callbacks to set for the new instance
+		 * @return newly created proxy
+		 * @see #createUsingReflection(Class)
+		 */
+		public Object newInstance(Class[] argumentTypes, Object[] arguments, Callback[] callbacks) {
+<span class="nc" id="L527">			setThreadCallbacks(callbacks);</span>
+			try {
+				// Explicit reference equality is added here just in case Arrays.equals does not have one
+<span class="nc bnc" id="L530" title="All 2 branches missed.">				if (primaryConstructorArgTypes == argumentTypes ||</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">						Arrays.equals(primaryConstructorArgTypes, argumentTypes)) {</span>
+					// If we have relevant Constructor instance at hand, just call it
+					// This skips &quot;get constructors&quot; machinery
+<span class="nc" id="L534">					return ReflectUtils.newInstance(primaryConstructor, arguments);</span>
+				}
+				// Take a slow path if observing unexpected argument types
+<span class="nc" id="L537">				return ReflectUtils.newInstance(generatedClass, argumentTypes, arguments);</span>
+			}
+			finally {
+				// clear thread callbacks to allow them to be gc'd
+<span class="nc" id="L541">				setThreadCallbacks(null);</span>
+			}
+
+		}
+
+		private void setThreadCallbacks(Callback[] callbacks) {
+			try {
+<span class="nc" id="L548">				setThreadCallbacks.invoke(generatedClass, (Object) callbacks);</span>
+			}
+<span class="nc" id="L550">			catch (IllegalAccessException e) {</span>
+<span class="nc" id="L551">				throw new CodeGenerationException(e);</span>
+			}
+<span class="nc" id="L553">			catch (InvocationTargetException e) {</span>
+<span class="nc" id="L554">				throw new CodeGenerationException(e.getTargetException());</span>
+<span class="nc" id="L555">			}</span>
+<span class="nc" id="L556">		}</span>
+	}
+
+	private Object createHelper() {
+<span class="nc" id="L560">		preValidate();</span>
+<span class="nc bnc" id="L561" title="All 2 branches missed.">		Object key = KEY_FACTORY.newInstance((superclass != null) ? superclass.getName() : null,</span>
+<span class="nc bnc" id="L562" title="All 2 branches missed.">				ReflectUtils.getNames(interfaces),</span>
+				filter == ALL_ZERO ? null : new WeakCacheKey&lt;CallbackFilter&gt;(filter),
+				callbackTypes,
+				useFactory,
+				interceptDuringConstruction,
+				serialVersionUID);
+<span class="nc" id="L568">		this.currentKey = key;</span>
+<span class="nc" id="L569">		Object result = super.create(key);</span>
+<span class="nc" id="L570">		return result;</span>
+	}
+
+	@Override
+	protected Class generate(ClassLoaderData data) {
+<span class="nc" id="L575">		validate();</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">		if (superclass != null) {</span>
+<span class="nc" id="L577">			setNamePrefix(superclass.getName());</span>
+		}
+<span class="nc bnc" id="L579" title="All 2 branches missed.">		else if (interfaces != null) {</span>
+<span class="nc" id="L580">			setNamePrefix(interfaces[ReflectUtils.findPackageProtected(interfaces)].getName());</span>
+		}
+<span class="nc" id="L582">		return super.generate(data);</span>
+	}
+
+	protected ClassLoader getDefaultClassLoader() {
+<span class="nc bnc" id="L586" title="All 2 branches missed.">		if (superclass != null) {</span>
+<span class="nc" id="L587">			return superclass.getClassLoader();</span>
+		}
+<span class="nc bnc" id="L589" title="All 2 branches missed.">		else if (interfaces != null) {</span>
+<span class="nc" id="L590">			return interfaces[0].getClassLoader();</span>
+		}
+		else {
+<span class="nc" id="L593">			return null;</span>
+		}
+	}
+
+	protected ProtectionDomain getProtectionDomain() {
+<span class="nc bnc" id="L598" title="All 2 branches missed.">		if (superclass != null) {</span>
+<span class="nc" id="L599">			return ReflectUtils.getProtectionDomain(superclass);</span>
+		}
+<span class="nc bnc" id="L601" title="All 2 branches missed.">		else if (interfaces != null) {</span>
+<span class="nc" id="L602">			return ReflectUtils.getProtectionDomain(interfaces[0]);</span>
+		}
+		else {
+<span class="nc" id="L605">			return null;</span>
+		}
+	}
+
+	private Signature rename(Signature sig, int index) {
+<span class="nc" id="L610">		return new Signature(&quot;CGLIB$&quot; + sig.getName() + &quot;$&quot; + index,</span>
+<span class="nc" id="L611">				sig.getDescriptor());</span>
+	}
+
+	/**
+	 * Finds all of the methods that will be extended by an
+	 * Enhancer-generated class using the specified superclass and
+	 * interfaces. This can be useful in building a list of Callback
+	 * objects. The methods are added to the end of the given list.  Due
+	 * to the subclassing nature of the classes generated by Enhancer,
+	 * the methods are guaranteed to be non-static, non-final, and
+	 * non-private. Each method signature will only occur once, even if
+	 * it occurs in multiple classes.
+	 * @param superclass the class that will be extended, or null
+	 * @param interfaces the list of interfaces that will be implemented, or null
+	 * @param methods the list into which to copy the applicable methods
+	 */
+	public static void getMethods(Class superclass, Class[] interfaces, List methods) {
+<span class="nc" id="L628">		getMethods(superclass, interfaces, methods, null, null);</span>
+<span class="nc" id="L629">	}</span>
+
+	private static void getMethods(Class superclass, Class[] interfaces, List methods, List interfaceMethods, Set forcePublic) {
+<span class="nc" id="L632">		ReflectUtils.addAllMethods(superclass, methods);</span>
+<span class="nc bnc" id="L633" title="All 2 branches missed.">		List target = (interfaceMethods != null) ? interfaceMethods : methods;</span>
+<span class="nc bnc" id="L634" title="All 2 branches missed.">		if (interfaces != null) {</span>
+<span class="nc bnc" id="L635" title="All 2 branches missed.">			for (int i = 0; i &lt; interfaces.length; i++) {</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">				if (interfaces[i] != Factory.class) {</span>
+<span class="nc" id="L637">					ReflectUtils.addAllMethods(interfaces[i], target);</span>
+				}
+			}
+		}
+<span class="nc bnc" id="L641" title="All 2 branches missed.">		if (interfaceMethods != null) {</span>
+<span class="nc bnc" id="L642" title="All 2 branches missed.">			if (forcePublic != null) {</span>
+<span class="nc" id="L643">				forcePublic.addAll(MethodWrapper.createSet(interfaceMethods));</span>
+			}
+<span class="nc" id="L645">			methods.addAll(interfaceMethods);</span>
+		}
+<span class="nc" id="L647">		CollectionUtils.filter(methods, new RejectModifierPredicate(Constants.ACC_STATIC));</span>
+<span class="nc" id="L648">		CollectionUtils.filter(methods, new VisibilityPredicate(superclass, true));</span>
+<span class="nc" id="L649">		CollectionUtils.filter(methods, new DuplicatesPredicate());</span>
+<span class="nc" id="L650">		CollectionUtils.filter(methods, new RejectModifierPredicate(Constants.ACC_FINAL));</span>
+<span class="nc" id="L651">	}</span>
+
+	public void generateClass(ClassVisitor v) throws Exception {
+<span class="nc bnc" id="L654" title="All 2 branches missed.">		Class sc = (superclass == null) ? Object.class : superclass;</span>
+
+<span class="nc bnc" id="L656" title="All 2 branches missed.">		if (TypeUtils.isFinal(sc.getModifiers()))</span>
+<span class="nc" id="L657">			throw new IllegalArgumentException(&quot;Cannot subclass final class &quot; + sc.getName());</span>
+<span class="nc" id="L658">		List constructors = new ArrayList(Arrays.asList(sc.getDeclaredConstructors()));</span>
+<span class="nc" id="L659">		filterConstructors(sc, constructors);</span>
+
+		// Order is very important: must add superclass, then
+		// its superclass chain, then each interface and
+		// its superinterfaces.
+<span class="nc" id="L664">		List actualMethods = new ArrayList();</span>
+<span class="nc" id="L665">		List interfaceMethods = new ArrayList();</span>
+<span class="nc" id="L666">		final Set forcePublic = new HashSet();</span>
+<span class="nc" id="L667">		getMethods(sc, interfaces, actualMethods, interfaceMethods, forcePublic);</span>
+
+<span class="nc" id="L669">		List methods = CollectionUtils.transform(actualMethods, new Transformer() {</span>
+			public Object transform(Object value) {
+<span class="nc" id="L671">				Method method = (Method) value;</span>
+<span class="nc" id="L672">				int modifiers = Constants.ACC_FINAL</span>
+<span class="nc" id="L673">						| (method.getModifiers()</span>
+						&amp; ~Constants.ACC_ABSTRACT
+						&amp; ~Constants.ACC_NATIVE
+						&amp; ~Constants.ACC_SYNCHRONIZED);
+<span class="nc bnc" id="L677" title="All 2 branches missed.">				if (forcePublic.contains(MethodWrapper.create(method))) {</span>
+<span class="nc" id="L678">					modifiers = (modifiers &amp; ~Constants.ACC_PROTECTED) | Constants.ACC_PUBLIC;</span>
+				}
+<span class="nc" id="L680">				return ReflectUtils.getMethodInfo(method, modifiers);</span>
+			}
+		});
+
+<span class="nc" id="L684">		ClassEmitter e = new ClassEmitter(v);</span>
+<span class="nc bnc" id="L685" title="All 2 branches missed.">		if (currentData == null) {</span>
+<span class="nc" id="L686">			e.begin_class(Constants.V1_2,</span>
+					Constants.ACC_PUBLIC,
+<span class="nc" id="L688">					getClassName(),</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">					Type.getType(sc),</span>
+					(useFactory ?
+<span class="nc" id="L691">							TypeUtils.add(TypeUtils.getTypes(interfaces), FACTORY) :</span>
+<span class="nc" id="L692">							TypeUtils.getTypes(interfaces)),</span>
+					Constants.SOURCE_FILE);
+		}
+		else {
+<span class="nc" id="L696">			e.begin_class(Constants.V1_2,</span>
+					Constants.ACC_PUBLIC,
+<span class="nc" id="L698">					getClassName(),</span>
+					null,
+					new Type[]{FACTORY},
+					Constants.SOURCE_FILE);
+		}
+<span class="nc" id="L703">		List constructorInfo = CollectionUtils.transform(constructors, MethodInfoTransformer.getInstance());</span>
+
+<span class="nc" id="L705">		e.declare_field(Constants.ACC_PRIVATE, BOUND_FIELD, Type.BOOLEAN_TYPE, null);</span>
+<span class="nc" id="L706">		e.declare_field(Constants.ACC_PUBLIC | Constants.ACC_STATIC, FACTORY_DATA_FIELD, OBJECT_TYPE, null);</span>
+<span class="nc bnc" id="L707" title="All 2 branches missed.">		if (!interceptDuringConstruction) {</span>
+<span class="nc" id="L708">			e.declare_field(Constants.ACC_PRIVATE, CONSTRUCTED_FIELD, Type.BOOLEAN_TYPE, null);</span>
+		}
+<span class="nc" id="L710">		e.declare_field(Constants.PRIVATE_FINAL_STATIC, THREAD_CALLBACKS_FIELD, THREAD_LOCAL, null);</span>
+<span class="nc" id="L711">		e.declare_field(Constants.PRIVATE_FINAL_STATIC, STATIC_CALLBACKS_FIELD, CALLBACK_ARRAY, null);</span>
+<span class="nc bnc" id="L712" title="All 2 branches missed.">		if (serialVersionUID != null) {</span>
+<span class="nc" id="L713">			e.declare_field(Constants.PRIVATE_FINAL_STATIC, Constants.SUID_FIELD_NAME, Type.LONG_TYPE, serialVersionUID);</span>
+		}
+
+<span class="nc bnc" id="L716" title="All 2 branches missed.">		for (int i = 0; i &lt; callbackTypes.length; i++) {</span>
+<span class="nc" id="L717">			e.declare_field(Constants.ACC_PRIVATE, getCallbackField(i), callbackTypes[i], null);</span>
+		}
+		// This is declared private to avoid &quot;public field&quot; pollution
+<span class="nc" id="L720">		e.declare_field(Constants.ACC_PRIVATE | Constants.ACC_STATIC, CALLBACK_FILTER_FIELD, OBJECT_TYPE, null);</span>
+
+<span class="nc bnc" id="L722" title="All 2 branches missed.">		if (currentData == null) {</span>
+<span class="nc" id="L723">			emitMethods(e, methods, actualMethods);</span>
+<span class="nc" id="L724">			emitConstructors(e, constructorInfo);</span>
+		}
+		else {
+<span class="nc" id="L727">			emitDefaultConstructor(e);</span>
+		}
+<span class="nc" id="L729">		emitSetThreadCallbacks(e);</span>
+<span class="nc" id="L730">		emitSetStaticCallbacks(e);</span>
+<span class="nc" id="L731">		emitBindCallbacks(e);</span>
+
+<span class="nc bnc" id="L733" title="All 4 branches missed.">		if (useFactory || currentData != null) {</span>
+<span class="nc" id="L734">			int[] keys = getCallbackKeys();</span>
+<span class="nc" id="L735">			emitNewInstanceCallbacks(e);</span>
+<span class="nc" id="L736">			emitNewInstanceCallback(e);</span>
+<span class="nc" id="L737">			emitNewInstanceMultiarg(e, constructorInfo);</span>
+<span class="nc" id="L738">			emitGetCallback(e, keys);</span>
+<span class="nc" id="L739">			emitSetCallback(e, keys);</span>
+<span class="nc" id="L740">			emitGetCallbacks(e);</span>
+<span class="nc" id="L741">			emitSetCallbacks(e);</span>
+		}
+
+<span class="nc" id="L744">		e.end_class();</span>
+<span class="nc" id="L745">	}</span>
+
+	/**
+	 * Filter the list of constructors from the superclass. The
+	 * constructors which remain will be included in the generated
+	 * class. The default implementation is to filter out all private
+	 * constructors, but subclasses may extend Enhancer to override this
+	 * behavior.
+	 * @param sc the superclass
+	 * @param constructors the list of all declared constructors from the superclass
+	 * @throws IllegalArgumentException if there are no non-private constructors
+	 */
+	protected void filterConstructors(Class sc, List constructors) {
+<span class="nc" id="L758">		CollectionUtils.filter(constructors, new VisibilityPredicate(sc, true));</span>
+<span class="nc bnc" id="L759" title="All 2 branches missed.">		if (constructors.size() == 0)</span>
+<span class="nc" id="L760">			throw new IllegalArgumentException(&quot;No visible constructors in &quot; + sc);</span>
+<span class="nc" id="L761">	}</span>
+
+	/**
+	 * This method should not be called in regular flow.
+	 * Technically speaking {@link #wrapCachedClass(Class)} uses {@link EnhancerFactoryData} as a cache value,
+	 * and the latter enables faster instantiation than plain old reflection lookup and invoke.
+	 * This method is left intact for backward compatibility reasons: just in case it was ever used.
+	 * @param type class to instantiate
+	 * @return newly created proxy instance
+	 * @throws Exception if something goes wrong
+	 */
+	protected Object firstInstance(Class type) throws Exception {
+<span class="nc bnc" id="L773" title="All 2 branches missed.">		if (classOnly) {</span>
+<span class="nc" id="L774">			return type;</span>
+		}
+		else {
+<span class="nc" id="L777">			return createUsingReflection(type);</span>
+		}
+	}
+
+	protected Object nextInstance(Object instance) {
+<span class="nc" id="L782">		EnhancerFactoryData data = (EnhancerFactoryData) instance;</span>
+
+<span class="nc bnc" id="L784" title="All 2 branches missed.">		if (classOnly) {</span>
+<span class="nc" id="L785">			return data.generatedClass;</span>
+		}
+
+<span class="nc" id="L788">		Class[] argumentTypes = this.argumentTypes;</span>
+<span class="nc" id="L789">		Object[] arguments = this.arguments;</span>
+<span class="nc bnc" id="L790" title="All 2 branches missed.">		if (argumentTypes == null) {</span>
+<span class="nc" id="L791">			argumentTypes = Constants.EMPTY_CLASS_ARRAY;</span>
+<span class="nc" id="L792">			arguments = null;</span>
+		}
+<span class="nc" id="L794">		return data.newInstance(argumentTypes, arguments, callbacks);</span>
+	}
+
+	@Override
+	protected Object wrapCachedClass(Class klass) {
+<span class="nc" id="L799">		Class[] argumentTypes = this.argumentTypes;</span>
+<span class="nc bnc" id="L800" title="All 2 branches missed.">		if (argumentTypes == null) {</span>
+<span class="nc" id="L801">			argumentTypes = Constants.EMPTY_CLASS_ARRAY;</span>
+		}
+<span class="nc" id="L803">		EnhancerFactoryData factoryData = new EnhancerFactoryData(klass, argumentTypes, classOnly);</span>
+<span class="nc" id="L804">		Field factoryDataField = null;</span>
+		try {
+			// The subsequent dance is performed just once for each class,
+			// so it does not matter much how fast it goes
+<span class="nc" id="L808">			factoryDataField = klass.getField(FACTORY_DATA_FIELD);</span>
+<span class="nc" id="L809">			factoryDataField.set(null, factoryData);</span>
+<span class="nc" id="L810">			Field callbackFilterField = klass.getDeclaredField(CALLBACK_FILTER_FIELD);</span>
+<span class="nc" id="L811">			callbackFilterField.setAccessible(true);</span>
+<span class="nc" id="L812">			callbackFilterField.set(null, this.filter);</span>
+		}
+<span class="nc" id="L814">		catch (NoSuchFieldException e) {</span>
+<span class="nc" id="L815">			throw new CodeGenerationException(e);</span>
+		}
+<span class="nc" id="L817">		catch (IllegalAccessException e) {</span>
+<span class="nc" id="L818">			throw new CodeGenerationException(e);</span>
+<span class="nc" id="L819">		}</span>
+<span class="nc" id="L820">		return new WeakReference&lt;EnhancerFactoryData&gt;(factoryData);</span>
+	}
+
+	@Override
+	protected Object unwrapCachedValue(Object cached) {
+<span class="nc bnc" id="L825" title="All 2 branches missed.">		if (currentKey instanceof EnhancerKey) {</span>
+<span class="nc" id="L826">			EnhancerFactoryData data = ((WeakReference&lt;EnhancerFactoryData&gt;) cached).get();</span>
+<span class="nc" id="L827">			return data;</span>
+		}
+<span class="nc" id="L829">		return super.unwrapCachedValue(cached);</span>
+	}
+
+	/**
+	 * Call this method to register the {@link Callback} array to use before
+	 * creating a new instance of the generated class via reflection. If you are using
+	 * an instance of &lt;code&gt;Enhancer&lt;/code&gt; or the {@link Factory} interface to create
+	 * new instances, this method is unnecessary. Its primary use is for when you want to
+	 * cache and reuse a generated class yourself, and the generated class does
+	 * &lt;i&gt;not&lt;/i&gt; implement the {@link Factory} interface.
+	 * &lt;p&gt;
+	 * Note that this method only registers the callbacks on the current thread.
+	 * If you want to register callbacks for instances created by multiple threads,
+	 * use {@link #registerStaticCallbacks}.
+	 * &lt;p&gt;
+	 * The registered callbacks are overwritten and subsequently cleared
+	 * when calling any of the &lt;code&gt;create&lt;/code&gt; methods (such as
+	 * {@link #create}), or any {@link Factory} &lt;code&gt;newInstance&lt;/code&gt; method.
+	 * Otherwise they are &lt;i&gt;not&lt;/i&gt; cleared, and you should be careful to set them
+	 * back to &lt;code&gt;null&lt;/code&gt; after creating new instances via reflection if
+	 * memory leakage is a concern.
+	 * @param generatedClass a class previously created by {@link Enhancer}
+	 * @param callbacks the array of callbacks to use when instances of the generated
+	 * class are created
+	 * @see #setUseFactory
+	 */
+	public static void registerCallbacks(Class generatedClass, Callback[] callbacks) {
+<span class="nc" id="L856">		setThreadCallbacks(generatedClass, callbacks);</span>
+<span class="nc" id="L857">	}</span>
+
+	/**
+	 * Similar to {@link #registerCallbacks}, but suitable for use
+	 * when multiple threads will be creating instances of the generated class.
+	 * The thread-level callbacks will always override the static callbacks.
+	 * Static callbacks are never cleared.
+	 * @param generatedClass a class previously created by {@link Enhancer}
+	 * @param callbacks the array of callbacks to use when instances of the generated
+	 * class are created
+	 */
+	public static void registerStaticCallbacks(Class generatedClass, Callback[] callbacks) {
+<span class="nc" id="L869">		setCallbacksHelper(generatedClass, callbacks, SET_STATIC_CALLBACKS_NAME);</span>
+<span class="nc" id="L870">	}</span>
+
+	/**
+	 * Determine if a class was generated using &lt;code&gt;Enhancer&lt;/code&gt;.
+	 * @param type any class
+	 * @return whether the class was generated  using &lt;code&gt;Enhancer&lt;/code&gt;
+	 */
+	public static boolean isEnhanced(Class type) {
+		try {
+<span class="nc" id="L879">			getCallbacksSetter(type, SET_THREAD_CALLBACKS_NAME);</span>
+<span class="nc" id="L880">			return true;</span>
+		}
+<span class="nc" id="L882">		catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L883">			return false;</span>
+		}
+	}
+
+	private static void setThreadCallbacks(Class type, Callback[] callbacks) {
+<span class="nc" id="L888">		setCallbacksHelper(type, callbacks, SET_THREAD_CALLBACKS_NAME);</span>
+<span class="nc" id="L889">	}</span>
+
+	private static void setCallbacksHelper(Class type, Callback[] callbacks, String methodName) {
+		// TODO: optimize
+		try {
+<span class="nc" id="L894">			Method setter = getCallbacksSetter(type, methodName);</span>
+<span class="nc" id="L895">			setter.invoke(null, new Object[]{callbacks});</span>
+		}
+<span class="nc" id="L897">		catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L898">			throw new IllegalArgumentException(type + &quot; is not an enhanced class&quot;);</span>
+		}
+<span class="nc" id="L900">		catch (IllegalAccessException e) {</span>
+<span class="nc" id="L901">			throw new CodeGenerationException(e);</span>
+		}
+<span class="nc" id="L903">		catch (InvocationTargetException e) {</span>
+<span class="nc" id="L904">			throw new CodeGenerationException(e);</span>
+<span class="nc" id="L905">		}</span>
+<span class="nc" id="L906">	}</span>
+
+	private static Method getCallbacksSetter(Class type, String methodName) throws NoSuchMethodException {
+<span class="nc" id="L909">		return type.getDeclaredMethod(methodName, new Class[]{Callback[].class});</span>
+	}
+
+	/**
+	 * Instantiates a proxy instance and assigns callback values.
+	 * Implementation detail: java.lang.reflect instances are not cached, so this method should not
+	 * be used on a hot path.
+	 * This method is used when {@link #setUseCache(boolean)} is set to {@code false}.
+	 * @param type class to instantiate
+	 * @return newly created instance
+	 */
+	private Object createUsingReflection(Class type) {
+<span class="nc" id="L921">		setThreadCallbacks(type, callbacks);</span>
+		try {
+
+<span class="nc bnc" id="L924" title="All 2 branches missed.">			if (argumentTypes != null) {</span>
+
+<span class="nc" id="L926">				return ReflectUtils.newInstance(type, argumentTypes, arguments);</span>
+
+			}
+			else {
+
+<span class="nc" id="L931">				return ReflectUtils.newInstance(type);</span>
+
+			}
+		}
+		finally {
+			// clear thread callbacks to allow them to be gc'd
+<span class="nc" id="L937">			setThreadCallbacks(type, null);</span>
+		}
+	}
+
+	/**
+	 * Helper method to create an intercepted object.
+	 * For finer control over the generated instance, use a new instance of &lt;code&gt;Enhancer&lt;/code&gt;
+	 * instead of this static method.
+	 * @param type class to extend or interface to implement
+	 * @param callback the callback to use for all methods
+	 */
+	public static Object create(Class type, Callback callback) {
+<span class="nc" id="L949">		Enhancer e = new Enhancer();</span>
+<span class="nc" id="L950">		e.setSuperclass(type);</span>
+<span class="nc" id="L951">		e.setCallback(callback);</span>
+<span class="nc" id="L952">		return e.create();</span>
+	}
+
+	/**
+	 * Helper method to create an intercepted object.
+	 * For finer control over the generated instance, use a new instance of &lt;code&gt;Enhancer&lt;/code&gt;
+	 * instead of this static method.
+	 * @param superclass class to extend or interface to implement
+	 * @param interfaces array of interfaces to implement, or null
+	 * @param callback the callback to use for all methods
+	 */
+	public static Object create(Class superclass, Class interfaces[], Callback callback) {
+<span class="nc" id="L964">		Enhancer e = new Enhancer();</span>
+<span class="nc" id="L965">		e.setSuperclass(superclass);</span>
+<span class="nc" id="L966">		e.setInterfaces(interfaces);</span>
+<span class="nc" id="L967">		e.setCallback(callback);</span>
+<span class="nc" id="L968">		return e.create();</span>
+	}
+
+	/**
+	 * Helper method to create an intercepted object.
+	 * For finer control over the generated instance, use a new instance of &lt;code&gt;Enhancer&lt;/code&gt;
+	 * instead of this static method.
+	 * @param superclass class to extend or interface to implement
+	 * @param interfaces array of interfaces to implement, or null
+	 * @param filter the callback filter to use when generating a new class
+	 * @param callbacks callback implementations to use for the enhanced object
+	 */
+	public static Object create(Class superclass, Class[] interfaces, CallbackFilter filter, Callback[] callbacks) {
+<span class="nc" id="L981">		Enhancer e = new Enhancer();</span>
+<span class="nc" id="L982">		e.setSuperclass(superclass);</span>
+<span class="nc" id="L983">		e.setInterfaces(interfaces);</span>
+<span class="nc" id="L984">		e.setCallbackFilter(filter);</span>
+<span class="nc" id="L985">		e.setCallbacks(callbacks);</span>
+<span class="nc" id="L986">		return e.create();</span>
+	}
+
+	private void emitDefaultConstructor(ClassEmitter ce) {
+		Constructor&lt;Object&gt; declaredConstructor;
+		try {
+<span class="nc" id="L992">			declaredConstructor = Object.class.getDeclaredConstructor();</span>
+		}
+<span class="nc" id="L994">		catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L995">			throw new IllegalStateException(&quot;Object should have default constructor &quot;, e);</span>
+<span class="nc" id="L996">		}</span>
+<span class="nc" id="L997">		MethodInfo constructor = (MethodInfo) MethodInfoTransformer.getInstance().transform(declaredConstructor);</span>
+<span class="nc" id="L998">		CodeEmitter e = EmitUtils.begin_method(ce, constructor, Constants.ACC_PUBLIC);</span>
+<span class="nc" id="L999">		e.load_this();</span>
+<span class="nc" id="L1000">		e.dup();</span>
+<span class="nc" id="L1001">		Signature sig = constructor.getSignature();</span>
+<span class="nc" id="L1002">		e.super_invoke_constructor(sig);</span>
+<span class="nc" id="L1003">		e.return_value();</span>
+<span class="nc" id="L1004">		e.end_method();</span>
+<span class="nc" id="L1005">	}</span>
+
+	private void emitConstructors(ClassEmitter ce, List constructors) {
+<span class="nc" id="L1008">		boolean seenNull = false;</span>
+<span class="nc bnc" id="L1009" title="All 2 branches missed.">		for (Iterator it = constructors.iterator(); it.hasNext(); ) {</span>
+<span class="nc" id="L1010">			MethodInfo constructor = (MethodInfo) it.next();</span>
+<span class="nc bnc" id="L1011" title="All 4 branches missed.">			if (currentData != null &amp;&amp; !&quot;()V&quot;.equals(constructor.getSignature().getDescriptor())) {</span>
+<span class="nc" id="L1012">				continue;</span>
+			}
+<span class="nc" id="L1014">			CodeEmitter e = EmitUtils.begin_method(ce, constructor, Constants.ACC_PUBLIC);</span>
+<span class="nc" id="L1015">			e.load_this();</span>
+<span class="nc" id="L1016">			e.dup();</span>
+<span class="nc" id="L1017">			e.load_args();</span>
+<span class="nc" id="L1018">			Signature sig = constructor.getSignature();</span>
+<span class="nc bnc" id="L1019" title="All 4 branches missed.">			seenNull = seenNull || sig.getDescriptor().equals(&quot;()V&quot;);</span>
+<span class="nc" id="L1020">			e.super_invoke_constructor(sig);</span>
+<span class="nc bnc" id="L1021" title="All 2 branches missed.">			if (currentData == null) {</span>
+<span class="nc" id="L1022">				e.invoke_static_this(BIND_CALLBACKS);</span>
+<span class="nc bnc" id="L1023" title="All 2 branches missed.">				if (!interceptDuringConstruction) {</span>
+<span class="nc" id="L1024">					e.load_this();</span>
+<span class="nc" id="L1025">					e.push(1);</span>
+<span class="nc" id="L1026">					e.putfield(CONSTRUCTED_FIELD);</span>
+				}
+			}
+<span class="nc" id="L1029">			e.return_value();</span>
+<span class="nc" id="L1030">			e.end_method();</span>
+<span class="nc" id="L1031">		}</span>
+<span class="nc bnc" id="L1032" title="All 6 branches missed.">		if (!classOnly &amp;&amp; !seenNull &amp;&amp; arguments == null)</span>
+<span class="nc" id="L1033">			throw new IllegalArgumentException(&quot;Superclass has no null constructors but no arguments were given&quot;);</span>
+<span class="nc" id="L1034">	}</span>
+
+	private int[] getCallbackKeys() {
+<span class="nc" id="L1037">		int[] keys = new int[callbackTypes.length];</span>
+<span class="nc bnc" id="L1038" title="All 2 branches missed.">		for (int i = 0; i &lt; callbackTypes.length; i++) {</span>
+<span class="nc" id="L1039">			keys[i] = i;</span>
+		}
+<span class="nc" id="L1041">		return keys;</span>
+	}
+
+	private void emitGetCallback(ClassEmitter ce, int[] keys) {
+<span class="nc" id="L1045">		final CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC, GET_CALLBACK, null);</span>
+<span class="nc" id="L1046">		e.load_this();</span>
+<span class="nc" id="L1047">		e.invoke_static_this(BIND_CALLBACKS);</span>
+<span class="nc" id="L1048">		e.load_this();</span>
+<span class="nc" id="L1049">		e.load_arg(0);</span>
+<span class="nc" id="L1050">		e.process_switch(keys, new ProcessSwitchCallback() {</span>
+			public void processCase(int key, Label end) {
+<span class="nc" id="L1052">				e.getfield(getCallbackField(key));</span>
+<span class="nc" id="L1053">				e.goTo(end);</span>
+<span class="nc" id="L1054">			}</span>
+
+			public void processDefault() {
+<span class="nc" id="L1057">				e.pop(); // stack height</span>
+<span class="nc" id="L1058">				e.aconst_null();</span>
+<span class="nc" id="L1059">			}</span>
+		});
+<span class="nc" id="L1061">		e.return_value();</span>
+<span class="nc" id="L1062">		e.end_method();</span>
+<span class="nc" id="L1063">	}</span>
+
+	private void emitSetCallback(ClassEmitter ce, int[] keys) {
+<span class="nc" id="L1066">		final CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC, SET_CALLBACK, null);</span>
+<span class="nc" id="L1067">		e.load_arg(0);</span>
+<span class="nc" id="L1068">		e.process_switch(keys, new ProcessSwitchCallback() {</span>
+			public void processCase(int key, Label end) {
+<span class="nc" id="L1070">				e.load_this();</span>
+<span class="nc" id="L1071">				e.load_arg(1);</span>
+<span class="nc" id="L1072">				e.checkcast(callbackTypes[key]);</span>
+<span class="nc" id="L1073">				e.putfield(getCallbackField(key));</span>
+<span class="nc" id="L1074">				e.goTo(end);</span>
+<span class="nc" id="L1075">			}</span>
+
+			public void processDefault() {
+				// TODO: error?
+<span class="nc" id="L1079">			}</span>
+		});
+<span class="nc" id="L1081">		e.return_value();</span>
+<span class="nc" id="L1082">		e.end_method();</span>
+<span class="nc" id="L1083">	}</span>
+
+	private void emitSetCallbacks(ClassEmitter ce) {
+<span class="nc" id="L1086">		CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC, SET_CALLBACKS, null);</span>
+<span class="nc" id="L1087">		e.load_this();</span>
+<span class="nc" id="L1088">		e.load_arg(0);</span>
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">		for (int i = 0; i &lt; callbackTypes.length; i++) {</span>
+<span class="nc" id="L1090">			e.dup2();</span>
+<span class="nc" id="L1091">			e.aaload(i);</span>
+<span class="nc" id="L1092">			e.checkcast(callbackTypes[i]);</span>
+<span class="nc" id="L1093">			e.putfield(getCallbackField(i));</span>
+		}
+<span class="nc" id="L1095">		e.return_value();</span>
+<span class="nc" id="L1096">		e.end_method();</span>
+<span class="nc" id="L1097">	}</span>
+
+	private void emitGetCallbacks(ClassEmitter ce) {
+<span class="nc" id="L1100">		CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC, GET_CALLBACKS, null);</span>
+<span class="nc" id="L1101">		e.load_this();</span>
+<span class="nc" id="L1102">		e.invoke_static_this(BIND_CALLBACKS);</span>
+<span class="nc" id="L1103">		e.load_this();</span>
+<span class="nc" id="L1104">		e.push(callbackTypes.length);</span>
+<span class="nc" id="L1105">		e.newarray(CALLBACK);</span>
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">		for (int i = 0; i &lt; callbackTypes.length; i++) {</span>
+<span class="nc" id="L1107">			e.dup();</span>
+<span class="nc" id="L1108">			e.push(i);</span>
+<span class="nc" id="L1109">			e.load_this();</span>
+<span class="nc" id="L1110">			e.getfield(getCallbackField(i));</span>
+<span class="nc" id="L1111">			e.aastore();</span>
+		}
+<span class="nc" id="L1113">		e.return_value();</span>
+<span class="nc" id="L1114">		e.end_method();</span>
+<span class="nc" id="L1115">	}</span>
+
+	private void emitNewInstanceCallbacks(ClassEmitter ce) {
+<span class="nc" id="L1118">		CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC, NEW_INSTANCE, null);</span>
+<span class="nc" id="L1119">		Type thisType = getThisType(e);</span>
+<span class="nc" id="L1120">		e.load_arg(0);</span>
+<span class="nc" id="L1121">		e.invoke_static(thisType, SET_THREAD_CALLBACKS);</span>
+<span class="nc" id="L1122">		emitCommonNewInstance(e);</span>
+<span class="nc" id="L1123">	}</span>
+
+	private Type getThisType(CodeEmitter e) {
+<span class="nc bnc" id="L1126" title="All 2 branches missed.">		if (currentData == null) {</span>
+<span class="nc" id="L1127">			return e.getClassEmitter().getClassType();</span>
+		}
+		else {
+<span class="nc" id="L1130">			return Type.getType(currentData.generatedClass);</span>
+		}
+	}
+
+	private void emitCommonNewInstance(CodeEmitter e) {
+<span class="nc" id="L1135">		Type thisType = getThisType(e);</span>
+<span class="nc" id="L1136">		e.new_instance(thisType);</span>
+<span class="nc" id="L1137">		e.dup();</span>
+<span class="nc" id="L1138">		e.invoke_constructor(thisType);</span>
+<span class="nc" id="L1139">		e.aconst_null();</span>
+<span class="nc" id="L1140">		e.invoke_static(thisType, SET_THREAD_CALLBACKS);</span>
+<span class="nc" id="L1141">		e.return_value();</span>
+<span class="nc" id="L1142">		e.end_method();</span>
+<span class="nc" id="L1143">	}</span>
+
+	private void emitNewInstanceCallback(ClassEmitter ce) {
+<span class="nc" id="L1146">		CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC, SINGLE_NEW_INSTANCE, null);</span>
+<span class="nc bnc" id="L1147" title="All 3 branches missed.">		switch (callbackTypes.length) {</span>
+			case 0:
+				// TODO: make sure Callback is null
+<span class="nc" id="L1150">				break;</span>
+			case 1:
+				// for now just make a new array; TODO: optimize
+<span class="nc" id="L1153">				e.push(1);</span>
+<span class="nc" id="L1154">				e.newarray(CALLBACK);</span>
+<span class="nc" id="L1155">				e.dup();</span>
+<span class="nc" id="L1156">				e.push(0);</span>
+<span class="nc" id="L1157">				e.load_arg(0);</span>
+<span class="nc" id="L1158">				e.aastore();</span>
+<span class="nc" id="L1159">				e.invoke_static(getThisType(e), SET_THREAD_CALLBACKS);</span>
+<span class="nc" id="L1160">				break;</span>
+			default:
+<span class="nc" id="L1162">				e.throw_exception(ILLEGAL_STATE_EXCEPTION, &quot;More than one callback object required&quot;);</span>
+		}
+<span class="nc" id="L1164">		emitCommonNewInstance(e);</span>
+<span class="nc" id="L1165">	}</span>
+
+	private void emitNewInstanceMultiarg(ClassEmitter ce, List constructors) {
+<span class="nc" id="L1168">		final CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC, MULTIARG_NEW_INSTANCE, null);</span>
+<span class="nc" id="L1169">		final Type thisType = getThisType(e);</span>
+<span class="nc" id="L1170">		e.load_arg(2);</span>
+<span class="nc" id="L1171">		e.invoke_static(thisType, SET_THREAD_CALLBACKS);</span>
+<span class="nc" id="L1172">		e.new_instance(thisType);</span>
+<span class="nc" id="L1173">		e.dup();</span>
+<span class="nc" id="L1174">		e.load_arg(0);</span>
+<span class="nc" id="L1175">		EmitUtils.constructor_switch(e, constructors, new ObjectSwitchCallback() {</span>
+			public void processCase(Object key, Label end) {
+<span class="nc" id="L1177">				MethodInfo constructor = (MethodInfo) key;</span>
+<span class="nc" id="L1178">				Type types[] = constructor.getSignature().getArgumentTypes();</span>
+<span class="nc bnc" id="L1179" title="All 2 branches missed.">				for (int i = 0; i &lt; types.length; i++) {</span>
+<span class="nc" id="L1180">					e.load_arg(1);</span>
+<span class="nc" id="L1181">					e.push(i);</span>
+<span class="nc" id="L1182">					e.aaload();</span>
+<span class="nc" id="L1183">					e.unbox(types[i]);</span>
+				}
+<span class="nc" id="L1185">				e.invoke_constructor(thisType, constructor.getSignature());</span>
+<span class="nc" id="L1186">				e.goTo(end);</span>
+<span class="nc" id="L1187">			}</span>
+
+			public void processDefault() {
+<span class="nc" id="L1190">				e.throw_exception(ILLEGAL_ARGUMENT_EXCEPTION, &quot;Constructor not found&quot;);</span>
+<span class="nc" id="L1191">			}</span>
+		});
+<span class="nc" id="L1193">		e.aconst_null();</span>
+<span class="nc" id="L1194">		e.invoke_static(thisType, SET_THREAD_CALLBACKS);</span>
+<span class="nc" id="L1195">		e.return_value();</span>
+<span class="nc" id="L1196">		e.end_method();</span>
+<span class="nc" id="L1197">	}</span>
+
+	private void emitMethods(final ClassEmitter ce, List methods, List actualMethods) {
+<span class="nc" id="L1200">		CallbackGenerator[] generators = CallbackInfo.getGenerators(callbackTypes);</span>
+
+<span class="nc" id="L1202">		Map groups = new HashMap();</span>
+<span class="nc" id="L1203">		final Map indexes = new HashMap();</span>
+<span class="nc" id="L1204">		final Map originalModifiers = new HashMap();</span>
+<span class="nc" id="L1205">		final Map positions = CollectionUtils.getIndexMap(methods);</span>
+<span class="nc" id="L1206">		final Map declToBridge = new HashMap();</span>
+
+<span class="nc" id="L1208">		Iterator it1 = methods.iterator();</span>
+<span class="nc bnc" id="L1209" title="All 2 branches missed.">		Iterator it2 = (actualMethods != null) ? actualMethods.iterator() : null;</span>
+
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">		while (it1.hasNext()) {</span>
+<span class="nc" id="L1212">			MethodInfo method = (MethodInfo) it1.next();</span>
+<span class="nc bnc" id="L1213" title="All 2 branches missed.">			Method actualMethod = (it2 != null) ? (Method) it2.next() : null;</span>
+<span class="nc" id="L1214">			int index = filter.accept(actualMethod);</span>
+<span class="nc bnc" id="L1215" title="All 2 branches missed.">			if (index &gt;= callbackTypes.length) {</span>
+<span class="nc" id="L1216">				throw new IllegalArgumentException(&quot;Callback filter returned an index that is too large: &quot; + index);</span>
+			}
+<span class="nc bnc" id="L1218" title="All 2 branches missed.">			originalModifiers.put(method, (actualMethod != null ? actualMethod.getModifiers() : method.getModifiers()));</span>
+<span class="nc" id="L1219">			indexes.put(method, index);</span>
+<span class="nc" id="L1220">			List group = (List) groups.get(generators[index]);</span>
+<span class="nc bnc" id="L1221" title="All 2 branches missed.">			if (group == null) {</span>
+<span class="nc" id="L1222">				groups.put(generators[index], group = new ArrayList(methods.size()));</span>
+			}
+<span class="nc" id="L1224">			group.add(method);</span>
+
+			// Optimization: build up a map of Class -&gt; bridge methods in class
+			// so that we can look up all the bridge methods in one pass for a class.
+<span class="nc bnc" id="L1228" title="All 2 branches missed.">			if (TypeUtils.isBridge(actualMethod.getModifiers())) {</span>
+<span class="nc" id="L1229">				Set bridges = (Set) declToBridge.get(actualMethod.getDeclaringClass());</span>
+<span class="nc bnc" id="L1230" title="All 2 branches missed.">				if (bridges == null) {</span>
+<span class="nc" id="L1231">					bridges = new HashSet();</span>
+<span class="nc" id="L1232">					declToBridge.put(actualMethod.getDeclaringClass(), bridges);</span>
+				}
+<span class="nc" id="L1234">				bridges.add(method.getSignature());</span>
+			}
+<span class="nc" id="L1236">		}</span>
+
+<span class="nc" id="L1238">		final Map bridgeToTarget = new BridgeMethodResolver(declToBridge, getClassLoader()).resolveAll();</span>
+
+<span class="nc" id="L1240">		Set seenGen = new HashSet();</span>
+<span class="nc" id="L1241">		CodeEmitter se = ce.getStaticHook();</span>
+<span class="nc" id="L1242">		se.new_instance(THREAD_LOCAL);</span>
+<span class="nc" id="L1243">		se.dup();</span>
+<span class="nc" id="L1244">		se.invoke_constructor(THREAD_LOCAL, CSTRUCT_NULL);</span>
+<span class="nc" id="L1245">		se.putfield(THREAD_CALLBACKS_FIELD);</span>
+
+<span class="nc" id="L1247">		final Object[] state = new Object[1];</span>
+<span class="nc" id="L1248">		CallbackGenerator.Context context = new CallbackGenerator.Context() {</span>
+			public ClassLoader getClassLoader() {
+<span class="nc" id="L1250">				return Enhancer.this.getClassLoader();</span>
+			}
+
+			public int getOriginalModifiers(MethodInfo method) {
+<span class="nc" id="L1254">				return ((Integer) originalModifiers.get(method)).intValue();</span>
+			}
+
+			public int getIndex(MethodInfo method) {
+<span class="nc" id="L1258">				return ((Integer) indexes.get(method)).intValue();</span>
+			}
+
+			public void emitCallback(CodeEmitter e, int index) {
+<span class="nc" id="L1262">				emitCurrentCallback(e, index);</span>
+<span class="nc" id="L1263">			}</span>
+
+			public Signature getImplSignature(MethodInfo method) {
+<span class="nc" id="L1266">				return rename(method.getSignature(), ((Integer) positions.get(method)).intValue());</span>
+			}
+
+			public void emitLoadArgsAndInvoke(CodeEmitter e, MethodInfo method) {
+				// If this is a bridge and we know the target was called from invokespecial,
+				// then we need to invoke_virtual w/ the bridge target instead of doing
+				// a super, because super may itself be using super, which would bypass
+				// any proxies on the target.
+<span class="nc" id="L1274">				Signature bridgeTarget = (Signature) bridgeToTarget.get(method.getSignature());</span>
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">				if (bridgeTarget != null) {</span>
+					// checkcast each argument against the target's argument types
+<span class="nc bnc" id="L1277" title="All 2 branches missed.">					for (int i = 0; i &lt; bridgeTarget.getArgumentTypes().length; i++) {</span>
+<span class="nc" id="L1278">						e.load_arg(i);</span>
+<span class="nc" id="L1279">						Type target = bridgeTarget.getArgumentTypes()[i];</span>
+<span class="nc bnc" id="L1280" title="All 2 branches missed.">						if (!target.equals(method.getSignature().getArgumentTypes()[i])) {</span>
+<span class="nc" id="L1281">							e.checkcast(target);</span>
+						}
+					}
+
+<span class="nc" id="L1285">					e.invoke_virtual_this(bridgeTarget);</span>
+
+<span class="nc" id="L1287">					Type retType = method.getSignature().getReturnType();</span>
+					// Not necessary to cast if the target &amp; bridge have
+					// the same return type.
+					// (This conveniently includes void and primitive types,
+					// which would fail if casted.  It's not possible to
+					// covariant from boxed to unbox (or vice versa), so no having
+					// to box/unbox for bridges).
+					// TODO: It also isn't necessary to checkcast if the return is
+					// assignable from the target.  (This would happen if a subclass
+					// used covariant returns to narrow the return type within a bridge
+					// method.)
+<span class="nc bnc" id="L1298" title="All 2 branches missed.">					if (!retType.equals(bridgeTarget.getReturnType())) {</span>
+<span class="nc" id="L1299">						e.checkcast(retType);</span>
+					}
+<span class="nc" id="L1301">				}</span>
+				else {
+<span class="nc" id="L1303">					e.load_args();</span>
+<span class="nc" id="L1304">					e.super_invoke(method.getSignature());</span>
+				}
+<span class="nc" id="L1306">			}</span>
+
+			public CodeEmitter beginMethod(ClassEmitter ce, MethodInfo method) {
+<span class="nc" id="L1309">				CodeEmitter e = EmitUtils.begin_method(ce, method);</span>
+<span class="nc bnc" id="L1310" title="All 2 branches missed.">				if (!interceptDuringConstruction &amp;&amp;</span>
+<span class="nc bnc" id="L1311" title="All 2 branches missed.">						!TypeUtils.isAbstract(method.getModifiers())) {</span>
+<span class="nc" id="L1312">					Label constructed = e.make_label();</span>
+<span class="nc" id="L1313">					e.load_this();</span>
+<span class="nc" id="L1314">					e.getfield(CONSTRUCTED_FIELD);</span>
+<span class="nc" id="L1315">					e.if_jump(CodeEmitter.NE, constructed);</span>
+<span class="nc" id="L1316">					e.load_this();</span>
+<span class="nc" id="L1317">					e.load_args();</span>
+<span class="nc" id="L1318">					e.super_invoke();</span>
+<span class="nc" id="L1319">					e.return_value();</span>
+<span class="nc" id="L1320">					e.mark(constructed);</span>
+				}
+<span class="nc" id="L1322">				return e;</span>
+			}
+		};
+<span class="nc bnc" id="L1325" title="All 2 branches missed.">		for (int i = 0; i &lt; callbackTypes.length; i++) {</span>
+<span class="nc" id="L1326">			CallbackGenerator gen = generators[i];</span>
+<span class="nc bnc" id="L1327" title="All 2 branches missed.">			if (!seenGen.contains(gen)) {</span>
+<span class="nc" id="L1328">				seenGen.add(gen);</span>
+<span class="nc" id="L1329">				final List fmethods = (List) groups.get(gen);</span>
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">				if (fmethods != null) {</span>
+					try {
+<span class="nc" id="L1332">						gen.generate(ce, context, fmethods);</span>
+<span class="nc" id="L1333">						gen.generateStatic(se, context, fmethods);</span>
+					}
+<span class="nc" id="L1335">					catch (RuntimeException x) {</span>
+<span class="nc" id="L1336">						throw x;</span>
+					}
+<span class="nc" id="L1338">					catch (Exception x) {</span>
+<span class="nc" id="L1339">						throw new CodeGenerationException(x);</span>
+<span class="nc" id="L1340">					}</span>
+				}
+			}
+		}
+<span class="nc" id="L1344">		se.return_value();</span>
+<span class="nc" id="L1345">		se.end_method();</span>
+<span class="nc" id="L1346">	}</span>
+
+	private void emitSetThreadCallbacks(ClassEmitter ce) {
+<span class="nc" id="L1349">		CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC | Constants.ACC_STATIC,</span>
+				SET_THREAD_CALLBACKS,
+				null);
+<span class="nc" id="L1352">		e.getfield(THREAD_CALLBACKS_FIELD);</span>
+<span class="nc" id="L1353">		e.load_arg(0);</span>
+<span class="nc" id="L1354">		e.invoke_virtual(THREAD_LOCAL, THREAD_LOCAL_SET);</span>
+<span class="nc" id="L1355">		e.return_value();</span>
+<span class="nc" id="L1356">		e.end_method();</span>
+<span class="nc" id="L1357">	}</span>
+
+	private void emitSetStaticCallbacks(ClassEmitter ce) {
+<span class="nc" id="L1360">		CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC | Constants.ACC_STATIC,</span>
+				SET_STATIC_CALLBACKS,
+				null);
+<span class="nc" id="L1363">		e.load_arg(0);</span>
+<span class="nc" id="L1364">		e.putfield(STATIC_CALLBACKS_FIELD);</span>
+<span class="nc" id="L1365">		e.return_value();</span>
+<span class="nc" id="L1366">		e.end_method();</span>
+<span class="nc" id="L1367">	}</span>
+
+	private void emitCurrentCallback(CodeEmitter e, int index) {
+<span class="nc" id="L1370">		e.load_this();</span>
+<span class="nc" id="L1371">		e.getfield(getCallbackField(index));</span>
+<span class="nc" id="L1372">		e.dup();</span>
+<span class="nc" id="L1373">		Label end = e.make_label();</span>
+<span class="nc" id="L1374">		e.ifnonnull(end);</span>
+<span class="nc" id="L1375">		e.pop(); // stack height</span>
+<span class="nc" id="L1376">		e.load_this();</span>
+<span class="nc" id="L1377">		e.invoke_static_this(BIND_CALLBACKS);</span>
+<span class="nc" id="L1378">		e.load_this();</span>
+<span class="nc" id="L1379">		e.getfield(getCallbackField(index));</span>
+<span class="nc" id="L1380">		e.mark(end);</span>
+<span class="nc" id="L1381">	}</span>
+
+	private void emitBindCallbacks(ClassEmitter ce) {
+<span class="nc" id="L1384">		CodeEmitter e = ce.begin_method(Constants.PRIVATE_FINAL_STATIC,</span>
+				BIND_CALLBACKS,
+				null);
+<span class="nc" id="L1387">		Local me = e.make_local();</span>
+<span class="nc" id="L1388">		e.load_arg(0);</span>
+<span class="nc" id="L1389">		e.checkcast_this();</span>
+<span class="nc" id="L1390">		e.store_local(me);</span>
+
+<span class="nc" id="L1392">		Label end = e.make_label();</span>
+<span class="nc" id="L1393">		e.load_local(me);</span>
+<span class="nc" id="L1394">		e.getfield(BOUND_FIELD);</span>
+<span class="nc" id="L1395">		e.if_jump(CodeEmitter.NE, end);</span>
+<span class="nc" id="L1396">		e.load_local(me);</span>
+<span class="nc" id="L1397">		e.push(1);</span>
+<span class="nc" id="L1398">		e.putfield(BOUND_FIELD);</span>
+
+<span class="nc" id="L1400">		e.getfield(THREAD_CALLBACKS_FIELD);</span>
+<span class="nc" id="L1401">		e.invoke_virtual(THREAD_LOCAL, THREAD_LOCAL_GET);</span>
+<span class="nc" id="L1402">		e.dup();</span>
+<span class="nc" id="L1403">		Label found_callback = e.make_label();</span>
+<span class="nc" id="L1404">		e.ifnonnull(found_callback);</span>
+<span class="nc" id="L1405">		e.pop();</span>
+
+<span class="nc" id="L1407">		e.getfield(STATIC_CALLBACKS_FIELD);</span>
+<span class="nc" id="L1408">		e.dup();</span>
+<span class="nc" id="L1409">		e.ifnonnull(found_callback);</span>
+<span class="nc" id="L1410">		e.pop();</span>
+<span class="nc" id="L1411">		e.goTo(end);</span>
+
+<span class="nc" id="L1413">		e.mark(found_callback);</span>
+<span class="nc" id="L1414">		e.checkcast(CALLBACK_ARRAY);</span>
+<span class="nc" id="L1415">		e.load_local(me);</span>
+<span class="nc" id="L1416">		e.swap();</span>
+<span class="nc bnc" id="L1417" title="All 2 branches missed.">		for (int i = callbackTypes.length - 1; i &gt;= 0; i--) {</span>
+<span class="nc bnc" id="L1418" title="All 2 branches missed.">			if (i != 0) {</span>
+<span class="nc" id="L1419">				e.dup2();</span>
+			}
+<span class="nc" id="L1421">			e.aaload(i);</span>
+<span class="nc" id="L1422">			e.checkcast(callbackTypes[i]);</span>
+<span class="nc" id="L1423">			e.putfield(getCallbackField(i));</span>
+		}
+
+<span class="nc" id="L1426">		e.mark(end);</span>
+<span class="nc" id="L1427">		e.return_value();</span>
+<span class="nc" id="L1428">		e.end_method();</span>
+<span class="nc" id="L1429">	}</span>
+
+	private static String getCallbackField(int index) {
+<span class="nc" id="L1432">		return &quot;CGLIB$CALLBACK_&quot; + index;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

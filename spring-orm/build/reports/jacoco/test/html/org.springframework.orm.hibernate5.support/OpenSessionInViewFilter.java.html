@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OpenSessionInViewFilter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.hibernate5.support</a> &gt; <span class="el_source">OpenSessionInViewFilter.java</span></div><h1>OpenSessionInViewFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.hibernate5.support;
+
+import java.io.IOException;
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.hibernate.FlushMode;
+import org.hibernate.HibernateException;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.orm.hibernate5.SessionFactoryUtils;
+import org.springframework.orm.hibernate5.SessionHolder;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.request.async.CallableProcessingInterceptor;
+import org.springframework.web.context.request.async.WebAsyncManager;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+import org.springframework.web.context.support.WebApplicationContextUtils;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+/**
+ * Servlet Filter that binds a Hibernate Session to the thread for the entire
+ * processing of the request. Intended for the &quot;Open Session in View&quot; pattern,
+ * i.e. to allow for lazy loading in web views despite the original transactions
+ * already being completed.
+ *
+ * &lt;p&gt;This filter makes Hibernate Sessions available via the current thread, which
+ * will be autodetected by transaction managers. It is suitable for service layer
+ * transactions via {@link org.springframework.orm.hibernate5.HibernateTransactionManager}
+ * as well as for non-transactional execution (if configured appropriately).
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE&lt;/b&gt;: This filter will by default &lt;i&gt;not&lt;/i&gt; flush the Hibernate Session,
+ * with the flush mode set to {@code FlushMode.NEVER}. It assumes to be used
+ * in combination with service layer transactions that care for the flushing: The
+ * active transaction manager will temporarily change the flush mode to
+ * {@code FlushMode.AUTO} during a read-write transaction, with the flush
+ * mode reset to {@code FlushMode.NEVER} at the end of each transaction.
+ *
+ * &lt;p&gt;&lt;b&gt;WARNING:&lt;/b&gt; Applying this filter to existing logic can cause issues that
+ * have not appeared before, through the use of a single Hibernate Session for the
+ * processing of an entire request. In particular, the reassociation of persistent
+ * objects with a Hibernate Session has to occur at the very beginning of request
+ * processing, to avoid clashes with already loaded instances of the same objects.
+ *
+ * &lt;p&gt;Looks up the SessionFactory in Spring's root web application context.
+ * Supports a &quot;sessionFactoryBeanName&quot; filter init-param in {@code web.xml};
+ * the default bean name is &quot;sessionFactory&quot;.
+ *
+ * @author Juergen Hoeller
+ * @since 4.2
+ * @see #lookupSessionFactory
+ * @see OpenSessionInViewInterceptor
+ * @see OpenSessionInterceptor
+ * @see org.springframework.orm.hibernate5.HibernateTransactionManager
+ * @see TransactionSynchronizationManager
+ * @see SessionFactory#getCurrentSession()
+ */
+<span class="nc" id="L78">public class OpenSessionInViewFilter extends OncePerRequestFilter {</span>
+
+	/**
+	 * The default bean name used for the session factory.
+	 */
+	public static final String DEFAULT_SESSION_FACTORY_BEAN_NAME = &quot;sessionFactory&quot;;
+
+<span class="nc" id="L85">	private String sessionFactoryBeanName = DEFAULT_SESSION_FACTORY_BEAN_NAME;</span>
+
+
+	/**
+	 * Set the bean name of the SessionFactory to fetch from Spring's
+	 * root application context. Default is &quot;sessionFactory&quot;.
+	 * @see #DEFAULT_SESSION_FACTORY_BEAN_NAME
+	 */
+	public void setSessionFactoryBeanName(String sessionFactoryBeanName) {
+<span class="nc" id="L94">		this.sessionFactoryBeanName = sessionFactoryBeanName;</span>
+<span class="nc" id="L95">	}</span>
+
+	/**
+	 * Return the bean name of the SessionFactory to fetch from Spring's
+	 * root application context.
+	 */
+	protected String getSessionFactoryBeanName() {
+<span class="nc" id="L102">		return this.sessionFactoryBeanName;</span>
+	}
+
+
+	/**
+	 * Returns &quot;false&quot; so that the filter may re-bind the opened Hibernate
+	 * {@code Session} to each asynchronously dispatched thread and postpone
+	 * closing it until the very last asynchronous dispatch.
+	 */
+	@Override
+	protected boolean shouldNotFilterAsyncDispatch() {
+<span class="nc" id="L113">		return false;</span>
+	}
+
+	/**
+	 * Returns &quot;false&quot; so that the filter may provide a Hibernate
+	 * {@code Session} to each error dispatches.
+	 */
+	@Override
+	protected boolean shouldNotFilterErrorDispatch() {
+<span class="nc" id="L122">		return false;</span>
+	}
+
+	@Override
+	protected void doFilterInternal(
+			HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+			throws ServletException, IOException {
+
+<span class="nc" id="L130">		SessionFactory sessionFactory = lookupSessionFactory(request);</span>
+<span class="nc" id="L131">		boolean participate = false;</span>
+
+<span class="nc" id="L133">		WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);</span>
+<span class="nc" id="L134">		String key = getAlreadyFilteredAttributeName();</span>
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">		if (TransactionSynchronizationManager.hasResource(sessionFactory)) {</span>
+			// Do not modify the Session: just set the participate flag.
+<span class="nc" id="L138">			participate = true;</span>
+		}
+		else {
+<span class="nc bnc" id="L141" title="All 2 branches missed.">			boolean isFirstRequest = !isAsyncDispatch(request);</span>
+<span class="nc bnc" id="L142" title="All 4 branches missed.">			if (isFirstRequest || !applySessionBindingInterceptor(asyncManager, key)) {</span>
+<span class="nc" id="L143">				logger.debug(&quot;Opening Hibernate Session in OpenSessionInViewFilter&quot;);</span>
+<span class="nc" id="L144">				Session session = openSession(sessionFactory);</span>
+<span class="nc" id="L145">				SessionHolder sessionHolder = new SessionHolder(session);</span>
+<span class="nc" id="L146">				TransactionSynchronizationManager.bindResource(sessionFactory, sessionHolder);</span>
+
+<span class="nc" id="L148">				AsyncRequestInterceptor interceptor = new AsyncRequestInterceptor(sessionFactory, sessionHolder);</span>
+<span class="nc" id="L149">				asyncManager.registerCallableInterceptor(key, interceptor);</span>
+<span class="nc" id="L150">				asyncManager.registerDeferredResultInterceptor(key, interceptor);</span>
+			}
+		}
+
+		try {
+<span class="nc" id="L155">			filterChain.doFilter(request, response);</span>
+		}
+
+		finally {
+<span class="nc bnc" id="L159" title="All 2 branches missed.">			if (!participate) {</span>
+<span class="nc" id="L160">				SessionHolder sessionHolder =</span>
+<span class="nc" id="L161">						(SessionHolder) TransactionSynchronizationManager.unbindResource(sessionFactory);</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">				if (!isAsyncStarted(request)) {</span>
+<span class="nc" id="L163">					logger.debug(&quot;Closing Hibernate Session in OpenSessionInViewFilter&quot;);</span>
+<span class="nc" id="L164">					SessionFactoryUtils.closeSession(sessionHolder.getSession());</span>
+				}
+			}
+		}
+<span class="nc" id="L168">	}</span>
+
+	/**
+	 * Look up the SessionFactory that this filter should use,
+	 * taking the current HTTP request as argument.
+	 * &lt;p&gt;The default implementation delegates to the {@link #lookupSessionFactory()}
+	 * variant without arguments.
+	 * @param request the current request
+	 * @return the SessionFactory to use
+	 */
+	protected SessionFactory lookupSessionFactory(HttpServletRequest request) {
+<span class="nc" id="L179">		return lookupSessionFactory();</span>
+	}
+
+	/**
+	 * Look up the SessionFactory that this filter should use.
+	 * &lt;p&gt;The default implementation looks for a bean with the specified name
+	 * in Spring's root application context.
+	 * @return the SessionFactory to use
+	 * @see #getSessionFactoryBeanName
+	 */
+	protected SessionFactory lookupSessionFactory() {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L191">			logger.debug(&quot;Using SessionFactory '&quot; + getSessionFactoryBeanName() + &quot;' for OpenSessionInViewFilter&quot;);</span>
+		}
+<span class="nc" id="L193">		WebApplicationContext wac = WebApplicationContextUtils.getRequiredWebApplicationContext(getServletContext());</span>
+<span class="nc" id="L194">		return wac.getBean(getSessionFactoryBeanName(), SessionFactory.class);</span>
+	}
+
+	/**
+	 * Open a Session for the SessionFactory that this filter uses.
+	 * &lt;p&gt;The default implementation delegates to the {@link SessionFactory#openSession}
+	 * method and sets the {@link Session}'s flush mode to &quot;MANUAL&quot;.
+	 * @param sessionFactory the SessionFactory that this filter uses
+	 * @return the Session to use
+	 * @throws DataAccessResourceFailureException if the Session could not be created
+	 * @see FlushMode#MANUAL
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	protected Session openSession(SessionFactory sessionFactory) throws DataAccessResourceFailureException {
+		try {
+<span class="nc" id="L209">			Session session = sessionFactory.openSession();</span>
+<span class="nc" id="L210">			session.setFlushMode(FlushMode.MANUAL);</span>
+<span class="nc" id="L211">			return session;</span>
+		}
+<span class="nc" id="L213">		catch (HibernateException ex) {</span>
+<span class="nc" id="L214">			throw new DataAccessResourceFailureException(&quot;Could not open Hibernate Session&quot;, ex);</span>
+		}
+	}
+
+	private boolean applySessionBindingInterceptor(WebAsyncManager asyncManager, String key) {
+<span class="nc" id="L219">		CallableProcessingInterceptor cpi = asyncManager.getCallableInterceptor(key);</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">		if (cpi == null) {</span>
+<span class="nc" id="L221">			return false;</span>
+		}
+<span class="nc" id="L223">		((AsyncRequestInterceptor) cpi).bindSession();</span>
+<span class="nc" id="L224">		return true;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

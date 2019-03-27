@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WebSphereUowTransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.jta</a> &gt; <span class="el_source">WebSphereUowTransactionManager.java</span></div><h1>WebSphereUowTransactionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2017 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.jta;
+
+import java.util.List;
+import javax.naming.NamingException;
+
+import com.ibm.websphere.uow.UOWSynchronizationRegistry;
+import com.ibm.wsspi.uow.UOWAction;
+import com.ibm.wsspi.uow.UOWActionException;
+import com.ibm.wsspi.uow.UOWException;
+import com.ibm.wsspi.uow.UOWManager;
+import com.ibm.wsspi.uow.UOWManagerFactory;
+
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.InvalidTimeoutException;
+import org.springframework.transaction.NestedTransactionNotSupportedException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.support.CallbackPreferringPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.SmartTransactionObject;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionSynchronizationUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * WebSphere-specific PlatformTransactionManager implementation that delegates
+ * to a {@link com.ibm.wsspi.uow.UOWManager} instance, obtained from WebSphere's
+ * JNDI environment. This allows Spring to leverage the full power of the WebSphere
+ * transaction coordinator, including transaction suspension, in a manner that is
+ * perfectly compliant with officially supported WebSphere API.
+ *
+ * &lt;p&gt;The {@link CallbackPreferringPlatformTransactionManager} interface
+ * implemented by this class indicates that callers should preferably pass in
+ * a {@link TransactionCallback} through the {@link #execute} method, which
+ * will be handled through the callback-based WebSphere UOWManager API instead
+ * of through standard JTA API (UserTransaction / TransactionManager). This avoids
+ * the use of the non-public {@code javax.transaction.TransactionManager}
+ * API on WebSphere, staying within supported WebSphere API boundaries.
+ *
+ * &lt;p&gt;This transaction manager implementation derives from Spring's standard
+ * {@link JtaTransactionManager}, inheriting the capability to support programmatic
+ * transaction demarcation via {@code getTransaction} / {@code commit} /
+ * {@code rollback} calls through a JTA UserTransaction handle, for callers
+ * that do not use the TransactionCallback-based {@link #execute} method. However,
+ * transaction suspension is &lt;i&gt;not&lt;/i&gt; supported in this {@code getTransaction}
+ * style (unless you explicitly specify a {@link #setTransactionManager} reference,
+ * despite the official WebSphere recommendations). Use the {@link #execute} style
+ * for any code that might require transaction suspension.
+ *
+ * &lt;p&gt;This transaction manager is compatible with WebSphere 6.1.0.9 and above.
+ * The default JNDI location for the UOWManager is &quot;java:comp/websphere/UOWManager&quot;.
+ * If the location happens to differ according to your WebSphere documentation,
+ * simply specify the actual location through this transaction manager's
+ * &quot;uowManagerName&quot; bean property.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: This JtaTransactionManager is intended to refine specific transaction
+ * demarcation behavior on Spring's side. It will happily co-exist with independently
+ * configured WebSphere transaction strategies in your persistence provider, with no
+ * need to specifically connect those setups in any way.&lt;/b&gt;
+ *
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see #setUowManager
+ * @see #setUowManagerName
+ * @see com.ibm.wsspi.uow.UOWManager
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class WebSphereUowTransactionManager extends JtaTransactionManager
+		implements CallbackPreferringPlatformTransactionManager {
+
+	/**
+	 * Default JNDI location for the WebSphere UOWManager.
+	 * @see #setUowManagerName
+	 */
+	public static final String DEFAULT_UOW_MANAGER_NAME = &quot;java:comp/websphere/UOWManager&quot;;
+
+
+	@Nullable
+	private UOWManager uowManager;
+
+	@Nullable
+	private String uowManagerName;
+
+
+	/**
+	 * Create a new WebSphereUowTransactionManager.
+	 */
+<span class="fc" id="L110">	public WebSphereUowTransactionManager() {</span>
+<span class="fc" id="L111">		setAutodetectTransactionManager(false);</span>
+<span class="fc" id="L112">	}</span>
+
+	/**
+	 * Create a new WebSphereUowTransactionManager for the given UOWManager.
+	 * @param uowManager the WebSphere UOWManager to use as direct reference
+	 */
+	public WebSphereUowTransactionManager(UOWManager uowManager) {
+<span class="fc" id="L119">		this();</span>
+<span class="fc" id="L120">		this.uowManager = uowManager;</span>
+<span class="fc" id="L121">	}</span>
+
+
+	/**
+	 * Set the WebSphere UOWManager to use as direct reference.
+	 * &lt;p&gt;Typically just used for test setups; in a Java EE environment,
+	 * the UOWManager will always be fetched from JNDI.
+	 * @see #setUserTransactionName
+	 */
+	public void setUowManager(UOWManager uowManager) {
+<span class="nc" id="L131">		this.uowManager = uowManager;</span>
+<span class="nc" id="L132">	}</span>
+
+	/**
+	 * Set the JNDI name of the WebSphere UOWManager.
+	 * The default &quot;java:comp/websphere/UOWManager&quot; is used if not set.
+	 * @see #DEFAULT_USER_TRANSACTION_NAME
+	 * @see #setUowManager
+	 */
+	public void setUowManagerName(String uowManagerName) {
+<span class="nc" id="L141">		this.uowManagerName = uowManagerName;</span>
+<span class="nc" id="L142">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() throws TransactionSystemException {
+<span class="fc" id="L147">		initUserTransactionAndTransactionManager();</span>
+
+		// Fetch UOWManager handle from JNDI, if necessary.
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">		if (this.uowManager == null) {</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">			if (this.uowManagerName != null) {</span>
+<span class="nc" id="L152">				this.uowManager = lookupUowManager(this.uowManagerName);</span>
+			}
+			else {
+<span class="fc" id="L155">				this.uowManager = lookupDefaultUowManager();</span>
+			}
+		}
+<span class="fc" id="L158">	}</span>
+
+	/**
+	 * Look up the WebSphere UOWManager in JNDI via the configured name.
+	 * @param uowManagerName the JNDI name of the UOWManager
+	 * @return the UOWManager object
+	 * @throws TransactionSystemException if the JNDI lookup failed
+	 * @see #setJndiTemplate
+	 * @see #setUowManagerName
+	 */
+	protected UOWManager lookupUowManager(String uowManagerName) throws TransactionSystemException {
+		try {
+<span class="nc bnc" id="L170" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L171">				logger.debug(&quot;Retrieving WebSphere UOWManager from JNDI location [&quot; + uowManagerName + &quot;]&quot;);</span>
+			}
+<span class="nc" id="L173">			return getJndiTemplate().lookup(uowManagerName, UOWManager.class);</span>
+		}
+<span class="nc" id="L175">		catch (NamingException ex) {</span>
+<span class="nc" id="L176">			throw new TransactionSystemException(</span>
+					&quot;WebSphere UOWManager is not available at JNDI location [&quot; + uowManagerName + &quot;]&quot;, ex);
+		}
+	}
+
+	/**
+	 * Obtain the WebSphere UOWManager from the default JNDI location
+	 * &quot;java:comp/websphere/UOWManager&quot;.
+	 * @return the UOWManager object
+	 * @throws TransactionSystemException if the JNDI lookup failed
+	 * @see #setJndiTemplate
+	 */
+	protected UOWManager lookupDefaultUowManager() throws TransactionSystemException {
+		try {
+<span class="fc" id="L190">			logger.debug(&quot;Retrieving WebSphere UOWManager from default JNDI location [&quot; + DEFAULT_UOW_MANAGER_NAME + &quot;]&quot;);</span>
+<span class="fc" id="L191">			return getJndiTemplate().lookup(DEFAULT_UOW_MANAGER_NAME, UOWManager.class);</span>
+		}
+<span class="nc" id="L193">		catch (NamingException ex) {</span>
+<span class="nc" id="L194">			logger.debug(&quot;WebSphere UOWManager is not available at default JNDI location [&quot; +</span>
+					DEFAULT_UOW_MANAGER_NAME + &quot;] - falling back to UOWManagerFactory lookup&quot;);
+<span class="nc" id="L196">			return UOWManagerFactory.getUOWManager();</span>
+		}
+	}
+
+	private UOWManager obtainUOWManager() {
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">		Assert.state(this.uowManager != null, &quot;No UOWManager set&quot;);</span>
+<span class="fc" id="L202">		return this.uowManager;</span>
+	}
+
+
+	/**
+	 * Registers the synchronizations as interposed JTA Synchronization on the UOWManager.
+	 */
+	@Override
+	protected void doRegisterAfterCompletionWithJtaTransaction(
+			JtaTransactionObject txObject, List&lt;TransactionSynchronization&gt; synchronizations) {
+
+<span class="nc" id="L213">		obtainUOWManager().registerInterposedSynchronization(new JtaAfterCompletionSynchronization(synchronizations));</span>
+<span class="nc" id="L214">	}</span>
+
+	/**
+	 * Returns {@code true} since WebSphere ResourceAdapters (as exposed in JNDI)
+	 * implicitly perform transaction enlistment if the MessageEndpointFactory's
+	 * {@code isDeliveryTransacted} method returns {@code true}.
+	 * In that case we'll simply skip the {@link #createTransaction} call.
+	 * @see javax.resource.spi.endpoint.MessageEndpointFactory#isDeliveryTransacted
+	 * @see org.springframework.jca.endpoint.AbstractMessageEndpointFactory
+	 * @see TransactionFactory#createTransaction
+	 */
+	@Override
+	public boolean supportsResourceAdapterManagedTransactions() {
+<span class="nc" id="L227">		return true;</span>
+	}
+
+
+	@Override
+	@Nullable
+	public &lt;T&gt; T execute(@Nullable TransactionDefinition definition, TransactionCallback&lt;T&gt; callback)
+			throws TransactionException {
+
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">		if (definition == null) {</span>
+			// Use defaults if no transaction definition given.
+<span class="nc" id="L238">			definition = new DefaultTransactionDefinition();</span>
+		}
+
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">		if (definition.getTimeout() &lt; TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L242">			throw new InvalidTimeoutException(&quot;Invalid transaction timeout&quot;, definition.getTimeout());</span>
+		}
+
+<span class="fc" id="L245">		UOWManager uowManager = obtainUOWManager();</span>
+<span class="fc" id="L246">		int pb = definition.getPropagationBehavior();</span>
+<span class="fc bfc" id="L247" title="All 2 branches covered.">		boolean existingTx = (uowManager.getUOWStatus() != UOWSynchronizationRegistry.UOW_STATUS_NONE &amp;&amp;</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">				uowManager.getUOWType() != UOWSynchronizationRegistry.UOW_TYPE_LOCAL_TRANSACTION);</span>
+
+<span class="fc" id="L250">		int uowType = UOWSynchronizationRegistry.UOW_TYPE_GLOBAL_TRANSACTION;</span>
+<span class="fc" id="L251">		boolean joinTx = false;</span>
+<span class="fc" id="L252">		boolean newSynch = false;</span>
+
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		if (existingTx) {</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">			if (pb == TransactionDefinition.PROPAGATION_NEVER) {</span>
+<span class="fc" id="L256">				throw new IllegalTransactionStateException(</span>
+						&quot;Transaction propagation 'never' but existing transaction found&quot;);
+			}
+<span class="fc bfc" id="L259" title="All 2 branches covered.">			if (pb == TransactionDefinition.PROPAGATION_NESTED) {</span>
+<span class="fc" id="L260">				throw new NestedTransactionNotSupportedException(</span>
+						&quot;Transaction propagation 'nested' not supported for WebSphere UOW transactions&quot;);
+			}
+<span class="fc bfc" id="L263" title="All 6 branches covered.">			if (pb == TransactionDefinition.PROPAGATION_SUPPORTS ||</span>
+					pb == TransactionDefinition.PROPAGATION_REQUIRED ||
+					pb == TransactionDefinition.PROPAGATION_MANDATORY) {
+<span class="fc" id="L266">				joinTx = true;</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">				newSynch = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);</span>
+			}
+<span class="fc bfc" id="L269" title="All 2 branches covered.">			else if (pb == TransactionDefinition.PROPAGATION_NOT_SUPPORTED) {</span>
+<span class="fc" id="L270">				uowType = UOWSynchronizationRegistry.UOW_TYPE_LOCAL_TRANSACTION;</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">				newSynch = (getTransactionSynchronization() == SYNCHRONIZATION_ALWAYS);</span>
+			}
+			else {
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">				newSynch = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);</span>
+			}
+		}
+		else {
+<span class="fc bfc" id="L278" title="All 2 branches covered.">			if (pb == TransactionDefinition.PROPAGATION_MANDATORY) {</span>
+<span class="fc" id="L279">				throw new IllegalTransactionStateException(</span>
+						&quot;Transaction propagation 'mandatory' but no existing transaction found&quot;);
+			}
+<span class="fc bfc" id="L282" title="All 6 branches covered.">			if (pb == TransactionDefinition.PROPAGATION_SUPPORTS ||</span>
+					pb == TransactionDefinition.PROPAGATION_NOT_SUPPORTED ||
+					pb == TransactionDefinition.PROPAGATION_NEVER) {
+<span class="fc" id="L285">				uowType = UOWSynchronizationRegistry.UOW_TYPE_LOCAL_TRANSACTION;</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">				newSynch = (getTransactionSynchronization() == SYNCHRONIZATION_ALWAYS);</span>
+			}
+			else {
+<span class="fc bfc" id="L289" title="All 2 branches covered.">				newSynch = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);</span>
+			}
+		}
+
+<span class="fc" id="L293">		boolean debug = logger.isDebugEnabled();</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">		if (debug) {</span>
+<span class="nc" id="L295">			logger.debug(&quot;Creating new transaction with name [&quot; + definition.getName() + &quot;]: &quot; + definition);</span>
+		}
+<span class="fc bfc" id="L297" title="All 2 branches covered.">		SuspendedResourcesHolder suspendedResources = (!joinTx ? suspend(null) : null);</span>
+<span class="fc" id="L298">		UOWActionAdapter&lt;T&gt; action = null;</span>
+		try {
+<span class="fc bfc" id="L300" title="All 2 branches covered.">			if (definition.getTimeout() &gt; TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="fc" id="L301">				uowManager.setUOWTimeout(uowType, definition.getTimeout());</span>
+			}
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">			if (debug) {</span>
+<span class="nc" id="L304">				logger.debug(&quot;Invoking WebSphere UOW action: type=&quot; + uowType + &quot;, join=&quot; + joinTx);</span>
+			}
+<span class="fc bfc" id="L306" title="All 4 branches covered.">			action = new UOWActionAdapter&lt;&gt;(</span>
+					definition, callback, (uowType == UOWManager.UOW_TYPE_GLOBAL_TRANSACTION), !joinTx, newSynch, debug);
+<span class="fc" id="L308">			uowManager.runUnderUOW(uowType, joinTx, action);</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">			if (debug) {</span>
+<span class="nc" id="L310">				logger.debug(&quot;Returned from WebSphere UOW action: type=&quot; + uowType + &quot;, join=&quot; + joinTx);</span>
+			}
+<span class="fc" id="L312">			return action.getResult();</span>
+		}
+<span class="fc" id="L314">		catch (UOWException | UOWActionException ex) {</span>
+<span class="fc" id="L315">			TransactionSystemException tse =</span>
+					new TransactionSystemException(&quot;UOWManager transaction processing failed&quot;, ex);
+<span class="fc" id="L317">			Throwable appEx = action.getException();</span>
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">			if (appEx != null) {</span>
+<span class="nc" id="L319">				logger.error(&quot;Application exception overridden by rollback exception&quot;, appEx);</span>
+<span class="nc" id="L320">				tse.initApplicationException(appEx);</span>
+			}
+<span class="fc" id="L322">			throw tse;</span>
+		}
+		finally {
+<span class="fc bfc" id="L325" title="All 2 branches covered.">			if (suspendedResources != null) {</span>
+<span class="fc" id="L326">				resume(null, suspendedResources);</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Adapter that executes the given Spring transaction within the WebSphere UOWAction shape.
+	 */
+	private class UOWActionAdapter&lt;T&gt; implements UOWAction, SmartTransactionObject {
+
+		private final TransactionDefinition definition;
+
+		private final TransactionCallback&lt;T&gt; callback;
+
+		private final boolean actualTransaction;
+
+		private final boolean newTransaction;
+
+		private final boolean newSynchronization;
+
+		private boolean debug;
+
+		@Nullable
+		private T result;
+
+		@Nullable
+		private Throwable exception;
+
+		public UOWActionAdapter(TransactionDefinition definition, TransactionCallback&lt;T&gt; callback,
+<span class="fc" id="L356">				boolean actualTransaction, boolean newTransaction, boolean newSynchronization, boolean debug) {</span>
+
+<span class="fc" id="L358">			this.definition = definition;</span>
+<span class="fc" id="L359">			this.callback = callback;</span>
+<span class="fc" id="L360">			this.actualTransaction = actualTransaction;</span>
+<span class="fc" id="L361">			this.newTransaction = newTransaction;</span>
+<span class="fc" id="L362">			this.newSynchronization = newSynchronization;</span>
+<span class="fc" id="L363">			this.debug = debug;</span>
+<span class="fc" id="L364">		}</span>
+
+		@Override
+		public void run() {
+<span class="fc" id="L368">			UOWManager uowManager = obtainUOWManager();</span>
+<span class="fc bfc" id="L369" title="All 2 branches covered.">			DefaultTransactionStatus status = prepareTransactionStatus(</span>
+					this.definition, (this.actualTransaction ? this : null),
+					this.newTransaction, this.newSynchronization, this.debug, null);
+			try {
+<span class="fc" id="L373">				this.result = this.callback.doInTransaction(status);</span>
+<span class="fc" id="L374">				triggerBeforeCommit(status);</span>
+			}
+<span class="fc" id="L376">			catch (Throwable ex) {</span>
+<span class="fc" id="L377">				this.exception = ex;</span>
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">				if (status.isDebug()) {</span>
+<span class="nc" id="L379">					logger.debug(&quot;Rolling back on application exception from transaction callback&quot;, ex);</span>
+				}
+<span class="fc" id="L381">				uowManager.setRollbackOnly();</span>
+			}
+			finally {
+<span class="fc bfc" id="L384" title="All 2 branches covered.">				if (status.isLocalRollbackOnly()) {</span>
+<span class="pc bpc" id="L385" title="1 of 2 branches missed.">					if (status.isDebug()) {</span>
+<span class="nc" id="L386">						logger.debug(&quot;Transaction callback has explicitly requested rollback&quot;);</span>
+					}
+<span class="fc" id="L388">					uowManager.setRollbackOnly();</span>
+				}
+<span class="fc" id="L390">				triggerBeforeCompletion(status);</span>
+<span class="fc bfc" id="L391" title="All 2 branches covered.">				if (status.isNewSynchronization()) {</span>
+<span class="fc" id="L392">					List&lt;TransactionSynchronization&gt; synchronizations = TransactionSynchronizationManager.getSynchronizations();</span>
+<span class="fc" id="L393">					TransactionSynchronizationManager.clear();</span>
+<span class="pc bpc" id="L394" title="1 of 2 branches missed.">					if (!synchronizations.isEmpty()) {</span>
+<span class="nc" id="L395">						uowManager.registerInterposedSynchronization(new JtaAfterCompletionSynchronization(synchronizations));</span>
+					}
+				}
+			}
+<span class="fc" id="L399">		}</span>
+
+		@Nullable
+		public T getResult() {
+<span class="fc bfc" id="L403" title="All 2 branches covered.">			if (this.exception != null) {</span>
+<span class="nc" id="L404">				ReflectionUtils.rethrowRuntimeException(this.exception);</span>
+			}
+<span class="fc" id="L406">			return this.result;</span>
+		}
+
+		@Nullable
+		public Throwable getException() {
+<span class="fc" id="L411">			return this.exception;</span>
+		}
+
+		@Override
+		public boolean isRollbackOnly() {
+<span class="nc" id="L416">			return obtainUOWManager().getRollbackOnly();</span>
+		}
+
+		@Override
+		public void flush() {
+<span class="nc" id="L421">			TransactionSynchronizationUtils.triggerFlush();</span>
+<span class="nc" id="L422">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

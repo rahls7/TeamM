@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MethodValidationInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.validation.beanvalidation</a> &gt; <span class="el_source">MethodValidationInterceptor.java</span></div><h1>MethodValidationInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.validation.beanvalidation;
+
+import java.lang.reflect.Method;
+import java.util.Set;
+import javax.validation.ConstraintViolation;
+import javax.validation.ConstraintViolationException;
+import javax.validation.Validation;
+import javax.validation.Validator;
+import javax.validation.ValidatorFactory;
+import javax.validation.executable.ExecutableValidator;
+
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
+
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.SmartFactoryBean;
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.util.ClassUtils;
+import org.springframework.validation.annotation.Validated;
+
+/**
+ * An AOP Alliance {@link MethodInterceptor} implementation that delegates to a
+ * JSR-303 provider for performing method-level validation on annotated methods.
+ *
+ * &lt;p&gt;Applicable methods have JSR-303 constraint annotations on their parameters
+ * and/or on their return value (in the latter case specified at the method level,
+ * typically as inline annotation).
+ *
+ * &lt;p&gt;E.g.: {@code public @NotNull Object myValidMethod(@NotNull String arg1, @Max(10) int arg2)}
+ *
+ * &lt;p&gt;Validation groups can be specified through Spring's {@link Validated} annotation
+ * at the type level of the containing target class, applying to all public service methods
+ * of that class. By default, JSR-303 will validate against its default group only.
+ *
+ * &lt;p&gt;As of Spring 5.0, this functionality requires a Bean Validation 1.1 provider.
+ *
+ * @author Juergen Hoeller
+ * @since 3.1
+ * @see MethodValidationPostProcessor
+ * @see javax.validation.executable.ExecutableValidator
+ */
+public class MethodValidationInterceptor implements MethodInterceptor {
+
+	private final Validator validator;
+
+
+	/**
+	 * Create a new MethodValidationInterceptor using a default JSR-303 validator underneath.
+	 */
+	public MethodValidationInterceptor() {
+<span class="fc" id="L68">		this(Validation.buildDefaultValidatorFactory());</span>
+<span class="fc" id="L69">	}</span>
+
+	/**
+	 * Create a new MethodValidationInterceptor using the given JSR-303 ValidatorFactory.
+	 * @param validatorFactory the JSR-303 ValidatorFactory to use
+	 */
+	public MethodValidationInterceptor(ValidatorFactory validatorFactory) {
+<span class="fc" id="L76">		this(validatorFactory.getValidator());</span>
+<span class="fc" id="L77">	}</span>
+
+	/**
+	 * Create a new MethodValidationInterceptor using the given JSR-303 Validator.
+	 * @param validator the JSR-303 Validator to use
+	 */
+<span class="fc" id="L83">	public MethodValidationInterceptor(Validator validator) {</span>
+<span class="fc" id="L84">		this.validator = validator;</span>
+<span class="fc" id="L85">	}</span>
+
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public Object invoke(MethodInvocation invocation) throws Throwable {
+		// Avoid Validator invocation on FactoryBean.getObjectType/isSingleton
+<span class="fc bfc" id="L92" title="All 2 branches covered.">		if (isFactoryBeanMetadataMethod(invocation.getMethod())) {</span>
+<span class="fc" id="L93">			return invocation.proceed();</span>
+		}
+
+<span class="fc" id="L96">		Class&lt;?&gt;[] groups = determineValidationGroups(invocation);</span>
+
+		// Standard Bean Validation 1.1 API
+<span class="fc" id="L99">		ExecutableValidator execVal = this.validator.forExecutables();</span>
+<span class="fc" id="L100">		Method methodToValidate = invocation.getMethod();</span>
+		Set&lt;ConstraintViolation&lt;Object&gt;&gt; result;
+
+		try {
+<span class="fc" id="L104">			result = execVal.validateParameters(</span>
+<span class="fc" id="L105">					invocation.getThis(), methodToValidate, invocation.getArguments(), groups);</span>
+		}
+<span class="nc" id="L107">		catch (IllegalArgumentException ex) {</span>
+			// Probably a generic type mismatch between interface and impl as reported in SPR-12237 / HV-1011
+			// Let's try to find the bridged method on the implementation class...
+<span class="nc" id="L110">			methodToValidate = BridgeMethodResolver.findBridgedMethod(</span>
+<span class="nc" id="L111">					ClassUtils.getMostSpecificMethod(invocation.getMethod(), invocation.getThis().getClass()));</span>
+<span class="nc" id="L112">			result = execVal.validateParameters(</span>
+<span class="nc" id="L113">					invocation.getThis(), methodToValidate, invocation.getArguments(), groups);</span>
+<span class="fc" id="L114">		}</span>
+<span class="fc bfc" id="L115" title="All 2 branches covered.">		if (!result.isEmpty()) {</span>
+<span class="fc" id="L116">			throw new ConstraintViolationException(result);</span>
+		}
+
+<span class="fc" id="L119">		Object returnValue = invocation.proceed();</span>
+
+<span class="fc" id="L121">		result = execVal.validateReturnValue(invocation.getThis(), methodToValidate, returnValue, groups);</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">		if (!result.isEmpty()) {</span>
+<span class="fc" id="L123">			throw new ConstraintViolationException(result);</span>
+		}
+
+<span class="fc" id="L126">		return returnValue;</span>
+	}
+
+	private boolean isFactoryBeanMetadataMethod(Method method) {
+<span class="fc" id="L130">		Class&lt;?&gt; clazz = method.getDeclaringClass();</span>
+
+		// Call from interface-based proxy handle, allowing for an efficient check?
+<span class="fc bfc" id="L133" title="All 2 branches covered.">		if (clazz.isInterface()) {</span>
+<span class="pc bpc" id="L134" title="1 of 4 branches missed.">			return ((clazz == FactoryBean.class || clazz == SmartFactoryBean.class) &amp;&amp;</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">					!method.getName().equals(&quot;getObject&quot;));</span>
+		}
+
+		// Call from CGLIB proxy handle, potentially implementing a FactoryBean method?
+<span class="fc" id="L139">		Class&lt;?&gt; factoryBeanType = null;</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">		if (SmartFactoryBean.class.isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L141">			factoryBeanType = SmartFactoryBean.class;</span>
+		}
+<span class="fc bfc" id="L143" title="All 2 branches covered.">		else if (FactoryBean.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L144">			factoryBeanType = FactoryBean.class;</span>
+		}
+<span class="pc bpc" id="L146" title="1 of 4 branches missed.">		return (factoryBeanType != null &amp;&amp; !method.getName().equals(&quot;getObject&quot;) &amp;&amp;</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">				ClassUtils.hasMethod(factoryBeanType, method.getName(), method.getParameterTypes()));</span>
+	}
+
+	/**
+	 * Determine the validation groups to validate against for the given method invocation.
+	 * &lt;p&gt;Default are the validation groups as specified in the {@link Validated} annotation
+	 * on the containing target class of the method.
+	 * @param invocation the current MethodInvocation
+	 * @return the applicable validation groups as a Class array
+	 */
+	protected Class&lt;?&gt;[] determineValidationGroups(MethodInvocation invocation) {
+<span class="fc" id="L158">		Validated validatedAnn = AnnotationUtils.findAnnotation(invocation.getMethod(), Validated.class);</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		if (validatedAnn == null) {</span>
+<span class="fc" id="L160">			validatedAnn = AnnotationUtils.findAnnotation(invocation.getThis().getClass(), Validated.class);</span>
+		}
+<span class="pc bpc" id="L162" title="1 of 2 branches missed.">		return (validatedAnn != null ? validatedAnn.value() : new Class&lt;?&gt;[0]);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

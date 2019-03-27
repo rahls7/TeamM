@@ -1,0 +1,1020 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CglibAopProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.framework</a> &gt; <span class="el_source">CglibAopProxy.java</span></div><h1>CglibAopProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.framework;
+
+import java.io.Serializable;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.UndeclaredThrowableException;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
+
+import org.aopalliance.aop.Advice;
+import org.aopalliance.intercept.MethodInvocation;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aop.Advisor;
+import org.springframework.aop.AopInvocationException;
+import org.springframework.aop.PointcutAdvisor;
+import org.springframework.aop.RawTargetAccess;
+import org.springframework.aop.TargetSource;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.cglib.core.ClassGenerator;
+import org.springframework.cglib.core.CodeGenerationException;
+import org.springframework.cglib.core.SpringNamingPolicy;
+import org.springframework.cglib.proxy.Callback;
+import org.springframework.cglib.proxy.CallbackFilter;
+import org.springframework.cglib.proxy.Dispatcher;
+import org.springframework.cglib.proxy.Enhancer;
+import org.springframework.cglib.proxy.Factory;
+import org.springframework.cglib.proxy.MethodInterceptor;
+import org.springframework.cglib.proxy.MethodProxy;
+import org.springframework.cglib.proxy.NoOp;
+import org.springframework.cglib.transform.impl.UndeclaredThrowableStrategy;
+import org.springframework.core.SmartClassLoader;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * CGLIB-based {@link AopProxy} implementation for the Spring AOP framework.
+ *
+ * &lt;p&gt;Objects of this type should be obtained through proxy factories,
+ * configured by an {@link AdvisedSupport} object. This class is internal
+ * to Spring's AOP framework and need not be used directly by client code.
+ *
+ * &lt;p&gt;{@link DefaultAopProxyFactory} will automatically create CGLIB-based
+ * proxies if necessary, for example in case of proxying a target class
+ * (see the {@link DefaultAopProxyFactory attendant javadoc} for details).
+ *
+ * &lt;p&gt;Proxies created using this class are thread-safe if the underlying
+ * (target) class is thread-safe.
+ *
+ * @author Rod Johnson
+ * @author Rob Harrop
+ * @author Juergen Hoeller
+ * @author Ramnivas Laddad
+ * @author Chris Beams
+ * @author Dave Syer
+ * @see org.springframework.cglib.proxy.Enhancer
+ * @see AdvisedSupport#setProxyTargetClass
+ * @see DefaultAopProxyFactory
+ */
+@SuppressWarnings(&quot;serial&quot;)
+class CglibAopProxy implements AopProxy, Serializable {
+
+	// Constants for CGLIB callback array indices
+	private static final int AOP_PROXY = 0;
+	private static final int INVOKE_TARGET = 1;
+	private static final int NO_OVERRIDE = 2;
+	private static final int DISPATCH_TARGET = 3;
+	private static final int DISPATCH_ADVISED = 4;
+	private static final int INVOKE_EQUALS = 5;
+	private static final int INVOKE_HASHCODE = 6;
+
+
+	/** Logger available to subclasses; static to optimize serialization. */
+<span class="fc" id="L97">	protected static final Log logger = LogFactory.getLog(CglibAopProxy.class);</span>
+
+	/** Keeps track of the Classes that we have validated for final methods. */
+<span class="fc" id="L100">	private static final Map&lt;Class&lt;?&gt;, Boolean&gt; validatedClasses = new WeakHashMap&lt;&gt;();</span>
+
+
+	/** The configuration used to configure this proxy. */
+	protected final AdvisedSupport advised;
+
+	@Nullable
+	protected Object[] constructorArgs;
+
+	@Nullable
+	protected Class&lt;?&gt;[] constructorArgTypes;
+
+	/** Dispatcher used for methods on Advised. */
+	private final transient AdvisedDispatcher advisedDispatcher;
+
+<span class="fc" id="L115">	private transient Map&lt;Method, Integer&gt; fixedInterceptorMap = Collections.emptyMap();</span>
+
+	private transient int fixedInterceptorOffset;
+
+
+	/**
+	 * Create a new CglibAopProxy for the given AOP configuration.
+	 * @param config the AOP configuration as AdvisedSupport object
+	 * @throws AopConfigException if the config is invalid. We try to throw an informative
+	 * exception in this case, rather than let a mysterious failure happen later.
+	 */
+<span class="fc" id="L126">	public CglibAopProxy(AdvisedSupport config) throws AopConfigException {</span>
+<span class="fc" id="L127">		Assert.notNull(config, &quot;AdvisedSupport must not be null&quot;);</span>
+<span class="pc bpc" id="L128" title="1 of 4 branches missed.">		if (config.getAdvisors().length == 0 &amp;&amp; config.getTargetSource() == AdvisedSupport.EMPTY_TARGET_SOURCE) {</span>
+<span class="nc" id="L129">			throw new AopConfigException(&quot;No advisors and no TargetSource specified&quot;);</span>
+		}
+<span class="fc" id="L131">		this.advised = config;</span>
+<span class="fc" id="L132">		this.advisedDispatcher = new AdvisedDispatcher(this.advised);</span>
+<span class="fc" id="L133">	}</span>
+
+	/**
+	 * Set constructor arguments to use for creating the proxy.
+	 * @param constructorArgs the constructor argument values
+	 * @param constructorArgTypes the constructor argument types
+	 */
+	public void setConstructorArguments(@Nullable Object[] constructorArgs, @Nullable Class&lt;?&gt;[] constructorArgTypes) {
+<span class="nc bnc" id="L141" title="All 4 branches missed.">		if (constructorArgs == null || constructorArgTypes == null) {</span>
+<span class="nc" id="L142">			throw new IllegalArgumentException(&quot;Both 'constructorArgs' and 'constructorArgTypes' need to be specified&quot;);</span>
+		}
+<span class="nc bnc" id="L144" title="All 2 branches missed.">		if (constructorArgs.length != constructorArgTypes.length) {</span>
+<span class="nc" id="L145">			throw new IllegalArgumentException(&quot;Number of 'constructorArgs' (&quot; + constructorArgs.length +</span>
+					&quot;) must match number of 'constructorArgTypes' (&quot; + constructorArgTypes.length + &quot;)&quot;);
+		}
+<span class="nc" id="L148">		this.constructorArgs = constructorArgs;</span>
+<span class="nc" id="L149">		this.constructorArgTypes = constructorArgTypes;</span>
+<span class="nc" id="L150">	}</span>
+
+
+	@Override
+	public Object getProxy() {
+<span class="fc" id="L155">		return getProxy(null);</span>
+	}
+
+	@Override
+	public Object getProxy(@Nullable ClassLoader classLoader) {
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L161">			logger.trace(&quot;Creating CGLIB proxy: &quot; + this.advised.getTargetSource());</span>
+		}
+
+		try {
+<span class="fc" id="L165">			Class&lt;?&gt; rootClass = this.advised.getTargetClass();</span>
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">			Assert.state(rootClass != null, &quot;Target class must be available for creating a CGLIB proxy&quot;);</span>
+
+<span class="fc" id="L168">			Class&lt;?&gt; proxySuperClass = rootClass;</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">			if (ClassUtils.isCglibProxyClass(rootClass)) {</span>
+<span class="fc" id="L170">				proxySuperClass = rootClass.getSuperclass();</span>
+<span class="fc" id="L171">				Class&lt;?&gt;[] additionalInterfaces = rootClass.getInterfaces();</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">				for (Class&lt;?&gt; additionalInterface : additionalInterfaces) {</span>
+<span class="fc" id="L173">					this.advised.addInterface(additionalInterface);</span>
+				}
+			}
+
+			// Validate the class, writing log messages as necessary.
+<span class="fc" id="L178">			validateClassIfNecessary(proxySuperClass, classLoader);</span>
+
+			// Configure CGLIB Enhancer...
+<span class="fc" id="L181">			Enhancer enhancer = createEnhancer();</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">			if (classLoader != null) {</span>
+<span class="fc" id="L183">				enhancer.setClassLoader(classLoader);</span>
+<span class="pc bpc" id="L184" title="1 of 2 branches missed.">				if (classLoader instanceof SmartClassLoader &amp;&amp;</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">						((SmartClassLoader) classLoader).isClassReloadable(proxySuperClass)) {</span>
+<span class="nc" id="L186">					enhancer.setUseCache(false);</span>
+				}
+			}
+<span class="fc" id="L189">			enhancer.setSuperclass(proxySuperClass);</span>
+<span class="fc" id="L190">			enhancer.setInterfaces(AopProxyUtils.completeProxiedInterfaces(this.advised));</span>
+<span class="fc" id="L191">			enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);</span>
+<span class="fc" id="L192">			enhancer.setStrategy(new ClassLoaderAwareUndeclaredThrowableStrategy(classLoader));</span>
+
+<span class="fc" id="L194">			Callback[] callbacks = getCallbacks(rootClass);</span>
+<span class="fc" id="L195">			Class&lt;?&gt;[] types = new Class&lt;?&gt;[callbacks.length];</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">			for (int x = 0; x &lt; types.length; x++) {</span>
+<span class="fc" id="L197">				types[x] = callbacks[x].getClass();</span>
+			}
+			// fixedInterceptorMap only populated at this point, after getCallbacks call above
+<span class="fc" id="L200">			enhancer.setCallbackFilter(new ProxyCallbackFilter(</span>
+<span class="fc" id="L201">					this.advised.getConfigurationOnlyCopy(), this.fixedInterceptorMap, this.fixedInterceptorOffset));</span>
+<span class="fc" id="L202">			enhancer.setCallbackTypes(types);</span>
+
+			// Generate the proxy class and create a proxy instance.
+<span class="fc" id="L205">			return createProxyClassAndInstance(enhancer, callbacks);</span>
+		}
+<span class="nc" id="L207">		catch (CodeGenerationException | IllegalArgumentException ex) {</span>
+<span class="nc" id="L208">			throw new AopConfigException(&quot;Could not generate CGLIB subclass of &quot; + this.advised.getTargetClass() +</span>
+					&quot;: Common causes of this problem include using a final class or a non-visible class&quot;,
+					ex);
+		}
+<span class="nc" id="L212">		catch (Throwable ex) {</span>
+			// TargetSource.getTarget() failed
+<span class="nc" id="L214">			throw new AopConfigException(&quot;Unexpected AOP exception&quot;, ex);</span>
+		}
+	}
+
+	protected Object createProxyClassAndInstance(Enhancer enhancer, Callback[] callbacks) {
+<span class="nc" id="L219">		enhancer.setInterceptDuringConstruction(false);</span>
+<span class="nc" id="L220">		enhancer.setCallbacks(callbacks);</span>
+<span class="nc bnc" id="L221" title="All 4 branches missed.">		return (this.constructorArgs != null &amp;&amp; this.constructorArgTypes != null ?</span>
+<span class="nc" id="L222">				enhancer.create(this.constructorArgTypes, this.constructorArgs) :</span>
+<span class="nc" id="L223">				enhancer.create());</span>
+	}
+
+	/**
+	 * Creates the CGLIB {@link Enhancer}. Subclasses may wish to override this to return a custom
+	 * {@link Enhancer} implementation.
+	 */
+	protected Enhancer createEnhancer() {
+<span class="fc" id="L231">		return new Enhancer();</span>
+	}
+
+	/**
+	 * Checks to see whether the supplied {@code Class} has already been validated and
+	 * validates it if not.
+	 */
+	private void validateClassIfNecessary(Class&lt;?&gt; proxySuperClass, @Nullable ClassLoader proxyClassLoader) {
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L240">			synchronized (validatedClasses) {</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">				if (!validatedClasses.containsKey(proxySuperClass)) {</span>
+<span class="fc" id="L242">					doValidateClass(proxySuperClass, proxyClassLoader,</span>
+<span class="fc" id="L243">							ClassUtils.getAllInterfacesForClassAsSet(proxySuperClass));</span>
+<span class="fc" id="L244">					validatedClasses.put(proxySuperClass, Boolean.TRUE);</span>
+				}
+<span class="fc" id="L246">			}</span>
+		}
+<span class="fc" id="L248">	}</span>
+
+	/**
+	 * Checks for final methods on the given {@code Class}, as well as package-visible
+	 * methods across ClassLoaders, and writes warnings to the log for each one found.
+	 */
+	private void doValidateClass(Class&lt;?&gt; proxySuperClass, @Nullable ClassLoader proxyClassLoader, Set&lt;Class&lt;?&gt;&gt; ifcs) {
+<span class="fc bfc" id="L255" title="All 2 branches covered.">		if (proxySuperClass != Object.class) {</span>
+<span class="fc" id="L256">			Method[] methods = proxySuperClass.getDeclaredMethods();</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">			for (Method method : methods) {</span>
+<span class="fc" id="L258">				int mod = method.getModifiers();</span>
+<span class="pc bpc" id="L259" title="1 of 4 branches missed.">				if (!Modifier.isStatic(mod) &amp;&amp; !Modifier.isPrivate(mod)) {</span>
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">					if (Modifier.isFinal(mod)) {</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">						if (implementsInterface(method, ifcs)) {</span>
+<span class="nc" id="L262">							logger.info(&quot;Unable to proxy interface-implementing method [&quot; + method + &quot;] because &quot; +</span>
+									&quot;it is marked as final: Consider using interface-based JDK proxies instead!&quot;);
+						}
+<span class="nc" id="L265">						logger.debug(&quot;Final method [&quot; + method + &quot;] cannot get proxied via CGLIB: &quot; +</span>
+								&quot;Calls to this method will NOT be routed to the target instance and &quot; +
+								&quot;might lead to NPEs against uninitialized fields in the proxy instance.&quot;);
+					}
+<span class="pc bpc" id="L269" title="5 of 6 branches missed.">					else if (!Modifier.isPublic(mod) &amp;&amp; !Modifier.isProtected(mod) &amp;&amp;</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">							proxyClassLoader != null &amp;&amp; proxySuperClass.getClassLoader() != proxyClassLoader) {</span>
+<span class="nc" id="L271">						logger.debug(&quot;Method [&quot; + method + &quot;] is package-visible across different ClassLoaders &quot; +</span>
+								&quot;and cannot get proxied via CGLIB: Declare this method as public or protected &quot; +
+								&quot;if you need to support invocations through the proxy.&quot;);
+					}
+				}
+			}
+<span class="fc" id="L277">			doValidateClass(proxySuperClass.getSuperclass(), proxyClassLoader, ifcs);</span>
+		}
+<span class="fc" id="L279">	}</span>
+
+	private Callback[] getCallbacks(Class&lt;?&gt; rootClass) throws Exception {
+		// Parameters used for optimization choices...
+<span class="fc" id="L283">		boolean exposeProxy = this.advised.isExposeProxy();</span>
+<span class="fc" id="L284">		boolean isFrozen = this.advised.isFrozen();</span>
+<span class="fc" id="L285">		boolean isStatic = this.advised.getTargetSource().isStatic();</span>
+
+		// Choose an &quot;aop&quot; interceptor (used for AOP calls).
+<span class="fc" id="L288">		Callback aopInterceptor = new DynamicAdvisedInterceptor(this.advised);</span>
+
+		// Choose a &quot;straight to target&quot; interceptor. (used for calls that are
+		// unadvised but can return this). May be required to expose the proxy.
+		Callback targetInterceptor;
+<span class="fc bfc" id="L293" title="All 2 branches covered.">		if (exposeProxy) {</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">			targetInterceptor = (isStatic ?</span>
+<span class="pc" id="L295">					new StaticUnadvisedExposedInterceptor(this.advised.getTargetSource().getTarget()) :</span>
+<span class="pc" id="L296">					new DynamicUnadvisedExposedInterceptor(this.advised.getTargetSource()));</span>
+		}
+		else {
+<span class="fc bfc" id="L299" title="All 2 branches covered.">			targetInterceptor = (isStatic ?</span>
+<span class="fc" id="L300">					new StaticUnadvisedInterceptor(this.advised.getTargetSource().getTarget()) :</span>
+<span class="fc" id="L301">					new DynamicUnadvisedInterceptor(this.advised.getTargetSource()));</span>
+		}
+
+		// Choose a &quot;direct to target&quot; dispatcher (used for
+		// unadvised calls to static targets that cannot return this).
+<span class="fc bfc" id="L306" title="All 2 branches covered.">		Callback targetDispatcher = (isStatic ?</span>
+<span class="fc" id="L307">				new StaticDispatcher(this.advised.getTargetSource().getTarget()) : new SerializableNoOp());</span>
+
+<span class="fc" id="L309">		Callback[] mainCallbacks = new Callback[] {</span>
+				aopInterceptor,  // for normal advice
+				targetInterceptor,  // invoke target without considering advice, if optimized
+				new SerializableNoOp(),  // no override for methods mapped to this
+				targetDispatcher, this.advisedDispatcher,
+				new EqualsInterceptor(this.advised),
+				new HashCodeInterceptor(this.advised)
+		};
+
+		Callback[] callbacks;
+
+		// If the target is a static one and the advice chain is frozen,
+		// then we can make some optimizations by sending the AOP calls
+		// direct to the target using the fixed chain for that method.
+<span class="pc bpc" id="L323" title="1 of 4 branches missed.">		if (isStatic &amp;&amp; isFrozen) {</span>
+<span class="nc" id="L324">			Method[] methods = rootClass.getMethods();</span>
+<span class="nc" id="L325">			Callback[] fixedCallbacks = new Callback[methods.length];</span>
+<span class="nc" id="L326">			this.fixedInterceptorMap = new HashMap&lt;&gt;(methods.length);</span>
+
+			// TODO: small memory optimization here (can skip creation for methods with no advice)
+<span class="nc bnc" id="L329" title="All 2 branches missed.">			for (int x = 0; x &lt; methods.length; x++) {</span>
+<span class="nc" id="L330">				Method method = methods[x];</span>
+<span class="nc" id="L331">				List&lt;Object&gt; chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, rootClass);</span>
+<span class="nc" id="L332">				fixedCallbacks[x] = new FixedChainStaticTargetInterceptor(</span>
+<span class="nc" id="L333">						chain, this.advised.getTargetSource().getTarget(), this.advised.getTargetClass());</span>
+<span class="nc" id="L334">				this.fixedInterceptorMap.put(method, x);</span>
+			}
+
+			// Now copy both the callbacks from mainCallbacks
+			// and fixedCallbacks into the callbacks array.
+<span class="nc" id="L339">			callbacks = new Callback[mainCallbacks.length + fixedCallbacks.length];</span>
+<span class="nc" id="L340">			System.arraycopy(mainCallbacks, 0, callbacks, 0, mainCallbacks.length);</span>
+<span class="nc" id="L341">			System.arraycopy(fixedCallbacks, 0, callbacks, mainCallbacks.length, fixedCallbacks.length);</span>
+<span class="nc" id="L342">			this.fixedInterceptorOffset = mainCallbacks.length;</span>
+<span class="nc" id="L343">		}</span>
+		else {
+<span class="fc" id="L345">			callbacks = mainCallbacks;</span>
+		}
+<span class="fc" id="L347">		return callbacks;</span>
+	}
+
+
+	@Override
+	public boolean equals(Object other) {
+<span class="nc bnc" id="L353" title="All 4 branches missed.">		return (this == other || (other instanceof CglibAopProxy &amp;&amp;</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">				AopProxyUtils.equalsInProxy(this.advised, ((CglibAopProxy) other).advised)));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="nc" id="L359">		return CglibAopProxy.class.hashCode() * 13 + this.advised.getTargetSource().hashCode();</span>
+	}
+
+
+	/**
+	 * Check whether the given method is declared on any of the given interfaces.
+	 */
+	private static boolean implementsInterface(Method method, Set&lt;Class&lt;?&gt;&gt; ifcs) {
+<span class="nc bnc" id="L367" title="All 2 branches missed.">		for (Class&lt;?&gt; ifc : ifcs) {</span>
+<span class="nc bnc" id="L368" title="All 2 branches missed.">			if (ClassUtils.hasMethod(ifc, method.getName(), method.getParameterTypes())) {</span>
+<span class="nc" id="L369">				return true;</span>
+			}
+<span class="nc" id="L371">		}</span>
+<span class="nc" id="L372">		return false;</span>
+	}
+
+	/**
+	 * Process a return value. Wraps a return of {@code this} if necessary to be the
+	 * {@code proxy} and also verifies that {@code null} is not returned as a primitive.
+	 */
+	@Nullable
+	private static Object processReturnType(
+			Object proxy, @Nullable Object target, Method method, @Nullable Object returnValue) {
+
+		// Massage return value if necessary
+<span class="pc bpc" id="L384" title="1 of 4 branches missed.">		if (returnValue != null &amp;&amp; returnValue == target &amp;&amp;</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">				!RawTargetAccess.class.isAssignableFrom(method.getDeclaringClass())) {</span>
+			// Special case: it returned &quot;this&quot;. Note that we can't help
+			// if the target sets a reference to itself in another returned object.
+<span class="nc" id="L388">			returnValue = proxy;</span>
+		}
+<span class="fc" id="L390">		Class&lt;?&gt; returnType = method.getReturnType();</span>
+<span class="fc bfc" id="L391" title="All 6 branches covered.">		if (returnValue == null &amp;&amp; returnType != Void.TYPE &amp;&amp; returnType.isPrimitive()) {</span>
+<span class="fc" id="L392">			throw new AopInvocationException(</span>
+					&quot;Null return value from advice does not match primitive return type for: &quot; + method);
+		}
+<span class="fc" id="L395">		return returnValue;</span>
+	}
+
+
+	/**
+	 * Serializable replacement for CGLIB's NoOp interface.
+	 * Public to allow use elsewhere in the framework.
+	 */
+<span class="fc" id="L403">	public static class SerializableNoOp implements NoOp, Serializable {</span>
+	}
+
+
+	/**
+	 * Method interceptor used for static targets with no advice chain. The call
+	 * is passed directly back to the target. Used when the proxy needs to be
+	 * exposed and it can't be determined that the method won't return
+	 * {@code this}.
+	 */
+	private static class StaticUnadvisedInterceptor implements MethodInterceptor, Serializable {
+
+		@Nullable
+		private final Object target;
+
+<span class="fc" id="L418">		public StaticUnadvisedInterceptor(@Nullable Object target) {</span>
+<span class="fc" id="L419">			this.target = target;</span>
+<span class="fc" id="L420">		}</span>
+
+		@Override
+		@Nullable
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+<span class="nc" id="L425">			Object retVal = methodProxy.invoke(this.target, args);</span>
+<span class="nc" id="L426">			return processReturnType(proxy, this.target, method, retVal);</span>
+		}
+	}
+
+
+	/**
+	 * Method interceptor used for static targets with no advice chain, when the
+	 * proxy is to be exposed.
+	 */
+	private static class StaticUnadvisedExposedInterceptor implements MethodInterceptor, Serializable {
+
+		@Nullable
+		private final Object target;
+
+<span class="fc" id="L440">		public StaticUnadvisedExposedInterceptor(@Nullable Object target) {</span>
+<span class="fc" id="L441">			this.target = target;</span>
+<span class="fc" id="L442">		}</span>
+
+		@Override
+		@Nullable
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+<span class="nc" id="L447">			Object oldProxy = null;</span>
+			try {
+<span class="nc" id="L449">				oldProxy = AopContext.setCurrentProxy(proxy);</span>
+<span class="nc" id="L450">				Object retVal = methodProxy.invoke(this.target, args);</span>
+<span class="nc" id="L451">				return processReturnType(proxy, this.target, method, retVal);</span>
+			}
+			finally {
+<span class="nc" id="L454">				AopContext.setCurrentProxy(oldProxy);</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Interceptor used to invoke a dynamic target without creating a method
+	 * invocation or evaluating an advice chain. (We know there was no advice
+	 * for this method.)
+	 */
+	private static class DynamicUnadvisedInterceptor implements MethodInterceptor, Serializable {
+
+		private final TargetSource targetSource;
+
+<span class="fc" id="L469">		public DynamicUnadvisedInterceptor(TargetSource targetSource) {</span>
+<span class="fc" id="L470">			this.targetSource = targetSource;</span>
+<span class="fc" id="L471">		}</span>
+
+		@Override
+		@Nullable
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+<span class="nc" id="L476">			Object target = this.targetSource.getTarget();</span>
+			try {
+<span class="nc" id="L478">				Object retVal = methodProxy.invoke(target, args);</span>
+<span class="nc" id="L479">				return processReturnType(proxy, target, method, retVal);</span>
+			}
+			finally {
+<span class="nc bnc" id="L482" title="All 2 branches missed.">				if (target != null) {</span>
+<span class="nc" id="L483">					this.targetSource.releaseTarget(target);</span>
+				}
+			}
+		}
+	}
+
+
+	/**
+	 * Interceptor for unadvised dynamic targets when the proxy needs exposing.
+	 */
+	private static class DynamicUnadvisedExposedInterceptor implements MethodInterceptor, Serializable {
+
+		private final TargetSource targetSource;
+
+<span class="nc" id="L497">		public DynamicUnadvisedExposedInterceptor(TargetSource targetSource) {</span>
+<span class="nc" id="L498">			this.targetSource = targetSource;</span>
+<span class="nc" id="L499">		}</span>
+
+		@Override
+		@Nullable
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+<span class="nc" id="L504">			Object oldProxy = null;</span>
+<span class="nc" id="L505">			Object target = this.targetSource.getTarget();</span>
+			try {
+<span class="nc" id="L507">				oldProxy = AopContext.setCurrentProxy(proxy);</span>
+<span class="nc" id="L508">				Object retVal = methodProxy.invoke(target, args);</span>
+<span class="nc" id="L509">				return processReturnType(proxy, target, method, retVal);</span>
+			}
+			finally {
+<span class="nc" id="L512">				AopContext.setCurrentProxy(oldProxy);</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">				if (target != null) {</span>
+<span class="nc" id="L514">					this.targetSource.releaseTarget(target);</span>
+				}
+			}
+		}
+	}
+
+
+	/**
+	 * Dispatcher for a static target. Dispatcher is much faster than
+	 * interceptor. This will be used whenever it can be determined that a
+	 * method definitely does not return &quot;this&quot;
+	 */
+	private static class StaticDispatcher implements Dispatcher, Serializable {
+
+		@Nullable
+		private Object target;
+
+<span class="fc" id="L531">		public StaticDispatcher(@Nullable Object target) {</span>
+<span class="fc" id="L532">			this.target = target;</span>
+<span class="fc" id="L533">		}</span>
+
+		@Override
+		@Nullable
+		public Object loadObject() {
+<span class="nc" id="L538">			return this.target;</span>
+		}
+	}
+
+
+	/**
+	 * Dispatcher for any methods declared on the Advised class.
+	 */
+	private static class AdvisedDispatcher implements Dispatcher, Serializable {
+
+		private final AdvisedSupport advised;
+
+<span class="fc" id="L550">		public AdvisedDispatcher(AdvisedSupport advised) {</span>
+<span class="fc" id="L551">			this.advised = advised;</span>
+<span class="fc" id="L552">		}</span>
+
+		@Override
+		public Object loadObject() throws Exception {
+<span class="fc" id="L556">			return this.advised;</span>
+		}
+	}
+
+
+	/**
+	 * Dispatcher for the {@code equals} method.
+	 * Ensures that the method call is always handled by this class.
+	 */
+	private static class EqualsInterceptor implements MethodInterceptor, Serializable {
+
+		private final AdvisedSupport advised;
+
+<span class="fc" id="L569">		public EqualsInterceptor(AdvisedSupport advised) {</span>
+<span class="fc" id="L570">			this.advised = advised;</span>
+<span class="fc" id="L571">		}</span>
+
+		@Override
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) {
+<span class="nc" id="L575">			Object other = args[0];</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">			if (proxy == other) {</span>
+<span class="nc" id="L577">				return true;</span>
+			}
+<span class="nc bnc" id="L579" title="All 2 branches missed.">			if (other instanceof Factory) {</span>
+<span class="nc" id="L580">				Callback callback = ((Factory) other).getCallback(INVOKE_EQUALS);</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">				if (!(callback instanceof EqualsInterceptor)) {</span>
+<span class="nc" id="L582">					return false;</span>
+				}
+<span class="nc" id="L584">				AdvisedSupport otherAdvised = ((EqualsInterceptor) callback).advised;</span>
+<span class="nc" id="L585">				return AopProxyUtils.equalsInProxy(this.advised, otherAdvised);</span>
+			}
+			else {
+<span class="nc" id="L588">				return false;</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Dispatcher for the {@code hashCode} method.
+	 * Ensures that the method call is always handled by this class.
+	 */
+	private static class HashCodeInterceptor implements MethodInterceptor, Serializable {
+
+		private final AdvisedSupport advised;
+
+<span class="fc" id="L602">		public HashCodeInterceptor(AdvisedSupport advised) {</span>
+<span class="fc" id="L603">			this.advised = advised;</span>
+<span class="fc" id="L604">		}</span>
+
+		@Override
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) {
+<span class="nc" id="L608">			return CglibAopProxy.class.hashCode() * 13 + this.advised.getTargetSource().hashCode();</span>
+		}
+	}
+
+
+	/**
+	 * Interceptor used specifically for advised methods on a frozen, static proxy.
+	 */
+	private static class FixedChainStaticTargetInterceptor implements MethodInterceptor, Serializable {
+
+		private final List&lt;Object&gt; adviceChain;
+
+		@Nullable
+		private final Object target;
+
+		@Nullable
+		private final Class&lt;?&gt; targetClass;
+
+		public FixedChainStaticTargetInterceptor(
+<span class="nc" id="L627">				List&lt;Object&gt; adviceChain, @Nullable Object target, @Nullable Class&lt;?&gt; targetClass) {</span>
+
+<span class="nc" id="L629">			this.adviceChain = adviceChain;</span>
+<span class="nc" id="L630">			this.target = target;</span>
+<span class="nc" id="L631">			this.targetClass = targetClass;</span>
+<span class="nc" id="L632">		}</span>
+
+		@Override
+		@Nullable
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+<span class="nc" id="L637">			MethodInvocation invocation = new CglibMethodInvocation(proxy, this.target, method, args,</span>
+					this.targetClass, this.adviceChain, methodProxy);
+			// If we get here, we need to create a MethodInvocation.
+<span class="nc" id="L640">			Object retVal = invocation.proceed();</span>
+<span class="nc" id="L641">			retVal = processReturnType(proxy, this.target, method, retVal);</span>
+<span class="nc" id="L642">			return retVal;</span>
+		}
+	}
+
+
+	/**
+	 * General purpose AOP callback. Used when the target is dynamic or when the
+	 * proxy is not frozen.
+	 */
+	private static class DynamicAdvisedInterceptor implements MethodInterceptor, Serializable {
+
+		private final AdvisedSupport advised;
+
+<span class="fc" id="L655">		public DynamicAdvisedInterceptor(AdvisedSupport advised) {</span>
+<span class="fc" id="L656">			this.advised = advised;</span>
+<span class="fc" id="L657">		}</span>
+
+		@Override
+		@Nullable
+		public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+<span class="fc" id="L662">			Object oldProxy = null;</span>
+<span class="fc" id="L663">			boolean setProxyContext = false;</span>
+<span class="fc" id="L664">			Object target = null;</span>
+<span class="fc" id="L665">			TargetSource targetSource = this.advised.getTargetSource();</span>
+			try {
+<span class="fc bfc" id="L667" title="All 2 branches covered.">				if (this.advised.exposeProxy) {</span>
+					// Make invocation available if necessary.
+<span class="fc" id="L669">					oldProxy = AopContext.setCurrentProxy(proxy);</span>
+<span class="fc" id="L670">					setProxyContext = true;</span>
+				}
+				// Get as late as possible to minimize the time we &quot;own&quot; the target, in case it comes from a pool...
+<span class="fc" id="L673">				target = targetSource.getTarget();</span>
+<span class="pc bpc" id="L674" title="1 of 2 branches missed.">				Class&lt;?&gt; targetClass = (target != null ? target.getClass() : null);</span>
+<span class="fc" id="L675">				List&lt;Object&gt; chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);</span>
+				Object retVal;
+				// Check whether we only have one InvokerInterceptor: that is,
+				// no real advice, but just reflective invocation of the target.
+<span class="pc bpc" id="L679" title="1 of 4 branches missed.">				if (chain.isEmpty() &amp;&amp; Modifier.isPublic(method.getModifiers())) {</span>
+					// We can skip creating a MethodInvocation: just invoke the target directly.
+					// Note that the final invoker must be an InvokerInterceptor, so we know
+					// it does nothing but a reflective operation on the target, and no hot
+					// swapping or fancy proxying.
+<span class="fc" id="L684">					Object[] argsToUse = AopProxyUtils.adaptArgumentsIfNecessary(method, args);</span>
+<span class="fc" id="L685">					retVal = methodProxy.invoke(target, argsToUse);</span>
+<span class="fc" id="L686">				}</span>
+				else {
+					// We need to create a method invocation...
+<span class="fc" id="L689">					retVal = new CglibMethodInvocation(proxy, target, method, args, targetClass, chain, methodProxy).proceed();</span>
+				}
+<span class="fc" id="L691">				retVal = processReturnType(proxy, target, method, retVal);</span>
+<span class="fc" id="L692">				return retVal;</span>
+			}
+			finally {
+<span class="pc bpc" id="L695" title="1 of 4 branches missed.">				if (target != null &amp;&amp; !targetSource.isStatic()) {</span>
+<span class="fc" id="L696">					targetSource.releaseTarget(target);</span>
+				}
+<span class="fc bfc" id="L698" title="All 2 branches covered.">				if (setProxyContext) {</span>
+					// Restore old proxy.
+<span class="fc" id="L700">					AopContext.setCurrentProxy(oldProxy);</span>
+				}
+			}
+		}
+
+		@Override
+		public boolean equals(Object other) {
+<span class="nc bnc" id="L707" title="All 4 branches missed.">			return (this == other ||</span>
+					(other instanceof DynamicAdvisedInterceptor &amp;&amp;
+<span class="nc bnc" id="L709" title="All 2 branches missed.">							this.advised.equals(((DynamicAdvisedInterceptor) other).advised)));</span>
+		}
+
+		/**
+		 * CGLIB uses this to drive proxy creation.
+		 */
+		@Override
+		public int hashCode() {
+<span class="nc" id="L717">			return this.advised.hashCode();</span>
+		}
+	}
+
+
+	/**
+	 * Implementation of AOP Alliance MethodInvocation used by this AOP proxy.
+	 */
+	private static class CglibMethodInvocation extends ReflectiveMethodInvocation {
+
+		@Nullable
+		private final MethodProxy methodProxy;
+
+		public CglibMethodInvocation(Object proxy, @Nullable Object target, Method method,
+				Object[] arguments, @Nullable Class&lt;?&gt; targetClass,
+				List&lt;Object&gt; interceptorsAndDynamicMethodMatchers, MethodProxy methodProxy) {
+
+<span class="fc" id="L734">			super(proxy, target, method, arguments, targetClass, interceptorsAndDynamicMethodMatchers);</span>
+
+			// Only use method proxy for public methods not derived from java.lang.Object
+<span class="pc bpc" id="L737" title="1 of 2 branches missed.">			this.methodProxy = (Modifier.isPublic(method.getModifiers()) &amp;&amp;</span>
+<span class="pc bpc" id="L738" title="2 of 4 branches missed.">					method.getDeclaringClass() != Object.class &amp;&amp; !AopUtils.isEqualsMethod(method) &amp;&amp;</span>
+<span class="pc bpc" id="L739" title="2 of 4 branches missed.">					!AopUtils.isHashCodeMethod(method) &amp;&amp; !AopUtils.isToStringMethod(method) ?</span>
+					methodProxy : null);
+<span class="fc" id="L741">		}</span>
+
+		/**
+		 * Gives a marginal performance improvement versus using reflection to
+		 * invoke the target when invoking public methods.
+		 */
+		@Override
+		protected Object invokeJoinpoint() throws Throwable {
+<span class="pc bpc" id="L749" title="1 of 2 branches missed.">			if (this.methodProxy != null) {</span>
+<span class="fc" id="L750">				return this.methodProxy.invoke(this.target, this.arguments);</span>
+			}
+			else {
+<span class="nc" id="L753">				return super.invokeJoinpoint();</span>
+			}
+		}
+	}
+
+
+	/**
+	 * CallbackFilter to assign Callbacks to methods.
+	 */
+	private static class ProxyCallbackFilter implements CallbackFilter {
+
+		private final AdvisedSupport advised;
+
+		private final Map&lt;Method, Integer&gt; fixedInterceptorMap;
+
+		private final int fixedInterceptorOffset;
+
+		public ProxyCallbackFilter(
+<span class="fc" id="L771">				AdvisedSupport advised, Map&lt;Method, Integer&gt; fixedInterceptorMap, int fixedInterceptorOffset) {</span>
+
+<span class="fc" id="L773">			this.advised = advised;</span>
+<span class="fc" id="L774">			this.fixedInterceptorMap = fixedInterceptorMap;</span>
+<span class="fc" id="L775">			this.fixedInterceptorOffset = fixedInterceptorOffset;</span>
+<span class="fc" id="L776">		}</span>
+
+		/**
+		 * Implementation of CallbackFilter.accept() to return the index of the
+		 * callback we need.
+		 * &lt;p&gt;The callbacks for each proxy are built up of a set of fixed callbacks
+		 * for general use and then a set of callbacks that are specific to a method
+		 * for use on static targets with a fixed advice chain.
+		 * &lt;p&gt;The callback used is determined thus:
+		 * &lt;dl&gt;
+		 * &lt;dt&gt;For exposed proxies&lt;/dt&gt;
+		 * &lt;dd&gt;Exposing the proxy requires code to execute before and after the
+		 * method/chain invocation. This means we must use
+		 * DynamicAdvisedInterceptor, since all other interceptors can avoid the
+		 * need for a try/catch block&lt;/dd&gt;
+		 * &lt;dt&gt;For Object.finalize():&lt;/dt&gt;
+		 * &lt;dd&gt;No override for this method is used.&lt;/dd&gt;
+		 * &lt;dt&gt;For equals():&lt;/dt&gt;
+		 * &lt;dd&gt;The EqualsInterceptor is used to redirect equals() calls to a
+		 * special handler to this proxy.&lt;/dd&gt;
+		 * &lt;dt&gt;For methods on the Advised class:&lt;/dt&gt;
+		 * &lt;dd&gt;the AdvisedDispatcher is used to dispatch the call directly to
+		 * the target&lt;/dd&gt;
+		 * &lt;dt&gt;For advised methods:&lt;/dt&gt;
+		 * &lt;dd&gt;If the target is static and the advice chain is frozen then a
+		 * FixedChainStaticTargetInterceptor specific to the method is used to
+		 * invoke the advice chain. Otherwise a DynamicAdvisedInterceptor is
+		 * used.&lt;/dd&gt;
+		 * &lt;dt&gt;For non-advised methods:&lt;/dt&gt;
+		 * &lt;dd&gt;Where it can be determined that the method will not return {@code this}
+		 * or when {@code ProxyFactory.getExposeProxy()} returns {@code false},
+		 * then a Dispatcher is used. For static targets, the StaticDispatcher is used;
+		 * and for dynamic targets, a DynamicUnadvisedInterceptor is used.
+		 * If it possible for the method to return {@code this} then a
+		 * StaticUnadvisedInterceptor is used for static targets - the
+		 * DynamicUnadvisedInterceptor already considers this.&lt;/dd&gt;
+		 * &lt;/dl&gt;
+		 */
+		@Override
+		public int accept(Method method) {
+<span class="pc bpc" id="L816" title="1 of 2 branches missed.">			if (AopUtils.isFinalizeMethod(method)) {</span>
+<span class="nc" id="L817">				logger.trace(&quot;Found finalize() method - using NO_OVERRIDE&quot;);</span>
+<span class="nc" id="L818">				return NO_OVERRIDE;</span>
+			}
+<span class="pc bpc" id="L820" title="1 of 4 branches missed.">			if (!this.advised.isOpaque() &amp;&amp; method.getDeclaringClass().isInterface() &amp;&amp;</span>
+<span class="fc bfc" id="L821" title="All 2 branches covered.">					method.getDeclaringClass().isAssignableFrom(Advised.class)) {</span>
+<span class="pc bpc" id="L822" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L823">					logger.trace(&quot;Method is declared on Advised interface: &quot; + method);</span>
+				}
+<span class="fc" id="L825">				return DISPATCH_ADVISED;</span>
+			}
+			// We must always proxy equals, to direct calls to this.
+<span class="fc bfc" id="L828" title="All 2 branches covered.">			if (AopUtils.isEqualsMethod(method)) {</span>
+<span class="pc bpc" id="L829" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L830">					logger.trace(&quot;Found 'equals' method: &quot; + method);</span>
+				}
+<span class="fc" id="L832">				return INVOKE_EQUALS;</span>
+			}
+			// We must always calculate hashCode based on the proxy.
+<span class="fc bfc" id="L835" title="All 2 branches covered.">			if (AopUtils.isHashCodeMethod(method)) {</span>
+<span class="pc bpc" id="L836" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L837">					logger.trace(&quot;Found 'hashCode' method: &quot; + method);</span>
+				}
+<span class="fc" id="L839">				return INVOKE_HASHCODE;</span>
+			}
+<span class="fc" id="L841">			Class&lt;?&gt; targetClass = this.advised.getTargetClass();</span>
+			// Proxy is not yet available, but that shouldn't matter.
+<span class="fc" id="L843">			List&lt;?&gt; chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);</span>
+<span class="fc bfc" id="L844" title="All 2 branches covered.">			boolean haveAdvice = !chain.isEmpty();</span>
+<span class="fc" id="L845">			boolean exposeProxy = this.advised.isExposeProxy();</span>
+<span class="fc" id="L846">			boolean isStatic = this.advised.getTargetSource().isStatic();</span>
+<span class="fc" id="L847">			boolean isFrozen = this.advised.isFrozen();</span>
+<span class="pc bpc" id="L848" title="1 of 4 branches missed.">			if (haveAdvice || !isFrozen) {</span>
+				// If exposing the proxy, then AOP_PROXY must be used.
+<span class="fc bfc" id="L850" title="All 2 branches covered.">				if (exposeProxy) {</span>
+<span class="pc bpc" id="L851" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L852">						logger.trace(&quot;Must expose proxy on advised method: &quot; + method);</span>
+					}
+<span class="fc" id="L854">					return AOP_PROXY;</span>
+				}
+<span class="fc" id="L856">				Method key = method;</span>
+				// Check to see if we have fixed interceptor to serve this method.
+				// Else use the AOP_PROXY.
+<span class="pc bpc" id="L859" title="3 of 6 branches missed.">				if (isStatic &amp;&amp; isFrozen &amp;&amp; this.fixedInterceptorMap.containsKey(key)) {</span>
+<span class="nc bnc" id="L860" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L861">						logger.trace(&quot;Method has advice and optimizations are enabled: &quot; + method);</span>
+					}
+					// We know that we are optimizing so we can use the FixedStaticChainInterceptors.
+<span class="nc" id="L864">					int index = this.fixedInterceptorMap.get(key);</span>
+<span class="nc" id="L865">					return (index + this.fixedInterceptorOffset);</span>
+				}
+				else {
+<span class="pc bpc" id="L868" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L869">						logger.trace(&quot;Unable to apply any optimizations to advised method: &quot; + method);</span>
+					}
+<span class="fc" id="L871">					return AOP_PROXY;</span>
+				}
+			}
+			else {
+				// See if the return type of the method is outside the class hierarchy of the target type.
+				// If so we know it never needs to have return type massage and can use a dispatcher.
+				// If the proxy is being exposed, then must use the interceptor the correct one is already
+				// configured. If the target is not static, then we cannot use a dispatcher because the
+				// target needs to be explicitly released after the invocation.
+<span class="nc bnc" id="L880" title="All 4 branches missed.">				if (exposeProxy || !isStatic) {</span>
+<span class="nc" id="L881">					return INVOKE_TARGET;</span>
+				}
+<span class="nc" id="L883">				Class&lt;?&gt; returnType = method.getReturnType();</span>
+<span class="nc bnc" id="L884" title="All 4 branches missed.">				if (targetClass != null &amp;&amp; returnType.isAssignableFrom(targetClass)) {</span>
+<span class="nc bnc" id="L885" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L886">						logger.trace(&quot;Method return type is assignable from target type and &quot; +</span>
+								&quot;may therefore return 'this' - using INVOKE_TARGET: &quot; + method);
+					}
+<span class="nc" id="L889">					return INVOKE_TARGET;</span>
+				}
+				else {
+<span class="nc bnc" id="L892" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L893">						logger.trace(&quot;Method return type ensures 'this' cannot be returned - &quot; +</span>
+								&quot;using DISPATCH_TARGET: &quot; + method);
+					}
+<span class="nc" id="L896">					return DISPATCH_TARGET;</span>
+				}
+			}
+		}
+
+		@Override
+		public boolean equals(Object other) {
+<span class="pc bpc" id="L903" title="1 of 2 branches missed.">			if (this == other) {</span>
+<span class="nc" id="L904">				return true;</span>
+			}
+<span class="pc bpc" id="L906" title="1 of 2 branches missed.">			if (!(other instanceof ProxyCallbackFilter)) {</span>
+<span class="nc" id="L907">				return false;</span>
+			}
+<span class="fc" id="L909">			ProxyCallbackFilter otherCallbackFilter = (ProxyCallbackFilter) other;</span>
+<span class="fc" id="L910">			AdvisedSupport otherAdvised = otherCallbackFilter.advised;</span>
+<span class="pc bpc" id="L911" title="1 of 2 branches missed.">			if (this.advised.isFrozen() != otherAdvised.isFrozen()) {</span>
+<span class="nc" id="L912">				return false;</span>
+			}
+<span class="pc bpc" id="L914" title="1 of 2 branches missed.">			if (this.advised.isExposeProxy() != otherAdvised.isExposeProxy()) {</span>
+<span class="nc" id="L915">				return false;</span>
+			}
+<span class="pc bpc" id="L917" title="1 of 2 branches missed.">			if (this.advised.getTargetSource().isStatic() != otherAdvised.getTargetSource().isStatic()) {</span>
+<span class="nc" id="L918">				return false;</span>
+			}
+<span class="pc bpc" id="L920" title="1 of 2 branches missed.">			if (!AopProxyUtils.equalsProxiedInterfaces(this.advised, otherAdvised)) {</span>
+<span class="nc" id="L921">				return false;</span>
+			}
+			// Advice instance identity is unimportant to the proxy class:
+			// All that matters is type and ordering.
+<span class="fc" id="L925">			Advisor[] thisAdvisors = this.advised.getAdvisors();</span>
+<span class="fc" id="L926">			Advisor[] thatAdvisors = otherAdvised.getAdvisors();</span>
+<span class="pc bpc" id="L927" title="1 of 2 branches missed.">			if (thisAdvisors.length != thatAdvisors.length) {</span>
+<span class="nc" id="L928">				return false;</span>
+			}
+<span class="fc bfc" id="L930" title="All 2 branches covered.">			for (int i = 0; i &lt; thisAdvisors.length; i++) {</span>
+<span class="fc" id="L931">				Advisor thisAdvisor = thisAdvisors[i];</span>
+<span class="fc" id="L932">				Advisor thatAdvisor = thatAdvisors[i];</span>
+<span class="pc bpc" id="L933" title="1 of 2 branches missed.">				if (!equalsAdviceClasses(thisAdvisor, thatAdvisor)) {</span>
+<span class="nc" id="L934">					return false;</span>
+				}
+<span class="fc bfc" id="L936" title="All 2 branches covered.">				if (!equalsPointcuts(thisAdvisor, thatAdvisor)) {</span>
+<span class="fc" id="L937">					return false;</span>
+				}
+			}
+<span class="fc" id="L940">			return true;</span>
+		}
+
+		private boolean equalsAdviceClasses(Advisor a, Advisor b) {
+<span class="pc bpc" id="L944" title="1 of 2 branches missed.">			return (a.getAdvice().getClass() == b.getAdvice().getClass());</span>
+		}
+
+		private boolean equalsPointcuts(Advisor a, Advisor b) {
+			// If only one of the advisor (but not both) is PointcutAdvisor, then it is a mismatch.
+			// Takes care of the situations where an IntroductionAdvisor is used (see SPR-3959).
+<span class="pc bpc" id="L950" title="1 of 4 branches missed.">			return (!(a instanceof PointcutAdvisor) ||</span>
+					(b instanceof PointcutAdvisor &amp;&amp;
+<span class="fc bfc" id="L952" title="All 2 branches covered.">							ObjectUtils.nullSafeEquals(((PointcutAdvisor) a).getPointcut(), ((PointcutAdvisor) b).getPointcut())));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L957">			int hashCode = 0;</span>
+<span class="fc" id="L958">			Advisor[] advisors = this.advised.getAdvisors();</span>
+<span class="fc bfc" id="L959" title="All 2 branches covered.">			for (Advisor advisor : advisors) {</span>
+<span class="fc" id="L960">				Advice advice = advisor.getAdvice();</span>
+<span class="fc" id="L961">				hashCode = 13 * hashCode + advice.getClass().hashCode();</span>
+			}
+<span class="pc bpc" id="L963" title="1 of 2 branches missed.">			hashCode = 13 * hashCode + (this.advised.isFrozen() ? 1 : 0);</span>
+<span class="fc bfc" id="L964" title="All 2 branches covered.">			hashCode = 13 * hashCode + (this.advised.isExposeProxy() ? 1 : 0);</span>
+<span class="pc bpc" id="L965" title="1 of 2 branches missed.">			hashCode = 13 * hashCode + (this.advised.isOptimize() ? 1 : 0);</span>
+<span class="pc bpc" id="L966" title="1 of 2 branches missed.">			hashCode = 13 * hashCode + (this.advised.isOpaque() ? 1 : 0);</span>
+<span class="fc" id="L967">			return hashCode;</span>
+		}
+	}
+
+
+	/**
+	 * CGLIB GeneratorStrategy variant which exposes the application ClassLoader
+	 * as thread context ClassLoader for the time of class generation
+	 * (in order for ASM to pick it up when doing common superclass resolution).
+	 */
+	private static class ClassLoaderAwareUndeclaredThrowableStrategy extends UndeclaredThrowableStrategy {
+
+		@Nullable
+		private final ClassLoader classLoader;
+
+		public ClassLoaderAwareUndeclaredThrowableStrategy(@Nullable ClassLoader classLoader) {
+<span class="fc" id="L983">			super(UndeclaredThrowableException.class);</span>
+<span class="fc" id="L984">			this.classLoader = classLoader;</span>
+<span class="fc" id="L985">		}</span>
+
+		@Override
+		public byte[] generate(ClassGenerator cg) throws Exception {
+<span class="fc bfc" id="L989" title="All 2 branches covered.">			if (this.classLoader == null) {</span>
+<span class="fc" id="L990">				return super.generate(cg);</span>
+			}
+
+<span class="fc" id="L993">			Thread currentThread = Thread.currentThread();</span>
+			ClassLoader threadContextClassLoader;
+			try {
+<span class="fc" id="L996">				threadContextClassLoader = currentThread.getContextClassLoader();</span>
+			}
+<span class="nc" id="L998">			catch (Throwable ex) {</span>
+				// Cannot access thread context ClassLoader - falling back...
+<span class="nc" id="L1000">				return super.generate(cg);</span>
+<span class="fc" id="L1001">			}</span>
+
+<span class="pc bpc" id="L1003" title="1 of 2 branches missed.">			boolean overrideClassLoader = !this.classLoader.equals(threadContextClassLoader);</span>
+<span class="pc bpc" id="L1004" title="1 of 2 branches missed.">			if (overrideClassLoader) {</span>
+<span class="nc" id="L1005">				currentThread.setContextClassLoader(this.classLoader);</span>
+			}
+			try {
+<span class="fc" id="L1008">				return super.generate(cg);</span>
+			}
+			finally {
+<span class="pc bpc" id="L1011" title="1 of 2 branches missed.">				if (overrideClassLoader) {</span>
+					// Reset original thread context ClassLoader.
+<span class="nc" id="L1013">					currentThread.setContextClassLoader(threadContextClassLoader);</span>
+				}
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InMemoryWebSessionStore.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.server.session</a> &gt; <span class="el_source">InMemoryWebSessionStore.java</span></div><h1>InMemoryWebSessionStore.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.server.session;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
+
+import reactor.core.publisher.Mono;
+
+import org.springframework.util.Assert;
+import org.springframework.util.IdGenerator;
+import org.springframework.util.JdkIdGenerator;
+import org.springframework.web.server.WebSession;
+
+/**
+ * Simple Map-based storage for {@link WebSession} instances.
+ *
+ * @author Rossen Stoyanchev
+ * @author Rob Winch
+ * @since 5.0
+ */
+<span class="fc" id="L45">public class InMemoryWebSessionStore implements WebSessionStore {</span>
+
+<span class="fc" id="L47">	private static final IdGenerator idGenerator = new JdkIdGenerator();</span>
+
+
+<span class="fc" id="L50">	private int maxSessions = 10000;</span>
+
+<span class="fc" id="L52">	private Clock clock = Clock.system(ZoneId.of(&quot;GMT&quot;));</span>
+
+<span class="fc" id="L54">	private final Map&lt;String, InMemoryWebSession&gt; sessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L56">	private final ExpiredSessionChecker expiredSessionChecker = new ExpiredSessionChecker();</span>
+
+
+	/**
+	 * Set the maximum number of sessions that can be stored. Once the limit is
+	 * reached, any attempt to store an additional session will result in an
+	 * {@link IllegalStateException}.
+	 * &lt;p&gt;By default set to 10000.
+	 * @param maxSessions the maximum number of sessions
+	 * @since 5.0.8
+	 */
+	public void setMaxSessions(int maxSessions) {
+<span class="nc" id="L68">		this.maxSessions = maxSessions;</span>
+<span class="nc" id="L69">	}</span>
+
+	/**
+	 * Return the maximum number of sessions that can be stored.
+	 * @since 5.0.8
+	 */
+	public int getMaxSessions() {
+<span class="nc" id="L76">		return this.maxSessions;</span>
+	}
+
+	/**
+	 * Configure the {@link Clock} to use to set lastAccessTime on every created
+	 * session and to calculate if it is expired.
+	 * &lt;p&gt;This may be useful to align to different timezone or to set the clock
+	 * back in a test, e.g. {@code Clock.offset(clock, Duration.ofMinutes(-31))}
+	 * in order to simulate session expiration.
+	 * &lt;p&gt;By default this is {@code Clock.system(ZoneId.of(&quot;GMT&quot;))}.
+	 * @param clock the clock to use
+	 */
+	public void setClock(Clock clock) {
+<span class="fc" id="L89">		Assert.notNull(clock, &quot;Clock is required&quot;);</span>
+<span class="fc" id="L90">		this.clock = clock;</span>
+<span class="fc" id="L91">		removeExpiredSessions();</span>
+<span class="fc" id="L92">	}</span>
+
+	/**
+	 * Return the configured clock for session lastAccessTime calculations.
+	 */
+	public Clock getClock() {
+<span class="fc" id="L98">		return this.clock;</span>
+	}
+
+	/**
+	 * Return the map of sessions with an {@link Collections#unmodifiableMap
+	 * unmodifiable} wrapper. This could be used for management purposes, to
+	 * list active sessions, invalidate expired ones, etc.
+	 * @since 5.0.8
+	 */
+	public Map&lt;String, WebSession&gt; getSessions() {
+<span class="nc" id="L108">		return Collections.unmodifiableMap(this.sessions);</span>
+	}
+
+
+	@Override
+	public Mono&lt;WebSession&gt; createWebSession() {
+<span class="fc" id="L114">		Instant now = this.clock.instant();</span>
+<span class="fc" id="L115">		this.expiredSessionChecker.checkIfNecessary(now);</span>
+<span class="fc" id="L116">		return Mono.fromSupplier(() -&gt; new InMemoryWebSession(now));</span>
+	}
+
+	@Override
+	public Mono&lt;WebSession&gt; retrieveSession(String id) {
+<span class="fc" id="L121">		Instant now = this.clock.instant();</span>
+<span class="fc" id="L122">		this.expiredSessionChecker.checkIfNecessary(now);</span>
+<span class="fc" id="L123">		InMemoryWebSession session = this.sessions.get(id);</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">		if (session == null) {</span>
+<span class="fc" id="L125">			return Mono.empty();</span>
+		}
+<span class="pc bpc" id="L127" title="1 of 2 branches missed.">		else if (session.isExpired(now)) {</span>
+<span class="nc" id="L128">			this.sessions.remove(id);</span>
+<span class="nc" id="L129">			return Mono.empty();</span>
+		}
+		else {
+<span class="fc" id="L132">			session.updateLastAccessTime(now);</span>
+<span class="fc" id="L133">			return Mono.just(session);</span>
+		}
+	}
+
+	@Override
+	public Mono&lt;Void&gt; removeSession(String id) {
+<span class="nc" id="L139">		this.sessions.remove(id);</span>
+<span class="nc" id="L140">		return Mono.empty();</span>
+	}
+
+	public Mono&lt;WebSession&gt; updateLastAccessTime(WebSession session) {
+<span class="nc" id="L144">		return Mono.fromSupplier(() -&gt; {</span>
+<span class="nc" id="L145">			Assert.isInstanceOf(InMemoryWebSession.class, session);</span>
+<span class="nc" id="L146">			((InMemoryWebSession) session).updateLastAccessTime(this.clock.instant());</span>
+<span class="nc" id="L147">			return session;</span>
+		});
+	}
+
+	/**
+	 * Check for expired sessions and remove them. Typically such checks are
+	 * kicked off lazily during calls to {@link #createWebSession() create} or
+	 * {@link #retrieveSession retrieve}, no less than 60 seconds apart.
+	 * This method can be called to force a check at a specific time.
+	 * @since 5.0.8
+	 */
+	public void removeExpiredSessions() {
+<span class="fc" id="L159">		this.expiredSessionChecker.removeExpiredSessions(this.clock.instant());</span>
+<span class="fc" id="L160">	}</span>
+
+
+	private class InMemoryWebSession implements WebSession {
+
+<span class="fc" id="L165">		private final AtomicReference&lt;String&gt; id = new AtomicReference&lt;&gt;(String.valueOf(idGenerator.generateId()));</span>
+
+<span class="fc" id="L167">		private final Map&lt;String, Object&gt; attributes = new ConcurrentHashMap&lt;&gt;();</span>
+
+		private final Instant creationTime;
+
+		private volatile Instant lastAccessTime;
+
+<span class="fc" id="L173">		private volatile Duration maxIdleTime = Duration.ofMinutes(30);</span>
+
+<span class="fc" id="L175">		private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.NEW);</span>
+
+
+<span class="fc" id="L178">		public InMemoryWebSession(Instant creationTime) {</span>
+<span class="fc" id="L179">			this.creationTime = creationTime;</span>
+<span class="fc" id="L180">			this.lastAccessTime = this.creationTime;</span>
+<span class="fc" id="L181">		}</span>
+
+		@Override
+		public String getId() {
+<span class="fc" id="L185">			return this.id.get();</span>
+		}
+
+		@Override
+		public Map&lt;String, Object&gt; getAttributes() {
+<span class="fc" id="L190">			return this.attributes;</span>
+		}
+
+		@Override
+		public Instant getCreationTime() {
+<span class="nc" id="L195">			return this.creationTime;</span>
+		}
+
+		@Override
+		public Instant getLastAccessTime() {
+<span class="fc" id="L200">			return this.lastAccessTime;</span>
+		}
+
+		@Override
+		public void setMaxIdleTime(Duration maxIdleTime) {
+<span class="nc" id="L205">			this.maxIdleTime = maxIdleTime;</span>
+<span class="nc" id="L206">		}</span>
+
+		@Override
+		public Duration getMaxIdleTime() {
+<span class="nc" id="L210">			return this.maxIdleTime;</span>
+		}
+
+		@Override
+		public void start() {
+<span class="fc" id="L215">			this.state.compareAndSet(State.NEW, State.STARTED);</span>
+<span class="fc" id="L216">		}</span>
+
+		@Override
+		public boolean isStarted() {
+<span class="fc bfc" id="L220" title="All 4 branches covered.">			return this.state.get().equals(State.STARTED) || !getAttributes().isEmpty();</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; changeSessionId() {
+<span class="fc" id="L225">			String currentId = this.id.get();</span>
+<span class="fc" id="L226">			InMemoryWebSessionStore.this.sessions.remove(currentId);</span>
+<span class="fc" id="L227">			String newId = String.valueOf(idGenerator.generateId());</span>
+<span class="fc" id="L228">			this.id.set(newId);</span>
+<span class="fc" id="L229">			InMemoryWebSessionStore.this.sessions.put(this.getId(), this);</span>
+<span class="fc" id="L230">			return Mono.empty();</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; invalidate() {
+<span class="fc" id="L235">			this.state.set(State.EXPIRED);</span>
+<span class="fc" id="L236">			getAttributes().clear();</span>
+<span class="fc" id="L237">			InMemoryWebSessionStore.this.sessions.remove(this.id.get());</span>
+<span class="fc" id="L238">			return Mono.empty();</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; save() {
+
+<span class="fc" id="L244">			checkMaxSessionsLimit();</span>
+
+			// Implicitly started session..
+<span class="fc bfc" id="L247" title="All 2 branches covered.">			if (!getAttributes().isEmpty()) {</span>
+<span class="fc" id="L248">				this.state.compareAndSet(State.NEW, State.STARTED);</span>
+			}
+
+<span class="fc bfc" id="L251" title="All 2 branches covered.">			if (isStarted()) {</span>
+				// Save
+<span class="fc" id="L253">				InMemoryWebSessionStore.this.sessions.put(this.getId(), this);</span>
+
+				// Unless it was invalidated
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">				if (this.state.get().equals(State.EXPIRED)) {</span>
+<span class="nc" id="L257">					InMemoryWebSessionStore.this.sessions.remove(this.getId());</span>
+<span class="nc" id="L258">					return Mono.error(new IllegalStateException(&quot;Session was invalidated&quot;));</span>
+				}
+			}
+
+<span class="fc" id="L262">			return Mono.empty();</span>
+		}
+
+		private void checkMaxSessionsLimit() {
+<span class="fc bfc" id="L266" title="All 2 branches covered.">			if (sessions.size() &gt;= maxSessions) {</span>
+<span class="fc" id="L267">				expiredSessionChecker.removeExpiredSessions(clock.instant());</span>
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">				if (sessions.size() &gt;= maxSessions) {</span>
+<span class="fc" id="L269">					throw new IllegalStateException(&quot;Max sessions limit reached: &quot; + sessions.size());</span>
+				}
+			}
+<span class="fc" id="L272">		}</span>
+
+		@Override
+		public boolean isExpired() {
+<span class="fc" id="L276">			return isExpired(clock.instant());</span>
+		}
+
+		private boolean isExpired(Instant now) {
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">			if (this.state.get().equals(State.EXPIRED)) {</span>
+<span class="nc" id="L281">				return true;</span>
+			}
+<span class="fc bfc" id="L283" title="All 2 branches covered.">			if (checkExpired(now)) {</span>
+<span class="fc" id="L284">				this.state.set(State.EXPIRED);</span>
+<span class="fc" id="L285">				return true;</span>
+			}
+<span class="fc" id="L287">			return false;</span>
+		}
+
+		private boolean checkExpired(Instant currentTime) {
+<span class="pc bpc" id="L291" title="2 of 4 branches missed.">			return isStarted() &amp;&amp; !this.maxIdleTime.isNegative() &amp;&amp;</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">					currentTime.minus(this.maxIdleTime).isAfter(this.lastAccessTime);</span>
+		}
+
+		private void updateLastAccessTime(Instant currentTime) {
+<span class="fc" id="L296">			this.lastAccessTime = currentTime;</span>
+<span class="fc" id="L297">		}</span>
+	}
+
+
+<span class="fc" id="L301">	private class ExpiredSessionChecker {</span>
+
+		/** Max time between expiration checks. */
+		private static final int CHECK_PERIOD = 60 * 1000;
+
+
+<span class="fc" id="L307">		private final ReentrantLock lock = new ReentrantLock();</span>
+
+<span class="fc" id="L309">		private Instant checkTime = clock.instant().plus(CHECK_PERIOD, ChronoUnit.MILLIS);</span>
+
+
+		public void checkIfNecessary(Instant now) {
+<span class="fc bfc" id="L313" title="All 2 branches covered.">			if (this.checkTime.isBefore(now)) {</span>
+<span class="fc" id="L314">				removeExpiredSessions(now);</span>
+			}
+<span class="fc" id="L316">		}</span>
+
+		public void removeExpiredSessions(Instant now) {
+<span class="pc bpc" id="L319" title="1 of 2 branches missed.">			if (sessions.isEmpty()) {</span>
+<span class="nc" id="L320">				return;</span>
+			}
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">			if (this.lock.tryLock()) {</span>
+				try {
+<span class="fc" id="L324">					Iterator&lt;InMemoryWebSession&gt; iterator = sessions.values().iterator();</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">					while (iterator.hasNext()) {</span>
+<span class="fc" id="L326">						InMemoryWebSession session = iterator.next();</span>
+<span class="fc bfc" id="L327" title="All 2 branches covered.">						if (session.isExpired(now)) {</span>
+<span class="fc" id="L328">							iterator.remove();</span>
+<span class="fc" id="L329">							session.invalidate();</span>
+						}
+<span class="fc" id="L331">					}</span>
+				}
+				finally {
+<span class="fc" id="L334">					this.checkTime = now.plus(CHECK_PERIOD, ChronoUnit.MILLIS);</span>
+<span class="fc" id="L335">					this.lock.unlock();</span>
+				}
+			}
+<span class="fc" id="L338">		}</span>
+	}
+
+
+<span class="fc" id="L342">	private enum State { NEW, STARTED, EXPIRED }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

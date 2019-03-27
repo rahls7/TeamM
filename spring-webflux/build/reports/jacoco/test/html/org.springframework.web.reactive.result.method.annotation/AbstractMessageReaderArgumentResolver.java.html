@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractMessageReaderArgumentResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method.annotation</a> &gt; <span class="el_source">AbstractMessageReaderArgumentResolver.java</span></div><h1>AbstractMessageReaderArgumentResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method.annotation;
+
+import java.lang.annotation.Annotation;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.Conventions;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.codec.DecodingException;
+import org.springframework.core.codec.Hints;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.HttpMessageReader;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.validation.Validator;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.support.WebExchangeBindException;
+import org.springframework.web.bind.support.WebExchangeDataBinder;
+import org.springframework.web.reactive.BindingContext;
+import org.springframework.web.reactive.result.method.HandlerMethodArgumentResolverSupport;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.ServerWebInputException;
+import org.springframework.web.server.UnsupportedMediaTypeStatusException;
+
+/**
+ * Abstract base class for argument resolvers that resolve method arguments
+ * by reading the request body with an {@link HttpMessageReader}.
+ *
+ * &lt;p&gt;Applies validation if the method argument is annotated with
+ * {@code @javax.validation.Valid} or
+ * {@link org.springframework.validation.annotation.Validated}. Validation
+ * failure results in an {@link ServerWebInputException}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @since 5.0
+ */
+public abstract class AbstractMessageReaderArgumentResolver extends HandlerMethodArgumentResolverSupport {
+
+<span class="fc" id="L70">	private static final Set&lt;HttpMethod&gt; SUPPORTED_METHODS =</span>
+<span class="fc" id="L71">			EnumSet.of(HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH);</span>
+
+
+	private final List&lt;HttpMessageReader&lt;?&gt;&gt; messageReaders;
+
+	private final List&lt;MediaType&gt; supportedMediaTypes;
+
+
+	/**
+	 * Constructor with {@link HttpMessageReader}'s and a {@link Validator}.
+	 * @param readers readers to convert from the request body
+	 */
+	protected AbstractMessageReaderArgumentResolver(List&lt;HttpMessageReader&lt;?&gt;&gt; readers) {
+<span class="fc" id="L84">		this(readers, ReactiveAdapterRegistry.getSharedInstance());</span>
+<span class="fc" id="L85">	}</span>
+
+	/**
+	 * Constructor that also accepts a {@link ReactiveAdapterRegistry}.
+	 * @param messageReaders readers to convert from the request body
+	 * @param adapterRegistry for adapting to other reactive types from Flux and Mono
+	 */
+	protected AbstractMessageReaderArgumentResolver(
+			List&lt;HttpMessageReader&lt;?&gt;&gt; messageReaders, ReactiveAdapterRegistry adapterRegistry) {
+
+<span class="fc" id="L95">		super(adapterRegistry);</span>
+<span class="fc" id="L96">		Assert.notEmpty(messageReaders, &quot;At least one HttpMessageReader is required&quot;);</span>
+<span class="fc" id="L97">		Assert.notNull(adapterRegistry, &quot;ReactiveAdapterRegistry is required&quot;);</span>
+<span class="fc" id="L98">		this.messageReaders = messageReaders;</span>
+<span class="fc" id="L99">		this.supportedMediaTypes = messageReaders.stream()</span>
+<span class="fc" id="L100">				.flatMap(converter -&gt; converter.getReadableMediaTypes().stream())</span>
+<span class="fc" id="L101">				.collect(Collectors.toList());</span>
+<span class="fc" id="L102">	}</span>
+
+
+	/**
+	 * Return the configured message converters.
+	 */
+	public List&lt;HttpMessageReader&lt;?&gt;&gt; getMessageReaders() {
+<span class="fc" id="L109">		return this.messageReaders;</span>
+	}
+
+
+	/**
+	 * Read the body from a method argument with {@link HttpMessageReader}.
+	 * @param bodyParameter the {@link MethodParameter} to read
+	 * @param isBodyRequired true if the body is required
+	 * @param bindingContext the binding context to use
+	 * @param exchange the current exchange
+	 * @return the body
+	 * @see #readBody(MethodParameter, MethodParameter, boolean, BindingContext, ServerWebExchange)
+	 */
+	protected Mono&lt;Object&gt; readBody(MethodParameter bodyParameter, boolean isBodyRequired,
+			BindingContext bindingContext, ServerWebExchange exchange) {
+
+<span class="fc" id="L125">		return this.readBody(bodyParameter, null, isBodyRequired, bindingContext, exchange);</span>
+	}
+
+	/**
+	 * Read the body from a method argument with {@link HttpMessageReader}.
+	 * @param bodyParam represents the element type for the body
+	 * @param actualParam the actual method argument type; possibly different
+	 * from {@code bodyParam}, e.g. for an {@code HttpEntity} argument
+	 * @param isBodyRequired true if the body is required
+	 * @param bindingContext the binding context to use
+	 * @param exchange the current exchange
+	 * @return a Mono with the value to use for the method argument
+	 * @since 5.0.2
+	 */
+	protected Mono&lt;Object&gt; readBody(MethodParameter bodyParam, @Nullable MethodParameter actualParam,
+			boolean isBodyRequired, BindingContext bindingContext, ServerWebExchange exchange) {
+
+<span class="fc" id="L142">		ResolvableType bodyType = ResolvableType.forMethodParameter(bodyParam);</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">		ResolvableType actualType = (actualParam != null ? ResolvableType.forMethodParameter(actualParam) : bodyType);</span>
+<span class="fc" id="L144">		Class&lt;?&gt; resolvedType = bodyType.resolve();</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">		ReactiveAdapter adapter = (resolvedType != null ? getAdapterRegistry().getAdapter(resolvedType) : null);</span>
+<span class="fc bfc" id="L146" title="All 2 branches covered.">		ResolvableType elementType = (adapter != null ? bodyType.getGeneric() : bodyType);</span>
+<span class="fc bfc" id="L147" title="All 6 branches covered.">		isBodyRequired = isBodyRequired || (adapter != null &amp;&amp; !adapter.supportsEmpty());</span>
+
+<span class="fc" id="L149">		ServerHttpRequest request = exchange.getRequest();</span>
+<span class="fc" id="L150">		ServerHttpResponse response = exchange.getResponse();</span>
+
+<span class="fc" id="L152">		MediaType contentType = request.getHeaders().getContentType();</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">		MediaType mediaType = (contentType != null ? contentType : MediaType.APPLICATION_OCTET_STREAM);</span>
+<span class="fc" id="L154">		Object[] hints = extractValidationHints(bodyParam);</span>
+
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">		if (mediaType.isCompatibleWith(MediaType.APPLICATION_FORM_URLENCODED)) {</span>
+<span class="nc" id="L157">			return Mono.error(new IllegalStateException(</span>
+					&quot;In a WebFlux application, form data is accessed via ServerWebExchange.getFormData().&quot;));
+		}
+
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">			logger.debug(exchange.getLogPrefix() + (contentType != null ?</span>
+					&quot;Content-Type:&quot; + contentType :
+					&quot;No Content-Type, using &quot; + MediaType.APPLICATION_OCTET_STREAM));
+		}
+
+<span class="fc bfc" id="L167" title="All 2 branches covered.">		for (HttpMessageReader&lt;?&gt; reader : getMessageReaders()) {</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">			if (reader.canRead(elementType, mediaType)) {</span>
+<span class="fc" id="L169">				Map&lt;String, Object&gt; readHints = Hints.from(Hints.LOG_PREFIX_HINT, exchange.getLogPrefix());</span>
+<span class="fc bfc" id="L170" title="All 4 branches covered.">				if (adapter != null &amp;&amp; adapter.isMultiValue()) {</span>
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L172">						logger.debug(exchange.getLogPrefix() + &quot;0..N [&quot; + elementType + &quot;]&quot;);</span>
+					}
+<span class="fc" id="L174">					Flux&lt;?&gt; flux = reader.read(actualType, elementType, request, response, readHints);</span>
+<span class="fc" id="L175">					flux = flux.onErrorResume(ex -&gt; Flux.error(handleReadError(bodyParam, ex)));</span>
+<span class="fc bfc" id="L176" title="All 2 branches covered.">					if (isBodyRequired) {</span>
+<span class="fc" id="L177">						flux = flux.switchIfEmpty(Flux.error(() -&gt; handleMissingBody(bodyParam)));</span>
+					}
+<span class="fc bfc" id="L179" title="All 2 branches covered.">					if (hints != null) {</span>
+<span class="fc" id="L180">						flux = flux.doOnNext(target -&gt;</span>
+<span class="fc" id="L181">								validate(target, hints, bodyParam, bindingContext, exchange));</span>
+					}
+<span class="fc" id="L183">					return Mono.just(adapter.fromPublisher(flux));</span>
+				}
+				else {
+					// Single-value (with or without reactive type wrapper)
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L188">						logger.debug(exchange.getLogPrefix() + &quot;0..1 [&quot; + elementType + &quot;]&quot;);</span>
+					}
+<span class="fc" id="L190">					Mono&lt;?&gt; mono = reader.readMono(actualType, elementType, request, response, readHints);</span>
+<span class="pc" id="L191">					mono = mono.onErrorResume(ex -&gt; Mono.error(handleReadError(bodyParam, ex)));</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">					if (isBodyRequired) {</span>
+<span class="fc" id="L193">						mono = mono.switchIfEmpty(Mono.error(() -&gt; handleMissingBody(bodyParam)));</span>
+					}
+<span class="fc bfc" id="L195" title="All 2 branches covered.">					if (hints != null) {</span>
+<span class="fc" id="L196">						mono = mono.doOnNext(target -&gt;</span>
+<span class="fc" id="L197">								validate(target, hints, bodyParam, bindingContext, exchange));</span>
+					}
+<span class="fc bfc" id="L199" title="All 2 branches covered.">					return (adapter != null ? Mono.just(adapter.fromPublisher(mono)) : Mono.from(mono));</span>
+				}
+			}
+<span class="fc" id="L202">		}</span>
+
+		// No compatible reader but body may be empty..
+
+<span class="fc" id="L206">		HttpMethod method = request.getMethod();</span>
+<span class="pc bpc" id="L207" title="3 of 6 branches missed.">		if (contentType == null &amp;&amp; method != null &amp;&amp; SUPPORTED_METHODS.contains(method)) {</span>
+<span class="fc" id="L208">			Flux&lt;DataBuffer&gt; body = request.getBody().doOnNext(o -&gt; {</span>
+				// Body not empty, back to 415..
+<span class="fc" id="L210">				throw new UnsupportedMediaTypeStatusException(mediaType, this.supportedMediaTypes, elementType);</span>
+			});
+<span class="fc bfc" id="L212" title="All 2 branches covered.">			if (isBodyRequired) {</span>
+<span class="pc" id="L213">				body = body.switchIfEmpty(Mono.error(() -&gt; handleMissingBody(bodyParam)));</span>
+			}
+<span class="fc bfc" id="L215" title="All 2 branches covered.">			return (adapter != null ? Mono.just(adapter.fromPublisher(body)) : Mono.from(body));</span>
+		}
+
+<span class="nc" id="L218">		return Mono.error(new UnsupportedMediaTypeStatusException(mediaType, this.supportedMediaTypes, elementType));</span>
+	}
+
+	private Throwable handleReadError(MethodParameter parameter, Throwable ex) {
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">		return (ex instanceof DecodingException ?</span>
+				new ServerWebInputException(&quot;Failed to read HTTP message&quot;, parameter, ex) : ex);
+	}
+
+	private ServerWebInputException handleMissingBody(MethodParameter parameter) {
+<span class="fc" id="L227">		String paramInfo = parameter.getExecutable().toGenericString();</span>
+<span class="fc" id="L228">		return new ServerWebInputException(&quot;Request body is missing: &quot; + paramInfo, parameter);</span>
+	}
+
+	/**
+	 * Check if the given MethodParameter requires validation and if so return
+	 * a (possibly empty) Object[] with validation hints. A return value of
+	 * {@code null} indicates that validation is not required.
+	 */
+	@Nullable
+	private Object[] extractValidationHints(MethodParameter parameter) {
+<span class="fc" id="L238">		Annotation[] annotations = parameter.getParameterAnnotations();</span>
+<span class="fc bfc" id="L239" title="All 2 branches covered.">		for (Annotation ann : annotations) {</span>
+<span class="fc" id="L240">			Validated validatedAnn = AnnotationUtils.getAnnotation(ann, Validated.class);</span>
+<span class="pc bpc" id="L241" title="1 of 4 branches missed.">			if (validatedAnn != null || ann.annotationType().getSimpleName().startsWith(&quot;Valid&quot;)) {</span>
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">				Object hints = (validatedAnn != null ? validatedAnn.value() : AnnotationUtils.getValue(ann));</span>
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">				return (hints instanceof Object[] ? (Object[]) hints : new Object[] {hints});</span>
+			}
+		}
+<span class="fc" id="L246">		return null;</span>
+	}
+
+	private void validate(Object target, Object[] validationHints, MethodParameter param,
+			BindingContext binding, ServerWebExchange exchange) {
+
+<span class="fc" id="L252">		String name = Conventions.getVariableNameForParameter(param);</span>
+<span class="fc" id="L253">		WebExchangeDataBinder binder = binding.createDataBinder(exchange, target, name);</span>
+<span class="fc" id="L254">		binder.validate(validationHints);</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">		if (binder.getBindingResult().hasErrors()) {</span>
+<span class="fc" id="L256">			throw new WebExchangeBindException(param, binder.getBindingResult());</span>
+		}
+<span class="fc" id="L258">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

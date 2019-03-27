@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UserDestinationMessageHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.user</a> &gt; <span class="el_source">UserDestinationMessageHandler.java</span></div><h1>UserDestinationMessageHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.user;
+
+import java.util.Arrays;
+import java.util.List;
+
+import org.apache.commons.logging.Log;
+
+import org.springframework.context.SmartLifecycle;
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageHandler;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.MessagingException;
+import org.springframework.messaging.SubscribableChannel;
+import org.springframework.messaging.core.MessageSendingOperations;
+import org.springframework.messaging.simp.SimpLogging;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageType;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderInitializer;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@code MessageHandler} with support for &quot;user&quot; destinations.
+ *
+ * &lt;p&gt;Listens for messages with &quot;user&quot; destinations, translates their destination
+ * to actual target destinations unique to the active session(s) of a user, and
+ * then sends the resolved messages to the broker channel to be delivered.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.0
+ */
+public class UserDestinationMessageHandler implements MessageHandler, SmartLifecycle {
+
+<span class="fc" id="L53">	private static final Log logger = SimpLogging.forLogName(UserDestinationMessageHandler.class);</span>
+
+
+	private final SubscribableChannel clientInboundChannel;
+
+	private final SubscribableChannel brokerChannel;
+
+	private final UserDestinationResolver destinationResolver;
+
+	private final MessageSendingOperations&lt;String&gt; messagingTemplate;
+
+	@Nullable
+	private BroadcastHandler broadcastHandler;
+
+	@Nullable
+	private MessageHeaderInitializer headerInitializer;
+
+<span class="fc" id="L70">	private volatile boolean running = false;</span>
+
+<span class="fc" id="L72">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Create an instance with the given client and broker channels subscribing
+	 * to handle messages from each and then sending any resolved messages to the
+	 * broker channel.
+	 * @param clientInboundChannel messages received from clients.
+	 * @param brokerChannel messages sent to the broker.
+	 * @param resolver the resolver for &quot;user&quot; destinations.
+	 */
+	public UserDestinationMessageHandler(SubscribableChannel clientInboundChannel,
+<span class="fc" id="L84">			SubscribableChannel brokerChannel, UserDestinationResolver resolver) {</span>
+
+<span class="fc" id="L86">		Assert.notNull(clientInboundChannel, &quot;'clientInChannel' must not be null&quot;);</span>
+<span class="fc" id="L87">		Assert.notNull(brokerChannel, &quot;'brokerChannel' must not be null&quot;);</span>
+<span class="fc" id="L88">		Assert.notNull(resolver, &quot;resolver must not be null&quot;);</span>
+
+<span class="fc" id="L90">		this.clientInboundChannel = clientInboundChannel;</span>
+<span class="fc" id="L91">		this.brokerChannel = brokerChannel;</span>
+<span class="fc" id="L92">		this.messagingTemplate = new SimpMessagingTemplate(brokerChannel);</span>
+<span class="fc" id="L93">		this.destinationResolver = resolver;</span>
+<span class="fc" id="L94">	}</span>
+
+
+	/**
+	 * Return the configured {@link UserDestinationResolver}.
+	 */
+	public UserDestinationResolver getUserDestinationResolver() {
+<span class="nc" id="L101">		return this.destinationResolver;</span>
+	}
+
+	/**
+	 * Set a destination to broadcast messages to that remain unresolved because
+	 * the user is not connected. In a multi-application server scenario this
+	 * gives other application servers a chance to try.
+	 * &lt;p&gt;By default this is not set.
+	 * @param destination the target destination.
+	 */
+	public void setBroadcastDestination(@Nullable String destination) {
+<span class="pc bpc" id="L112" title="1 of 2 branches missed.">		this.broadcastHandler = (StringUtils.hasText(destination) ?</span>
+				new BroadcastHandler(this.messagingTemplate, destination) : null);
+<span class="fc" id="L114">	}</span>
+
+	/**
+	 * Return the configured destination for unresolved messages.
+	 */
+	@Nullable
+	public String getBroadcastDestination() {
+<span class="fc bfc" id="L121" title="All 2 branches covered.">		return (this.broadcastHandler != null ? this.broadcastHandler.getBroadcastDestination() : null);</span>
+	}
+
+	/**
+	 * Return the messaging template used to send resolved messages to the
+	 * broker channel.
+	 */
+	public MessageSendingOperations&lt;String&gt; getBrokerMessagingTemplate() {
+<span class="nc" id="L129">		return this.messagingTemplate;</span>
+	}
+
+	/**
+	 * Configure a custom {@link MessageHeaderInitializer} to initialize the
+	 * headers of resolved target messages.
+	 * &lt;p&gt;By default this is not set.
+	 */
+	public void setHeaderInitializer(@Nullable MessageHeaderInitializer headerInitializer) {
+<span class="nc" id="L138">		this.headerInitializer = headerInitializer;</span>
+<span class="nc" id="L139">	}</span>
+
+	/**
+	 * Return the configured header initializer.
+	 */
+	@Nullable
+	public MessageHeaderInitializer getHeaderInitializer() {
+<span class="fc" id="L146">		return this.headerInitializer;</span>
+	}
+
+
+	@Override
+	public final void start() {
+<span class="fc" id="L152">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L153">			this.clientInboundChannel.subscribe(this);</span>
+<span class="fc" id="L154">			this.brokerChannel.subscribe(this);</span>
+<span class="fc" id="L155">			this.running = true;</span>
+<span class="fc" id="L156">		}</span>
+<span class="fc" id="L157">	}</span>
+
+	@Override
+	public final void stop() {
+<span class="nc" id="L161">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L162">			this.running = false;</span>
+<span class="nc" id="L163">			this.clientInboundChannel.unsubscribe(this);</span>
+<span class="nc" id="L164">			this.brokerChannel.unsubscribe(this);</span>
+<span class="nc" id="L165">		}</span>
+<span class="nc" id="L166">	}</span>
+
+	@Override
+	public final void stop(Runnable callback) {
+<span class="nc" id="L170">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L171">			stop();</span>
+<span class="nc" id="L172">			callback.run();</span>
+<span class="nc" id="L173">		}</span>
+<span class="nc" id="L174">	}</span>
+
+	@Override
+	public final boolean isRunning() {
+<span class="fc" id="L178">		return this.running;</span>
+	}
+
+
+	@Override
+	public void handleMessage(Message&lt;?&gt; message) throws MessagingException {
+<span class="fc" id="L184">		Message&lt;?&gt; messageToUse = message;</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">		if (this.broadcastHandler != null) {</span>
+<span class="fc" id="L186">			messageToUse = this.broadcastHandler.preHandle(message);</span>
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">			if (messageToUse == null) {</span>
+<span class="nc" id="L188">				return;</span>
+			}
+		}
+
+<span class="fc" id="L192">		UserDestinationResult result = this.destinationResolver.resolveDestination(messageToUse);</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">		if (result == null) {</span>
+<span class="fc" id="L194">			return;</span>
+		}
+
+<span class="fc bfc" id="L197" title="All 2 branches covered.">		if (result.getTargetDestinations().isEmpty()) {</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L199">				logger.trace(&quot;No active sessions for user destination: &quot; + result.getSourceDestination());</span>
+			}
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">			if (this.broadcastHandler != null) {</span>
+<span class="fc" id="L202">				this.broadcastHandler.handleUnresolved(messageToUse);</span>
+			}
+<span class="fc" id="L204">			return;</span>
+		}
+
+<span class="fc" id="L207">		SimpMessageHeaderAccessor accessor = SimpMessageHeaderAccessor.wrap(messageToUse);</span>
+<span class="fc" id="L208">		initHeaders(accessor);</span>
+<span class="fc" id="L209">		accessor.setNativeHeader(SimpMessageHeaderAccessor.ORIGINAL_DESTINATION, result.getSubscribeDestination());</span>
+<span class="fc" id="L210">		accessor.setLeaveMutable(true);</span>
+
+<span class="fc" id="L212">		messageToUse = MessageBuilder.createMessage(messageToUse.getPayload(), accessor.getMessageHeaders());</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L214">			logger.trace(&quot;Translated &quot; + result.getSourceDestination() + &quot; -&gt; &quot; + result.getTargetDestinations());</span>
+		}
+<span class="fc bfc" id="L216" title="All 2 branches covered.">		for (String target : result.getTargetDestinations()) {</span>
+<span class="fc" id="L217">			this.messagingTemplate.send(target, messageToUse);</span>
+<span class="fc" id="L218">		}</span>
+<span class="fc" id="L219">	}</span>
+
+	private void initHeaders(SimpMessageHeaderAccessor headerAccessor) {
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">		if (getHeaderInitializer() != null) {</span>
+<span class="nc" id="L223">			getHeaderInitializer().initHeaders(headerAccessor);</span>
+		}
+<span class="fc" id="L225">	}</span>
+
+	@Override
+	public String toString() {
+<span class="nc" id="L229">		return &quot;UserDestinationMessageHandler[&quot; + this.destinationResolver + &quot;]&quot;;</span>
+	}
+
+
+	/**
+	 * A handler that broadcasts locally unresolved messages to the broker and
+	 * also handles similar broadcasts received from the broker.
+	 */
+	private static class BroadcastHandler {
+
+<span class="fc" id="L239">		private static final List&lt;String&gt; NO_COPY_LIST = Arrays.asList(&quot;subscription&quot;, &quot;message-id&quot;);</span>
+
+		private final MessageSendingOperations&lt;String&gt; messagingTemplate;
+
+		private final String broadcastDestination;
+
+<span class="fc" id="L245">		public BroadcastHandler(MessageSendingOperations&lt;String&gt; template, String destination) {</span>
+<span class="fc" id="L246">			this.messagingTemplate = template;</span>
+<span class="fc" id="L247">			this.broadcastDestination = destination;</span>
+<span class="fc" id="L248">		}</span>
+
+		public String getBroadcastDestination() {
+<span class="fc" id="L251">			return this.broadcastDestination;</span>
+		}
+
+		@Nullable
+		public Message&lt;?&gt; preHandle(Message&lt;?&gt; message) throws MessagingException {
+<span class="fc" id="L256">			String destination = SimpMessageHeaderAccessor.getDestination(message.getHeaders());</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">			if (!getBroadcastDestination().equals(destination)) {</span>
+<span class="fc" id="L258">				return message;</span>
+			}
+<span class="fc" id="L260">			SimpMessageHeaderAccessor accessor =</span>
+<span class="fc" id="L261">					SimpMessageHeaderAccessor.getAccessor(message, SimpMessageHeaderAccessor.class);</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">			Assert.state(accessor != null, &quot;No SimpMessageHeaderAccessor&quot;);</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">			if (accessor.getSessionId() == null) {</span>
+				// Our own broadcast
+<span class="nc" id="L265">				return null;</span>
+			}
+<span class="fc" id="L267">			destination = accessor.getFirstNativeHeader(SimpMessageHeaderAccessor.ORIGINAL_DESTINATION);</span>
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L269">				logger.trace(&quot;Checking unresolved user destination: &quot; + destination);</span>
+			}
+<span class="fc" id="L271">			SimpMessageHeaderAccessor newAccessor = SimpMessageHeaderAccessor.create(SimpMessageType.MESSAGE);</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">			for (String name : accessor.toNativeHeaderMap().keySet()) {</span>
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">				if (NO_COPY_LIST.contains(name)) {</span>
+<span class="nc" id="L274">					continue;</span>
+				}
+<span class="fc" id="L276">				newAccessor.setNativeHeader(name, accessor.getFirstNativeHeader(name));</span>
+<span class="fc" id="L277">			}</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">			if (destination != null) {</span>
+<span class="fc" id="L279">				newAccessor.setDestination(destination);</span>
+			}
+<span class="fc" id="L281">			newAccessor.setHeader(SimpMessageHeaderAccessor.IGNORE_ERROR, true); // ensure send doesn't block</span>
+<span class="fc" id="L282">			return MessageBuilder.createMessage(message.getPayload(), newAccessor.getMessageHeaders());</span>
+		}
+
+		public void handleUnresolved(Message&lt;?&gt; message) {
+<span class="fc" id="L286">			MessageHeaders headers = message.getHeaders();</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">			if (SimpMessageHeaderAccessor.getFirstNativeHeader(</span>
+					SimpMessageHeaderAccessor.ORIGINAL_DESTINATION, headers) != null) {
+				// Re-broadcast
+<span class="fc" id="L290">				return;</span>
+			}
+<span class="fc" id="L292">			SimpMessageHeaderAccessor accessor = SimpMessageHeaderAccessor.wrap(message);</span>
+<span class="fc" id="L293">			String destination = accessor.getDestination();</span>
+<span class="fc" id="L294">			accessor.setNativeHeader(SimpMessageHeaderAccessor.ORIGINAL_DESTINATION, destination);</span>
+<span class="fc" id="L295">			accessor.setLeaveMutable(true);</span>
+<span class="fc" id="L296">			message = MessageBuilder.createMessage(message.getPayload(), accessor.getMessageHeaders());</span>
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L298">				logger.trace(&quot;Translated &quot; + destination + &quot; -&gt; &quot; + getBroadcastDestination());</span>
+			}
+<span class="fc" id="L300">			this.messagingTemplate.send(getBroadcastDestination(), message);</span>
+<span class="fc" id="L301">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

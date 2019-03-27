@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractClientHttpRequest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client.reactive</a> &gt; <span class="el_source">AbstractClientHttpRequest.java</span></div><h1>AbstractClientHttpRequest.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client.reactive;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.http.HttpCookie;
+import org.springframework.http.HttpHeaders;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+
+/**
+ * Base class for {@link ClientHttpRequest} implementations.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @since 5.0
+ */
+public abstract class AbstractClientHttpRequest implements ClientHttpRequest {
+
+	/**
+	 * COMMITTING -&gt; COMMITTED is the period after doCommit is called but before
+	 * the response status and headers have been applied to the underlying
+	 * response during which time pre-commit actions can still make changes to
+	 * the response status and headers.
+	 */
+<span class="fc" id="L52">	private enum State {NEW, COMMITTING, COMMITTED}</span>
+
+
+	private final HttpHeaders headers;
+
+	private final MultiValueMap&lt;String, HttpCookie&gt; cookies;
+
+<span class="fc" id="L59">	private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.NEW);</span>
+
+<span class="fc" id="L61">	private final List&lt;Supplier&lt;? extends Publisher&lt;Void&gt;&gt;&gt; commitActions = new ArrayList&lt;&gt;(4);</span>
+
+
+	public AbstractClientHttpRequest() {
+<span class="fc" id="L65">		this(new HttpHeaders());</span>
+<span class="fc" id="L66">	}</span>
+
+<span class="fc" id="L68">	public AbstractClientHttpRequest(HttpHeaders headers) {</span>
+<span class="fc" id="L69">		Assert.notNull(headers, &quot;HttpHeaders must not be null&quot;);</span>
+<span class="fc" id="L70">		this.headers = headers;</span>
+<span class="fc" id="L71">		this.cookies = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="fc" id="L72">	}</span>
+
+
+	@Override
+	public HttpHeaders getHeaders() {
+<span class="fc bfc" id="L77" title="All 2 branches covered.">		if (State.COMMITTED.equals(this.state.get())) {</span>
+<span class="fc" id="L78">			return HttpHeaders.readOnlyHttpHeaders(this.headers);</span>
+		}
+<span class="fc" id="L80">		return this.headers;</span>
+	}
+
+	@Override
+	public MultiValueMap&lt;String, HttpCookie&gt; getCookies() {
+<span class="pc bpc" id="L85" title="1 of 2 branches missed.">		if (State.COMMITTED.equals(this.state.get())) {</span>
+<span class="nc" id="L86">			return CollectionUtils.unmodifiableMultiValueMap(this.cookies);</span>
+		}
+<span class="fc" id="L88">		return this.cookies;</span>
+	}
+
+	@Override
+	public void beforeCommit(Supplier&lt;? extends Mono&lt;Void&gt;&gt; action) {
+<span class="nc" id="L93">		Assert.notNull(action, &quot;Action must not be null&quot;);</span>
+<span class="nc" id="L94">		this.commitActions.add(action);</span>
+<span class="nc" id="L95">	}</span>
+
+	@Override
+	public boolean isCommitted() {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">		return (this.state.get() != State.NEW);</span>
+	}
+
+	/**
+	 * A variant of {@link #doCommit(Supplier)} for a request without body.
+	 * @return a completion publisher
+	 */
+	protected Mono&lt;Void&gt; doCommit() {
+<span class="nc" id="L107">		return doCommit(null);</span>
+	}
+
+	/**
+	 * Apply {@link #beforeCommit(Supplier) beforeCommit} actions, apply the
+	 * request headers/cookies, and write the request body.
+	 * @param writeAction the action to write the request body (may be {@code null})
+	 * @return a completion publisher
+	 */
+	protected Mono&lt;Void&gt; doCommit(@Nullable Supplier&lt;? extends Publisher&lt;Void&gt;&gt; writeAction) {
+<span class="pc bpc" id="L117" title="1 of 2 branches missed.">		if (!this.state.compareAndSet(State.NEW, State.COMMITTING)) {</span>
+<span class="nc" id="L118">			return Mono.empty();</span>
+		}
+
+<span class="fc" id="L121">		this.commitActions.add(() -&gt;</span>
+<span class="fc" id="L122">				Mono.fromRunnable(() -&gt; {</span>
+<span class="fc" id="L123">					applyHeaders();</span>
+<span class="fc" id="L124">					applyCookies();</span>
+<span class="fc" id="L125">					this.state.set(State.COMMITTED);</span>
+<span class="fc" id="L126">				}));</span>
+
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">		if (writeAction != null) {</span>
+<span class="fc" id="L129">			this.commitActions.add(writeAction);</span>
+		}
+
+<span class="fc" id="L132">		List&lt;? extends Publisher&lt;Void&gt;&gt; actions = this.commitActions.stream()</span>
+<span class="fc" id="L133">				.map(Supplier::get).collect(Collectors.toList());</span>
+
+<span class="fc" id="L135">		return Flux.concat(actions).then();</span>
+	}
+
+
+	/**
+	 * Apply header changes from {@link #getHeaders()} to the underlying response.
+	 * This method is called once only.
+	 */
+	protected abstract void applyHeaders();
+
+	/**
+	 * Add cookies from {@link #getHeaders()} to the underlying response.
+	 * This method is called once only.
+	 */
+	protected abstract void applyCookies();
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

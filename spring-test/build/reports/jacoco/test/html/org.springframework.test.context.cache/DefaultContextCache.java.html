@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultContextCache.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.cache</a> &gt; <span class="el_source">DefaultContextCache.java</span></div><h1>DefaultContextCache.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.cache;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.style.ToStringCreator;
+import org.springframework.lang.Nullable;
+import org.springframework.test.annotation.DirtiesContext.HierarchyMode;
+import org.springframework.test.context.MergedContextConfiguration;
+import org.springframework.util.Assert;
+
+/**
+ * Default implementation of the {@link ContextCache} API.
+ *
+ * &lt;p&gt;Uses a synchronized {@link Map} configured with a maximum size
+ * and a &lt;em&gt;least recently used&lt;/em&gt; (LRU) eviction policy to cache
+ * {@link ApplicationContext} instances.
+ *
+ * &lt;p&gt;The maximum size may be supplied as a {@linkplain #DefaultContextCache(int)
+ * constructor argument} or set via a system property or Spring property named
+ * {@code spring.test.context.cache.maxSize}.
+ *
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see ContextCacheUtils#retrieveMaxCacheSize()
+ */
+public class DefaultContextCache implements ContextCache {
+
+<span class="fc" id="L58">	private static final Log statsLogger = LogFactory.getLog(CONTEXT_CACHE_LOGGING_CATEGORY);</span>
+
+	/**
+	 * Map of context keys to Spring {@code ApplicationContext} instances.
+	 */
+<span class="fc" id="L63">	private final Map&lt;MergedContextConfiguration, ApplicationContext&gt; contextMap =</span>
+<span class="fc" id="L64">			Collections.synchronizedMap(new LruCache(32, 0.75f));</span>
+
+	/**
+	 * Map of parent keys to sets of children keys, representing a top-down &lt;em&gt;tree&lt;/em&gt;
+	 * of context hierarchies. This information is used for determining which subtrees
+	 * need to be recursively removed and closed when removing a context that is a parent
+	 * of other contexts.
+	 */
+<span class="fc" id="L72">	private final Map&lt;MergedContextConfiguration, Set&lt;MergedContextConfiguration&gt;&gt; hierarchyMap =</span>
+			new ConcurrentHashMap&lt;&gt;(32);
+
+	private final int maxSize;
+
+<span class="fc" id="L77">	private final AtomicInteger hitCount = new AtomicInteger();</span>
+
+<span class="fc" id="L79">	private final AtomicInteger missCount = new AtomicInteger();</span>
+
+
+	/**
+	 * Create a new {@code DefaultContextCache} using the maximum cache size
+	 * obtained via {@link ContextCacheUtils#retrieveMaxCacheSize()}.
+	 * @since 4.3
+	 * @see #DefaultContextCache(int)
+	 * @see ContextCacheUtils#retrieveMaxCacheSize()
+	 */
+	public DefaultContextCache() {
+<span class="fc" id="L90">		this(ContextCacheUtils.retrieveMaxCacheSize());</span>
+<span class="fc" id="L91">	}</span>
+
+	/**
+	 * Create a new {@code DefaultContextCache} using the supplied maximum
+	 * cache size.
+	 * @param maxSize the maximum cache size
+	 * @throws IllegalArgumentException if the supplied {@code maxSize} value
+	 * is not positive
+	 * @since 4.3
+	 * @see #DefaultContextCache()
+	 */
+<span class="fc" id="L102">	public DefaultContextCache(int maxSize) {</span>
+<span class="fc bfc" id="L103" title="All 2 branches covered.">		Assert.isTrue(maxSize &gt; 0, &quot;'maxSize' must be positive&quot;);</span>
+<span class="fc" id="L104">		this.maxSize = maxSize;</span>
+<span class="fc" id="L105">	}</span>
+
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public boolean contains(MergedContextConfiguration key) {
+<span class="nc" id="L113">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+<span class="nc" id="L114">		return this.contextMap.containsKey(key);</span>
+	}
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	@Nullable
+	public ApplicationContext get(MergedContextConfiguration key) {
+<span class="fc" id="L123">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+<span class="fc" id="L124">		ApplicationContext context = this.contextMap.get(key);</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">		if (context == null) {</span>
+<span class="fc" id="L126">			this.missCount.incrementAndGet();</span>
+		}
+		else {
+<span class="fc" id="L129">			this.hitCount.incrementAndGet();</span>
+		}
+<span class="fc" id="L131">		return context;</span>
+	}
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public void put(MergedContextConfiguration key, ApplicationContext context) {
+<span class="fc" id="L139">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+<span class="fc" id="L140">		Assert.notNull(context, &quot;ApplicationContext must not be null&quot;);</span>
+
+<span class="fc" id="L142">		this.contextMap.put(key, context);</span>
+<span class="fc" id="L143">		MergedContextConfiguration child = key;</span>
+<span class="fc" id="L144">		MergedContextConfiguration parent = child.getParent();</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">		while (parent != null) {</span>
+<span class="fc" id="L146">			Set&lt;MergedContextConfiguration&gt; list = this.hierarchyMap.computeIfAbsent(parent, k -&gt; new HashSet&lt;&gt;());</span>
+<span class="fc" id="L147">			list.add(child);</span>
+<span class="fc" id="L148">			child = parent;</span>
+<span class="fc" id="L149">			parent = child.getParent();</span>
+<span class="fc" id="L150">		}</span>
+<span class="fc" id="L151">	}</span>
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public void remove(MergedContextConfiguration key, @Nullable HierarchyMode hierarchyMode) {
+<span class="fc" id="L158">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+
+		// startKey is the level at which to begin clearing the cache,
+		// depending on the configured hierarchy mode.s
+<span class="fc" id="L162">		MergedContextConfiguration startKey = key;</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">		if (hierarchyMode == HierarchyMode.EXHAUSTIVE) {</span>
+<span class="fc" id="L164">			MergedContextConfiguration parent = startKey.getParent();</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">			while (parent != null) {</span>
+<span class="fc" id="L166">				startKey = parent;</span>
+<span class="fc" id="L167">				parent = startKey.getParent();</span>
+			}
+		}
+
+<span class="fc" id="L171">		List&lt;MergedContextConfiguration&gt; removedContexts = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L172">		remove(removedContexts, startKey);</span>
+
+		// Remove all remaining references to any removed contexts from the
+		// hierarchy map.
+<span class="fc bfc" id="L176" title="All 2 branches covered.">		for (MergedContextConfiguration currentKey : removedContexts) {</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">			for (Set&lt;MergedContextConfiguration&gt; children : this.hierarchyMap.values()) {</span>
+<span class="fc" id="L178">				children.remove(currentKey);</span>
+<span class="fc" id="L179">			}</span>
+<span class="fc" id="L180">		}</span>
+
+		// Remove empty entries from the hierarchy map.
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		for (MergedContextConfiguration currentKey : this.hierarchyMap.keySet()) {</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">			if (this.hierarchyMap.get(currentKey).isEmpty()) {</span>
+<span class="fc" id="L185">				this.hierarchyMap.remove(currentKey);</span>
+			}
+<span class="fc" id="L187">		}</span>
+<span class="fc" id="L188">	}</span>
+
+	private void remove(List&lt;MergedContextConfiguration&gt; removedContexts, MergedContextConfiguration key) {
+<span class="fc" id="L191">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+
+<span class="fc" id="L193">		Set&lt;MergedContextConfiguration&gt; children = this.hierarchyMap.get(key);</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">		if (children != null) {</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">			for (MergedContextConfiguration child : children) {</span>
+				// Recurse through lower levels
+<span class="fc" id="L197">				remove(removedContexts, child);</span>
+<span class="fc" id="L198">			}</span>
+			// Remove the set of children for the current context from the hierarchy map.
+<span class="fc" id="L200">			this.hierarchyMap.remove(key);</span>
+		}
+
+		// Physically remove and close leaf nodes first (i.e., on the way back up the
+		// stack as opposed to prior to the recursive call).
+<span class="fc" id="L205">		ApplicationContext context = this.contextMap.remove(key);</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">		if (context instanceof ConfigurableApplicationContext) {</span>
+<span class="fc" id="L207">			((ConfigurableApplicationContext) context).close();</span>
+		}
+<span class="fc" id="L209">		removedContexts.add(key);</span>
+<span class="fc" id="L210">	}</span>
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public int size() {
+<span class="fc" id="L217">		return this.contextMap.size();</span>
+	}
+
+	/**
+	 * Get the maximum size of this cache.
+	 */
+	public int getMaxSize() {
+<span class="fc" id="L224">		return this.maxSize;</span>
+	}
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public int getParentContextCount() {
+<span class="fc" id="L232">		return this.hierarchyMap.size();</span>
+	}
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public int getHitCount() {
+<span class="fc" id="L240">		return this.hitCount.get();</span>
+	}
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public int getMissCount() {
+<span class="fc" id="L248">		return this.missCount.get();</span>
+	}
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public void reset() {
+<span class="fc" id="L256">		synchronized (this.contextMap) {</span>
+<span class="fc" id="L257">			clear();</span>
+<span class="fc" id="L258">			clearStatistics();</span>
+<span class="fc" id="L259">		}</span>
+<span class="fc" id="L260">	}</span>
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public void clear() {
+<span class="fc" id="L267">		synchronized (this.contextMap) {</span>
+<span class="fc" id="L268">			this.contextMap.clear();</span>
+<span class="fc" id="L269">			this.hierarchyMap.clear();</span>
+<span class="fc" id="L270">		}</span>
+<span class="fc" id="L271">	}</span>
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public void clearStatistics() {
+<span class="fc" id="L278">		synchronized (this.contextMap) {</span>
+<span class="fc" id="L279">			this.hitCount.set(0);</span>
+<span class="fc" id="L280">			this.missCount.set(0);</span>
+<span class="fc" id="L281">		}</span>
+<span class="fc" id="L282">	}</span>
+
+	/**
+	 * {@inheritDoc}
+	 */
+	@Override
+	public void logStatistics() {
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">		if (statsLogger.isDebugEnabled()) {</span>
+<span class="nc" id="L290">			statsLogger.debug(&quot;Spring test ApplicationContext cache statistics: &quot; + this);</span>
+		}
+<span class="fc" id="L292">	}</span>
+
+	/**
+	 * Generate a text string containing the implementation type of this
+	 * cache and its statistics.
+	 * &lt;p&gt;The string returned by this method contains all information
+	 * required for compliance with the contract for {@link #logStatistics()}.
+	 * @return a string representation of this cache, including statistics
+	 */
+	@Override
+	public String toString() {
+<span class="fc" id="L303">		return new ToStringCreator(this)</span>
+<span class="fc" id="L304">				.append(&quot;size&quot;, size())</span>
+<span class="fc" id="L305">				.append(&quot;maxSize&quot;, getMaxSize())</span>
+<span class="fc" id="L306">				.append(&quot;parentContextCount&quot;, getParentContextCount())</span>
+<span class="fc" id="L307">				.append(&quot;hitCount&quot;, getHitCount())</span>
+<span class="fc" id="L308">				.append(&quot;missCount&quot;, getMissCount())</span>
+<span class="fc" id="L309">				.toString();</span>
+	}
+
+
+	/**
+	 * Simple cache implementation based on {@link LinkedHashMap} with a maximum
+	 * size and a &lt;em&gt;least recently used&lt;/em&gt; (LRU) eviction policy that
+	 * properly closes application contexts.
+	 * @since 4.3
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private class LruCache extends LinkedHashMap&lt;MergedContextConfiguration, ApplicationContext&gt; {
+
+		/**
+		 * Create a new {@code LruCache} with the supplied initial capacity
+		 * and load factor.
+		 * @param initialCapacity the initial capacity
+		 * @param loadFactor the load factor
+		 */
+<span class="fc" id="L328">		LruCache(int initialCapacity, float loadFactor) {</span>
+<span class="fc" id="L329">			super(initialCapacity, loadFactor, true);</span>
+<span class="fc" id="L330">		}</span>
+
+		@Override
+		protected boolean removeEldestEntry(Map.Entry&lt;MergedContextConfiguration, ApplicationContext&gt; eldest) {
+<span class="fc bfc" id="L334" title="All 2 branches covered.">			if (this.size() &gt; DefaultContextCache.this.getMaxSize()) {</span>
+				// Do NOT delete &quot;DefaultContextCache.this.&quot;; otherwise, we accidentally
+				// invoke java.util.Map.remove(Object, Object).
+<span class="fc" id="L337">				DefaultContextCache.this.remove(eldest.getKey(), HierarchyMode.CURRENT_LEVEL);</span>
+			}
+
+			// Return false since we invoke a custom eviction algorithm.
+<span class="fc" id="L341">			return false;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

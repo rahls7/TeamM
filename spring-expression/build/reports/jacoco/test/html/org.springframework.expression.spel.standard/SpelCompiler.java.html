@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SpelCompiler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.standard</a> &gt; <span class="el_source">SpelCompiler.java</span></div><h1>SpelCompiler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.standard;
+
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.asm.ClassWriter;
+import org.springframework.asm.MethodVisitor;
+import org.springframework.asm.Opcodes;
+import org.springframework.expression.Expression;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.CompiledExpression;
+import org.springframework.expression.spel.SpelParserConfiguration;
+import org.springframework.expression.spel.ast.SpelNodeImpl;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * A SpelCompiler will take a regular parsed expression and create (and load) a class
+ * containing byte code that does the same thing as that expression. The compiled form of
+ * an expression will evaluate far faster than the interpreted form.
+ *
+ * &lt;p&gt;The SpelCompiler is not currently handling all expression types but covers many of
+ * the common cases. The framework is extensible to cover more cases in the future. For
+ * absolute maximum speed there is *no checking* in the compiled code. The compiled
+ * version of the expression uses information learned during interpreted runs of the
+ * expression when it generates the byte code. For example if it knows that a particular
+ * property dereference always seems to return a Map then it will generate byte code that
+ * expects the result of the property dereference to be a Map. This ensures maximal
+ * performance but should the dereference result in something other than a map, the
+ * compiled expression will fail - like a ClassCastException would occur if passing data
+ * of an unexpected type in a regular Java program.
+ *
+ * &lt;p&gt;Due to the lack of checking there are likely some expressions that should never be
+ * compiled, for example if an expression is continuously dealing with different types of
+ * data. Due to these cases the compiler is something that must be selectively turned on
+ * for an associated SpelExpressionParser (through the {@link SpelParserConfiguration}
+ * object), it is not on by default.
+ *
+ * &lt;p&gt;Individual expressions can be compiled by calling {@code SpelCompiler.compile(expression)}.
+ *
+ * @author Andy Clement
+ * @since 4.1
+ */
+public final class SpelCompiler implements Opcodes {
+
+<span class="fc" id="L70">	private static final Log logger = LogFactory.getLog(SpelCompiler.class);</span>
+
+	private static final int CLASSES_DEFINED_LIMIT = 100;
+
+	// A compiler is created for each classloader, it manages a child class loader of that
+	// classloader and the child is used to load the compiled expressions.
+<span class="fc" id="L76">	private static final Map&lt;ClassLoader, SpelCompiler&gt; compilers = new ConcurrentReferenceHashMap&lt;&gt;();</span>
+
+	// The child ClassLoader used to load the compiled expression classes
+	private ChildClassLoader ccl;
+
+	// Counter suffix for generated classes within this SpelCompiler instance
+<span class="fc" id="L82">	private final AtomicInteger suffixId = new AtomicInteger(1);</span>
+
+
+<span class="fc" id="L85">	private SpelCompiler(@Nullable ClassLoader classloader) {</span>
+<span class="fc" id="L86">		this.ccl = new ChildClassLoader(classloader);</span>
+<span class="fc" id="L87">	}</span>
+
+
+	/**
+	 * Attempt compilation of the supplied expression. A check is made to see
+	 * if it is compilable before compilation proceeds. The check involves
+	 * visiting all the nodes in the expression Ast and ensuring enough state
+	 * is known about them that bytecode can be generated for them.
+	 * @param expression the expression to compile
+	 * @return an instance of the class implementing the compiled expression,
+	 * or {@code null} if compilation is not possible
+	 */
+	@Nullable
+	public CompiledExpression compile(SpelNodeImpl expression) {
+<span class="fc bfc" id="L101" title="All 2 branches covered.">		if (expression.isCompilable()) {</span>
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L103">				logger.debug(&quot;SpEL: compiling &quot; + expression.toStringAST());</span>
+			}
+<span class="fc" id="L105">			Class&lt;? extends CompiledExpression&gt; clazz = createExpressionClass(expression);</span>
+<span class="pc bpc" id="L106" title="1 of 2 branches missed.">			if (clazz != null) {</span>
+				try {
+<span class="fc" id="L108">					return ReflectionUtils.accessibleConstructor(clazz).newInstance();</span>
+				}
+<span class="nc" id="L110">				catch (Throwable ex) {</span>
+<span class="nc" id="L111">					throw new IllegalStateException(&quot;Failed to instantiate CompiledExpression&quot;, ex);</span>
+				}
+			}
+		}
+
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L117">			logger.debug(&quot;SpEL: unable to compile &quot; + expression.toStringAST());</span>
+		}
+<span class="fc" id="L119">		return null;</span>
+	}
+
+	private int getNextSuffix() {
+<span class="fc" id="L123">		return this.suffixId.incrementAndGet();</span>
+	}
+
+	/**
+	 * Generate the class that encapsulates the compiled expression and define it.
+	 * The  generated class will be a subtype of CompiledExpression.
+	 * @param expressionToCompile the expression to be compiled
+	 * @return the expression call, or {@code null} if the decision was to opt out of
+	 * compilation during code generation
+	 */
+	@Nullable
+	private Class&lt;? extends CompiledExpression&gt; createExpressionClass(SpelNodeImpl expressionToCompile) {
+		// Create class outline 'spel/ExNNN extends org.springframework.expression.spel.CompiledExpression'
+<span class="fc" id="L136">		String className = &quot;spel/Ex&quot; + getNextSuffix();</span>
+<span class="fc" id="L137">		ClassWriter cw = new ExpressionClassWriter();</span>
+<span class="fc" id="L138">		cw.visit(V1_5, ACC_PUBLIC, className, null, &quot;org/springframework/expression/spel/CompiledExpression&quot;, null);</span>
+
+		// Create default constructor
+<span class="fc" id="L141">		MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, &quot;&lt;init&gt;&quot;, &quot;()V&quot;, null, null);</span>
+<span class="fc" id="L142">		mv.visitCode();</span>
+<span class="fc" id="L143">		mv.visitVarInsn(ALOAD, 0);</span>
+<span class="fc" id="L144">		mv.visitMethodInsn(INVOKESPECIAL, &quot;org/springframework/expression/spel/CompiledExpression&quot;,</span>
+				&quot;&lt;init&gt;&quot;, &quot;()V&quot;, false);
+<span class="fc" id="L146">		mv.visitInsn(RETURN);</span>
+<span class="fc" id="L147">		mv.visitMaxs(1, 1);</span>
+<span class="fc" id="L148">		mv.visitEnd();</span>
+
+		// Create getValue() method
+<span class="fc" id="L151">		mv = cw.visitMethod(ACC_PUBLIC, &quot;getValue&quot;,</span>
+				&quot;(Ljava/lang/Object;Lorg/springframework/expression/EvaluationContext;)Ljava/lang/Object;&quot;, null,
+				new String[ ]{&quot;org/springframework/expression/EvaluationException&quot;});
+<span class="fc" id="L154">		mv.visitCode();</span>
+
+<span class="fc" id="L156">		CodeFlow cf = new CodeFlow(className, cw);</span>
+
+		// Ask the expression AST to generate the body of the method
+		try {
+<span class="fc" id="L160">			expressionToCompile.generateCode(mv, cf);</span>
+		}
+<span class="nc" id="L162">		catch (IllegalStateException ex) {</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L164">				logger.debug(expressionToCompile.getClass().getSimpleName() +</span>
+<span class="nc" id="L165">						&quot;.generateCode opted out of compilation: &quot; + ex.getMessage());</span>
+			}
+<span class="nc" id="L167">			return null;</span>
+<span class="fc" id="L168">		}</span>
+
+<span class="fc" id="L170">		CodeFlow.insertBoxIfNecessary(mv, cf.lastDescriptor());</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">		if (&quot;V&quot;.equals(cf.lastDescriptor())) {</span>
+<span class="fc" id="L172">			mv.visitInsn(ACONST_NULL);</span>
+		}
+<span class="fc" id="L174">		mv.visitInsn(ARETURN);</span>
+
+<span class="fc" id="L176">		mv.visitMaxs(0, 0);  // not supplied due to COMPUTE_MAXS</span>
+<span class="fc" id="L177">		mv.visitEnd();</span>
+<span class="fc" id="L178">		cw.visitEnd();</span>
+
+<span class="fc" id="L180">		cf.finish();</span>
+
+<span class="fc" id="L182">		byte[] data = cw.toByteArray();</span>
+		// TODO need to make this conditionally occur based on a debug flag
+		// dump(expressionToCompile.toStringAST(), clazzName, data);
+<span class="fc" id="L185">		return loadClass(StringUtils.replace(className, &quot;/&quot;, &quot;.&quot;), data);</span>
+	}
+
+	/**
+	 * Load a compiled expression class. Makes sure the classloaders aren't used too much
+	 * because they anchor compiled classes in memory and prevent GC.  If you have expressions
+	 * continually recompiling over time then by replacing the classloader periodically
+	 * at least some of the older variants can be garbage collected.
+	 * @param name name of the class
+	 * @param bytes bytecode for the class
+	 * @return the Class object for the compiled expression
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private Class&lt;? extends CompiledExpression&gt; loadClass(String name, byte[] bytes) {
+<span class="fc bfc" id="L199" title="All 2 branches covered.">		if (this.ccl.getClassesDefinedCount() &gt; CLASSES_DEFINED_LIMIT) {</span>
+<span class="fc" id="L200">			this.ccl = new ChildClassLoader(this.ccl.getParent());</span>
+		}
+<span class="fc" id="L202">		return (Class&lt;? extends CompiledExpression&gt;) this.ccl.defineClass(name, bytes);</span>
+	}
+
+	/**
+	 * Factory method for compiler instances. The returned SpelCompiler will
+	 * attach a class loader as the child of the given class loader and this
+	 * child will be used to load compiled expressions.
+	 * @param classLoader the ClassLoader to use as the basis for compilation
+	 * @return a corresponding SpelCompiler instance
+	 */
+	public static SpelCompiler getCompiler(@Nullable ClassLoader classLoader) {
+<span class="fc bfc" id="L213" title="All 2 branches covered.">		ClassLoader clToUse = (classLoader != null ? classLoader : ClassUtils.getDefaultClassLoader());</span>
+<span class="fc" id="L214">		synchronized (compilers) {</span>
+<span class="fc" id="L215">			SpelCompiler compiler = compilers.get(clToUse);</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">			if (compiler == null) {</span>
+<span class="fc" id="L217">				compiler = new SpelCompiler(clToUse);</span>
+<span class="fc" id="L218">				compilers.put(clToUse, compiler);</span>
+			}
+<span class="fc" id="L220">			return compiler;</span>
+		}
+	}
+
+	/**
+	 * Request that an attempt is made to compile the specified expression. It may fail if
+	 * components of the expression are not suitable for compilation or the data types
+	 * involved are not suitable for compilation. Used for testing.
+	 * @return true if the expression was successfully compiled
+	 */
+	public static boolean compile(Expression expression) {
+<span class="pc bpc" id="L231" title="1 of 4 branches missed.">		return (expression instanceof SpelExpression &amp;&amp; ((SpelExpression) expression).compileExpression());</span>
+	}
+
+	/**
+	 * Request to revert to the interpreter for expression evaluation.
+	 * Any compiled form is discarded but can be recreated by later recompiling again.
+	 * @param expression the expression
+	 */
+	public static void revertToInterpreted(Expression expression) {
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">		if (expression instanceof SpelExpression) {</span>
+<span class="fc" id="L241">			((SpelExpression) expression).revertToInterpreted();</span>
+		}
+<span class="fc" id="L243">	}</span>
+
+
+	/**
+	 * A ChildClassLoader will load the generated compiled expression classes.
+	 */
+	private static class ChildClassLoader extends URLClassLoader {
+
+<span class="fc" id="L251">		private static final URL[] NO_URLS = new URL[0];</span>
+
+<span class="fc" id="L253">		private int classesDefinedCount = 0;</span>
+
+		public ChildClassLoader(@Nullable ClassLoader classLoader) {
+<span class="fc" id="L256">			super(NO_URLS, classLoader);</span>
+<span class="fc" id="L257">		}</span>
+
+		int getClassesDefinedCount() {
+<span class="fc" id="L260">			return this.classesDefinedCount;</span>
+		}
+
+		public Class&lt;?&gt; defineClass(String name, byte[] bytes) {
+<span class="fc" id="L264">			Class&lt;?&gt; clazz = super.defineClass(name, bytes, 0, bytes.length);</span>
+<span class="fc" id="L265">			this.classesDefinedCount++;</span>
+<span class="fc" id="L266">			return clazz;</span>
+		}
+	}
+
+
+	private class ExpressionClassWriter extends ClassWriter {
+
+<span class="fc" id="L273">		public ExpressionClassWriter() {</span>
+<span class="fc" id="L274">			super(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);</span>
+<span class="fc" id="L275">		}</span>
+
+		@Override
+		protected ClassLoader getClassLoader() {
+<span class="fc" id="L279">			return ccl;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

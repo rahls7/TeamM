@@ -1,0 +1,1247 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HibernateTemplate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.hibernate5</a> &gt; <span class="el_source">HibernateTemplate.java</span></div><h1>HibernateTemplate.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.hibernate5;
+
+import java.io.Serializable;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import javax.persistence.PersistenceException;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.hibernate.Criteria;
+import org.hibernate.Filter;
+import org.hibernate.FlushMode;
+import org.hibernate.Hibernate;
+import org.hibernate.HibernateException;
+import org.hibernate.LockMode;
+import org.hibernate.LockOptions;
+import org.hibernate.ReplicationMode;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.criterion.DetachedCriteria;
+import org.hibernate.criterion.Example;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.support.ResourceHolderSupport;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Helper class that simplifies Hibernate data access code. Automatically
+ * converts HibernateExceptions into DataAccessExceptions, following the
+ * {@code org.springframework.dao} exception hierarchy.
+ *
+ * &lt;p&gt;The central method is {@code execute}, supporting Hibernate access code
+ * implementing the {@link HibernateCallback} interface. It provides Hibernate Session
+ * handling such that neither the HibernateCallback implementation nor the calling
+ * code needs to explicitly care about retrieving/closing Hibernate Sessions,
+ * or handling Session lifecycle exceptions. For typical single step actions,
+ * there are various convenience methods (find, load, saveOrUpdate, delete).
+ *
+ * &lt;p&gt;Can be used within a service implementation via direct instantiation
+ * with a SessionFactory reference, or get prepared in an application context
+ * and given to services as bean reference. Note: The SessionFactory should
+ * always be configured as bean in the application context, in the first case
+ * given to the service directly, in the second case to the prepared template.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: Hibernate access code can also be coded against the native Hibernate
+ * {@link Session}. Hence, for newly started projects, consider adopting the standard
+ * Hibernate style of coding against {@link SessionFactory#getCurrentSession()}.
+ * Alternatively, use {@link #execute(HibernateCallback)} with Java 8 lambda code blocks
+ * against the callback-provided {@code Session} which results in elegant code as well,
+ * decoupled from the Hibernate Session lifecycle. The remaining operations on this
+ * HibernateTemplate are deprecated in the meantime and primarily exist as a migration
+ * helper for older Hibernate 3.x/4.x data access code in existing applications.&lt;/b&gt;
+ *
+ * @author Juergen Hoeller
+ * @since 4.2
+ * @see #setSessionFactory
+ * @see HibernateCallback
+ * @see Session
+ * @see LocalSessionFactoryBean
+ * @see HibernateTransactionManager
+ * @see org.springframework.orm.hibernate5.support.OpenSessionInViewFilter
+ * @see org.springframework.orm.hibernate5.support.OpenSessionInViewInterceptor
+ */
+public class HibernateTemplate implements HibernateOperations, InitializingBean {
+
+	private static final Method createQueryMethod;
+
+	private static final Method getNamedQueryMethod;
+
+	static {
+		// Hibernate 5.2's createQuery method declares a new subtype as return type,
+		// so we need to use reflection for binary compatibility with 5.0/5.1 here.
+		try {
+<span class="nc" id="L100">			createQueryMethod = Session.class.getMethod(&quot;createQuery&quot;, String.class);</span>
+<span class="nc" id="L101">			getNamedQueryMethod = Session.class.getMethod(&quot;getNamedQuery&quot;, String.class);</span>
+		}
+<span class="nc" id="L103">		catch (NoSuchMethodException ex) {</span>
+<span class="nc" id="L104">			throw new IllegalStateException(&quot;Incompatible Hibernate Session API&quot;, ex);</span>
+<span class="nc" id="L105">		}</span>
+<span class="nc" id="L106">	}</span>
+
+
+<span class="nc" id="L109">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private SessionFactory sessionFactory;
+
+	@Nullable
+	private String[] filterNames;
+
+<span class="nc" id="L117">	private boolean exposeNativeSession = false;</span>
+
+<span class="nc" id="L119">	private boolean checkWriteOperations = true;</span>
+
+<span class="nc" id="L121">	private boolean cacheQueries = false;</span>
+
+	@Nullable
+	private String queryCacheRegion;
+
+<span class="nc" id="L126">	private int fetchSize = 0;</span>
+
+<span class="nc" id="L128">	private int maxResults = 0;</span>
+
+
+	/**
+	 * Create a new HibernateTemplate instance.
+	 */
+<span class="nc" id="L134">	public HibernateTemplate() {</span>
+<span class="nc" id="L135">	}</span>
+
+	/**
+	 * Create a new HibernateTemplate instance.
+	 * @param sessionFactory the SessionFactory to create Sessions with
+	 */
+<span class="nc" id="L141">	public HibernateTemplate(SessionFactory sessionFactory) {</span>
+<span class="nc" id="L142">		setSessionFactory(sessionFactory);</span>
+<span class="nc" id="L143">		afterPropertiesSet();</span>
+<span class="nc" id="L144">	}</span>
+
+
+	/**
+	 * Set the Hibernate SessionFactory that should be used to create
+	 * Hibernate Sessions.
+	 */
+	public void setSessionFactory(@Nullable  SessionFactory sessionFactory) {
+<span class="nc" id="L152">		this.sessionFactory = sessionFactory;</span>
+<span class="nc" id="L153">	}</span>
+
+	/**
+	 * Return the Hibernate SessionFactory that should be used to create
+	 * Hibernate Sessions.
+	 */
+	@Nullable
+	public SessionFactory getSessionFactory() {
+<span class="nc" id="L161">		return this.sessionFactory;</span>
+	}
+
+	/**
+	 * Obtain the SessionFactory for actual use.
+	 * @return the SessionFactory (never {@code null})
+	 * @throws IllegalStateException in case of no SessionFactory set
+	 * @since 5.0
+	 */
+	protected final SessionFactory obtainSessionFactory() {
+<span class="nc" id="L171">		SessionFactory sessionFactory = getSessionFactory();</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">		Assert.state(sessionFactory != null, &quot;No SessionFactory set&quot;);</span>
+<span class="nc" id="L173">		return sessionFactory;</span>
+	}
+
+	/**
+	 * Set one or more names of Hibernate filters to be activated for all
+	 * Sessions that this accessor works with.
+	 * &lt;p&gt;Each of those filters will be enabled at the beginning of each
+	 * operation and correspondingly disabled at the end of the operation.
+	 * This will work for newly opened Sessions as well as for existing
+	 * Sessions (for example, within a transaction).
+	 * @see #enableFilters(Session)
+	 * @see Session#enableFilter(String)
+	 */
+	public void setFilterNames(@Nullable  String... filterNames) {
+<span class="nc" id="L187">		this.filterNames = filterNames;</span>
+<span class="nc" id="L188">	}</span>
+
+	/**
+	 * Return the names of Hibernate filters to be activated, if any.
+	 */
+	@Nullable
+	public String[] getFilterNames() {
+<span class="nc" id="L195">		return this.filterNames;</span>
+	}
+
+	/**
+	 * Set whether to expose the native Hibernate Session to
+	 * HibernateCallback code.
+	 * &lt;p&gt;Default is &quot;false&quot;: a Session proxy will be returned, suppressing
+	 * {@code close} calls and automatically applying query cache
+	 * settings and transaction timeouts.
+	 * @see HibernateCallback
+	 * @see Session
+	 * @see #setCacheQueries
+	 * @see #setQueryCacheRegion
+	 * @see #prepareQuery
+	 * @see #prepareCriteria
+	 */
+	public void setExposeNativeSession(boolean exposeNativeSession) {
+<span class="nc" id="L212">		this.exposeNativeSession = exposeNativeSession;</span>
+<span class="nc" id="L213">	}</span>
+
+	/**
+	 * Return whether to expose the native Hibernate Session to
+	 * HibernateCallback code, or rather a Session proxy.
+	 */
+	public boolean isExposeNativeSession() {
+<span class="nc" id="L220">		return this.exposeNativeSession;</span>
+	}
+
+	/**
+	 * Set whether to check that the Hibernate Session is not in read-only mode
+	 * in case of write operations (save/update/delete).
+	 * &lt;p&gt;Default is &quot;true&quot;, for fail-fast behavior when attempting write operations
+	 * within a read-only transaction. Turn this off to allow save/update/delete
+	 * on a Session with flush mode MANUAL.
+	 * @see #checkWriteOperationAllowed
+	 * @see org.springframework.transaction.TransactionDefinition#isReadOnly
+	 */
+	public void setCheckWriteOperations(boolean checkWriteOperations) {
+<span class="nc" id="L233">		this.checkWriteOperations = checkWriteOperations;</span>
+<span class="nc" id="L234">	}</span>
+
+	/**
+	 * Return whether to check that the Hibernate Session is not in read-only
+	 * mode in case of write operations (save/update/delete).
+	 */
+	public boolean isCheckWriteOperations() {
+<span class="nc" id="L241">		return this.checkWriteOperations;</span>
+	}
+
+	/**
+	 * Set whether to cache all queries executed by this template.
+	 * &lt;p&gt;If this is &quot;true&quot;, all Query and Criteria objects created by
+	 * this template will be marked as cacheable (including all
+	 * queries through find methods).
+	 * &lt;p&gt;To specify the query region to be used for queries cached
+	 * by this template, set the &quot;queryCacheRegion&quot; property.
+	 * @see #setQueryCacheRegion
+	 * @see org.hibernate.Query#setCacheable
+	 * @see Criteria#setCacheable
+	 */
+	public void setCacheQueries(boolean cacheQueries) {
+<span class="nc" id="L256">		this.cacheQueries = cacheQueries;</span>
+<span class="nc" id="L257">	}</span>
+
+	/**
+	 * Return whether to cache all queries executed by this template.
+	 */
+	public boolean isCacheQueries() {
+<span class="nc" id="L263">		return this.cacheQueries;</span>
+	}
+
+	/**
+	 * Set the name of the cache region for queries executed by this template.
+	 * &lt;p&gt;If this is specified, it will be applied to all Query and Criteria objects
+	 * created by this template (including all queries through find methods).
+	 * &lt;p&gt;The cache region will not take effect unless queries created by this
+	 * template are configured to be cached via the &quot;cacheQueries&quot; property.
+	 * @see #setCacheQueries
+	 * @see org.hibernate.Query#setCacheRegion
+	 * @see Criteria#setCacheRegion
+	 */
+	public void setQueryCacheRegion(@Nullable String queryCacheRegion) {
+<span class="nc" id="L277">		this.queryCacheRegion = queryCacheRegion;</span>
+<span class="nc" id="L278">	}</span>
+
+	/**
+	 * Return the name of the cache region for queries executed by this template.
+	 */
+	@Nullable
+	public String getQueryCacheRegion() {
+<span class="nc" id="L285">		return this.queryCacheRegion;</span>
+	}
+
+	/**
+	 * Set the fetch size for this HibernateTemplate. This is important for processing
+	 * large result sets: Setting this higher than the default value will increase
+	 * processing speed at the cost of memory consumption; setting this lower can
+	 * avoid transferring row data that will never be read by the application.
+	 * &lt;p&gt;Default is 0, indicating to use the JDBC driver's default.
+	 */
+	public void setFetchSize(int fetchSize) {
+<span class="nc" id="L296">		this.fetchSize = fetchSize;</span>
+<span class="nc" id="L297">	}</span>
+
+	/**
+	 * Return the fetch size specified for this HibernateTemplate.
+	 */
+	public int getFetchSize() {
+<span class="nc" id="L303">		return this.fetchSize;</span>
+	}
+
+	/**
+	 * Set the maximum number of rows for this HibernateTemplate. This is important
+	 * for processing subsets of large result sets, avoiding to read and hold
+	 * the entire result set in the database or in the JDBC driver if we're
+	 * never interested in the entire result in the first place (for example,
+	 * when performing searches that might return a large number of matches).
+	 * &lt;p&gt;Default is 0, indicating to use the JDBC driver's default.
+	 */
+	public void setMaxResults(int maxResults) {
+<span class="nc" id="L315">		this.maxResults = maxResults;</span>
+<span class="nc" id="L316">	}</span>
+
+	/**
+	 * Return the maximum number of rows specified for this HibernateTemplate.
+	 */
+	public int getMaxResults() {
+<span class="nc" id="L322">		return this.maxResults;</span>
+	}
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="nc bnc" id="L327" title="All 2 branches missed.">		if (getSessionFactory() == null) {</span>
+<span class="nc" id="L328">			throw new IllegalArgumentException(&quot;Property 'sessionFactory' is required&quot;);</span>
+		}
+<span class="nc" id="L330">	}</span>
+
+
+	@Override
+	@Nullable
+	public &lt;T&gt; T execute(HibernateCallback&lt;T&gt; action) throws DataAccessException {
+<span class="nc" id="L336">		return doExecute(action, false);</span>
+	}
+
+	/**
+	 * Execute the action specified by the given action object within a
+	 * native {@link Session}.
+	 * &lt;p&gt;This execute variant overrides the template-wide
+	 * {@link #isExposeNativeSession() &quot;exposeNativeSession&quot;} setting.
+	 * @param action callback object that specifies the Hibernate action
+	 * @return a result object returned by the action, or {@code null}
+	 * @throws DataAccessException in case of Hibernate errors
+	 */
+	@Nullable
+	public &lt;T&gt; T executeWithNativeSession(HibernateCallback&lt;T&gt; action) {
+<span class="nc" id="L350">		return doExecute(action, true);</span>
+	}
+
+	/**
+	 * Execute the action specified by the given action object within a Session.
+	 * @param action callback object that specifies the Hibernate action
+	 * @param enforceNativeSession whether to enforce exposure of the native
+	 * Hibernate Session to callback code
+	 * @return a result object returned by the action, or {@code null}
+	 * @throws DataAccessException in case of Hibernate errors
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	@Nullable
+	protected &lt;T&gt; T doExecute(HibernateCallback&lt;T&gt; action, boolean enforceNativeSession) throws DataAccessException {
+<span class="nc" id="L364">		Assert.notNull(action, &quot;Callback object must not be null&quot;);</span>
+
+<span class="nc" id="L366">		Session session = null;</span>
+<span class="nc" id="L367">		boolean isNew = false;</span>
+		try {
+<span class="nc" id="L369">			session = obtainSessionFactory().getCurrentSession();</span>
+		}
+<span class="nc" id="L371">		catch (HibernateException ex) {</span>
+<span class="nc" id="L372">			logger.debug(&quot;Could not retrieve pre-bound Hibernate session&quot;, ex);</span>
+<span class="nc" id="L373">		}</span>
+<span class="nc bnc" id="L374" title="All 2 branches missed.">		if (session == null) {</span>
+<span class="nc" id="L375">			session = obtainSessionFactory().openSession();</span>
+<span class="nc" id="L376">			session.setFlushMode(FlushMode.MANUAL);</span>
+<span class="nc" id="L377">			isNew = true;</span>
+		}
+
+		try {
+<span class="nc" id="L381">			enableFilters(session);</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">			Session sessionToExpose =</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">					(enforceNativeSession || isExposeNativeSession() ? session : createSessionProxy(session));</span>
+<span class="nc" id="L384">			return action.doInHibernate(sessionToExpose);</span>
+		}
+<span class="nc" id="L386">		catch (HibernateException ex) {</span>
+<span class="nc" id="L387">			throw SessionFactoryUtils.convertHibernateAccessException(ex);</span>
+		}
+<span class="nc" id="L389">		catch (PersistenceException ex) {</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">			if (ex.getCause() instanceof HibernateException) {</span>
+<span class="nc" id="L391">				throw SessionFactoryUtils.convertHibernateAccessException((HibernateException) ex.getCause());</span>
+			}
+<span class="nc" id="L393">			throw ex;</span>
+		}
+<span class="nc" id="L395">		catch (RuntimeException ex) {</span>
+			// Callback code threw application exception...
+<span class="nc" id="L397">			throw ex;</span>
+		}
+		finally {
+<span class="nc bnc" id="L400" title="All 2 branches missed.">			if (isNew) {</span>
+<span class="nc" id="L401">				SessionFactoryUtils.closeSession(session);</span>
+			}
+			else {
+<span class="nc" id="L404">				disableFilters(session);</span>
+			}
+		}
+	}
+
+	/**
+	 * Create a close-suppressing proxy for the given Hibernate Session.
+	 * The proxy also prepares returned Query and Criteria objects.
+	 * @param session the Hibernate Session to create a proxy for
+	 * @return the Session proxy
+	 * @see Session#close()
+	 * @see #prepareQuery
+	 * @see #prepareCriteria
+	 */
+	protected Session createSessionProxy(Session session) {
+<span class="nc" id="L419">		return (Session) Proxy.newProxyInstance(</span>
+<span class="nc" id="L420">				session.getClass().getClassLoader(), new Class&lt;?&gt;[] {Session.class},</span>
+				new CloseSuppressingInvocationHandler(session));
+	}
+
+	/**
+	 * Enable the specified filters on the given Session.
+	 * @param session the current Hibernate Session
+	 * @see #setFilterNames
+	 * @see Session#enableFilter(String)
+	 */
+	protected void enableFilters(Session session) {
+<span class="nc" id="L431">		String[] filterNames = getFilterNames();</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">		if (filterNames != null) {</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">			for (String filterName : filterNames) {</span>
+<span class="nc" id="L434">				session.enableFilter(filterName);</span>
+			}
+		}
+<span class="nc" id="L437">	}</span>
+
+	/**
+	 * Disable the specified filters on the given Session.
+	 * @param session the current Hibernate Session
+	 * @see #setFilterNames
+	 * @see Session#disableFilter(String)
+	 */
+	protected void disableFilters(Session session) {
+<span class="nc" id="L446">		String[] filterNames = getFilterNames();</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">		if (filterNames != null) {</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">			for (String filterName : filterNames) {</span>
+<span class="nc" id="L449">				session.disableFilter(filterName);</span>
+			}
+		}
+<span class="nc" id="L452">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Convenience methods for loading individual objects
+	//-------------------------------------------------------------------------
+
+	@Override
+	@Nullable
+	public &lt;T&gt; T get(Class&lt;T&gt; entityClass, Serializable id) throws DataAccessException {
+<span class="nc" id="L462">		return get(entityClass, id, null);</span>
+	}
+
+	@Override
+	@Nullable
+	public &lt;T&gt; T get(final Class&lt;T&gt; entityClass, final Serializable id, @Nullable final LockMode lockMode)
+			throws DataAccessException {
+
+<span class="nc" id="L470">		return executeWithNativeSession(session -&gt; {</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L472">				return session.get(entityClass, id, new LockOptions(lockMode));</span>
+			}
+			else {
+<span class="nc" id="L475">				return session.get(entityClass, id);</span>
+			}
+		});
+	}
+
+	@Override
+	@Nullable
+	public Object get(String entityName, Serializable id) throws DataAccessException {
+<span class="nc" id="L483">		return get(entityName, id, null);</span>
+	}
+
+	@Override
+	@Nullable
+	public Object get(final String entityName, final Serializable id, @Nullable final LockMode lockMode)
+			throws DataAccessException {
+
+<span class="nc" id="L491">		return executeWithNativeSession(session -&gt; {</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L493">				return session.get(entityName, id, new LockOptions(lockMode));</span>
+			}
+			else {
+<span class="nc" id="L496">				return session.get(entityName, id);</span>
+			}
+		});
+	}
+
+	@Override
+	public &lt;T&gt; T load(Class&lt;T&gt; entityClass, Serializable id) throws DataAccessException {
+<span class="nc" id="L503">		return load(entityClass, id, null);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T load(final Class&lt;T&gt; entityClass, final Serializable id, @Nullable final LockMode lockMode)
+			throws DataAccessException {
+
+<span class="nc" id="L510">		return nonNull(executeWithNativeSession(session -&gt; {</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L512">				return session.load(entityClass, id, new LockOptions(lockMode));</span>
+			}
+			else {
+<span class="nc" id="L515">				return session.load(entityClass, id);</span>
+			}
+		}));
+	}
+
+	@Override
+	public Object load(String entityName, Serializable id) throws DataAccessException {
+<span class="nc" id="L522">		return load(entityName, id, null);</span>
+	}
+
+	@Override
+	public Object load(final String entityName, final Serializable id, @Nullable final LockMode lockMode)
+			throws DataAccessException {
+
+<span class="nc" id="L529">		return nonNull(executeWithNativeSession(session -&gt; {</span>
+<span class="nc bnc" id="L530" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L531">				return session.load(entityName, id, new LockOptions(lockMode));</span>
+			}
+			else {
+<span class="nc" id="L534">				return session.load(entityName, id);</span>
+			}
+		}));
+	}
+
+	@Override
+	@SuppressWarnings({&quot;unchecked&quot;, &quot;deprecation&quot;})
+	public &lt;T&gt; List&lt;T&gt; loadAll(final Class&lt;T&gt; entityClass) throws DataAccessException {
+<span class="nc" id="L542">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;T&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L543">			Criteria criteria = session.createCriteria(entityClass);</span>
+<span class="nc" id="L544">			criteria.setResultTransformer(Criteria.DISTINCT_ROOT_ENTITY);</span>
+<span class="nc" id="L545">			prepareCriteria(criteria);</span>
+<span class="nc" id="L546">			return criteria.list();</span>
+		}));
+	}
+
+	@Override
+	@SuppressWarnings({&quot;deprecation&quot;})
+	public void load(final Object entity, final Serializable id) throws DataAccessException {
+<span class="nc" id="L553">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L554">			session.load(entity, id);</span>
+<span class="nc" id="L555">			return null;</span>
+		});
+<span class="nc" id="L557">	}</span>
+
+	@Override
+	public void refresh(final Object entity) throws DataAccessException {
+<span class="nc" id="L561">		refresh(entity, null);</span>
+<span class="nc" id="L562">	}</span>
+
+	@Override
+	public void refresh(final Object entity, @Nullable final LockMode lockMode) throws DataAccessException {
+<span class="nc" id="L566">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L568">				session.refresh(entity, new LockOptions(lockMode));</span>
+			}
+			else {
+<span class="nc" id="L571">				session.refresh(entity);</span>
+			}
+<span class="nc" id="L573">			return null;</span>
+		});
+<span class="nc" id="L575">	}</span>
+
+	@Override
+	public boolean contains(final Object entity) throws DataAccessException {
+<span class="nc" id="L579">		Boolean result = executeWithNativeSession(session -&gt; session.contains(entity));</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">		Assert.state(result != null, &quot;No contains result&quot;);</span>
+<span class="nc" id="L581">		return result;</span>
+	}
+
+	@Override
+	public void evict(final Object entity) throws DataAccessException {
+<span class="nc" id="L586">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L587">			session.evict(entity);</span>
+<span class="nc" id="L588">			return null;</span>
+		});
+<span class="nc" id="L590">	}</span>
+
+	@Override
+	public void initialize(Object proxy) throws DataAccessException {
+		try {
+<span class="nc" id="L595">			Hibernate.initialize(proxy);</span>
+		}
+<span class="nc" id="L597">		catch (HibernateException ex) {</span>
+<span class="nc" id="L598">			throw SessionFactoryUtils.convertHibernateAccessException(ex);</span>
+<span class="nc" id="L599">		}</span>
+<span class="nc" id="L600">	}</span>
+
+	@Override
+	public Filter enableFilter(String filterName) throws IllegalStateException {
+<span class="nc" id="L604">		Session session = obtainSessionFactory().getCurrentSession();</span>
+<span class="nc" id="L605">		Filter filter = session.getEnabledFilter(filterName);</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">		if (filter == null) {</span>
+<span class="nc" id="L607">			filter = session.enableFilter(filterName);</span>
+		}
+<span class="nc" id="L609">		return filter;</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Convenience methods for storing individual objects
+	//-------------------------------------------------------------------------
+
+	@Override
+	public void lock(final Object entity, final LockMode lockMode) throws DataAccessException {
+<span class="nc" id="L619">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L620">			session.buildLockRequest(new LockOptions(lockMode)).lock(entity);</span>
+<span class="nc" id="L621">			return null;</span>
+		});
+<span class="nc" id="L623">	}</span>
+
+	@Override
+	public void lock(final String entityName, final Object entity, final LockMode lockMode)
+			throws DataAccessException {
+
+<span class="nc" id="L629">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L630">			session.buildLockRequest(new LockOptions(lockMode)).lock(entityName, entity);</span>
+<span class="nc" id="L631">			return null;</span>
+		});
+<span class="nc" id="L633">	}</span>
+
+	@Override
+	public Serializable save(final Object entity) throws DataAccessException {
+<span class="nc" id="L637">		return nonNull(executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L638">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L639">			return session.save(entity);</span>
+		}));
+	}
+
+	@Override
+	public Serializable save(final String entityName, final Object entity) throws DataAccessException {
+<span class="nc" id="L645">		return nonNull(executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L646">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L647">			return session.save(entityName, entity);</span>
+		}));
+	}
+
+	@Override
+	public void update(Object entity) throws DataAccessException {
+<span class="nc" id="L653">		update(entity, null);</span>
+<span class="nc" id="L654">	}</span>
+
+	@Override
+	public void update(final Object entity, @Nullable final LockMode lockMode) throws DataAccessException {
+<span class="nc" id="L658">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L659">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L660">			session.update(entity);</span>
+<span class="nc bnc" id="L661" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L662">				session.buildLockRequest(new LockOptions(lockMode)).lock(entity);</span>
+			}
+<span class="nc" id="L664">			return null;</span>
+		});
+<span class="nc" id="L666">	}</span>
+
+	@Override
+	public void update(String entityName, Object entity) throws DataAccessException {
+<span class="nc" id="L670">		update(entityName, entity, null);</span>
+<span class="nc" id="L671">	}</span>
+
+	@Override
+	public void update(final String entityName, final Object entity, @Nullable final LockMode lockMode)
+			throws DataAccessException {
+
+<span class="nc" id="L677">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L678">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L679">			session.update(entityName, entity);</span>
+<span class="nc bnc" id="L680" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L681">				session.buildLockRequest(new LockOptions(lockMode)).lock(entityName, entity);</span>
+			}
+<span class="nc" id="L683">			return null;</span>
+		});
+<span class="nc" id="L685">	}</span>
+
+	@Override
+	public void saveOrUpdate(final Object entity) throws DataAccessException {
+<span class="nc" id="L689">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L690">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L691">			session.saveOrUpdate(entity);</span>
+<span class="nc" id="L692">			return null;</span>
+		});
+<span class="nc" id="L694">	}</span>
+
+	@Override
+	public void saveOrUpdate(final String entityName, final Object entity) throws DataAccessException {
+<span class="nc" id="L698">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L699">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L700">			session.saveOrUpdate(entityName, entity);</span>
+<span class="nc" id="L701">			return null;</span>
+		});
+<span class="nc" id="L703">	}</span>
+
+	@Override
+	public void replicate(final Object entity, final ReplicationMode replicationMode)
+			throws DataAccessException {
+
+<span class="nc" id="L709">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L710">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L711">			session.replicate(entity, replicationMode);</span>
+<span class="nc" id="L712">			return null;</span>
+		});
+<span class="nc" id="L714">	}</span>
+
+	@Override
+	public void replicate(final String entityName, final Object entity, final ReplicationMode replicationMode)
+			throws DataAccessException {
+
+<span class="nc" id="L720">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L721">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L722">			session.replicate(entityName, entity, replicationMode);</span>
+<span class="nc" id="L723">			return null;</span>
+		});
+<span class="nc" id="L725">	}</span>
+
+	@Override
+	public void persist(final Object entity) throws DataAccessException {
+<span class="nc" id="L729">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L730">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L731">			session.persist(entity);</span>
+<span class="nc" id="L732">			return null;</span>
+		});
+<span class="nc" id="L734">	}</span>
+
+	@Override
+	public void persist(final String entityName, final Object entity) throws DataAccessException {
+<span class="nc" id="L738">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L739">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L740">			session.persist(entityName, entity);</span>
+<span class="nc" id="L741">			return null;</span>
+		});
+<span class="nc" id="L743">	}</span>
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public &lt;T&gt; T merge(final T entity) throws DataAccessException {
+<span class="nc" id="L748">		return nonNull(executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L749">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L750">			return (T) session.merge(entity);</span>
+		}));
+	}
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public &lt;T&gt; T merge(final String entityName, final T entity) throws DataAccessException {
+<span class="nc" id="L757">		return nonNull(executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L758">			checkWriteOperationAllowed(session);</span>
+<span class="nc" id="L759">			return (T) session.merge(entityName, entity);</span>
+		}));
+	}
+
+	@Override
+	public void delete(Object entity) throws DataAccessException {
+<span class="nc" id="L765">		delete(entity, null);</span>
+<span class="nc" id="L766">	}</span>
+
+	@Override
+	public void delete(final Object entity, @Nullable final LockMode lockMode) throws DataAccessException {
+<span class="nc" id="L770">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L771">			checkWriteOperationAllowed(session);</span>
+<span class="nc bnc" id="L772" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L773">				session.buildLockRequest(new LockOptions(lockMode)).lock(entity);</span>
+			}
+<span class="nc" id="L775">			session.delete(entity);</span>
+<span class="nc" id="L776">			return null;</span>
+		});
+<span class="nc" id="L778">	}</span>
+
+	@Override
+	public void delete(String entityName, Object entity) throws DataAccessException {
+<span class="nc" id="L782">		delete(entityName, entity, null);</span>
+<span class="nc" id="L783">	}</span>
+
+	@Override
+	public void delete(final String entityName, final Object entity, @Nullable final LockMode lockMode)
+			throws DataAccessException {
+
+<span class="nc" id="L789">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L790">			checkWriteOperationAllowed(session);</span>
+<span class="nc bnc" id="L791" title="All 2 branches missed.">			if (lockMode != null) {</span>
+<span class="nc" id="L792">				session.buildLockRequest(new LockOptions(lockMode)).lock(entityName, entity);</span>
+			}
+<span class="nc" id="L794">			session.delete(entityName, entity);</span>
+<span class="nc" id="L795">			return null;</span>
+		});
+<span class="nc" id="L797">	}</span>
+
+	@Override
+	public void deleteAll(final Collection&lt;?&gt; entities) throws DataAccessException {
+<span class="nc" id="L801">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L802">			checkWriteOperationAllowed(session);</span>
+<span class="nc bnc" id="L803" title="All 2 branches missed.">			for (Object entity : entities) {</span>
+<span class="nc" id="L804">				session.delete(entity);</span>
+<span class="nc" id="L805">			}</span>
+<span class="nc" id="L806">			return null;</span>
+		});
+<span class="nc" id="L808">	}</span>
+
+	@Override
+	public void flush() throws DataAccessException {
+<span class="nc" id="L812">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L813">			session.flush();</span>
+<span class="nc" id="L814">			return null;</span>
+		});
+<span class="nc" id="L816">	}</span>
+
+	@Override
+	public void clear() throws DataAccessException {
+<span class="nc" id="L820">		executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L821">			session.clear();</span>
+<span class="nc" id="L822">			return null;</span>
+		});
+<span class="nc" id="L824">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Convenience finder methods for detached criteria
+	//-------------------------------------------------------------------------
+
+	@Override
+	public List&lt;?&gt; findByCriteria(DetachedCriteria criteria) throws DataAccessException {
+<span class="nc" id="L833">		return findByCriteria(criteria, -1, -1);</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public List&lt;?&gt; findByCriteria(final DetachedCriteria criteria, final int firstResult, final int maxResults)
+			throws DataAccessException {
+
+<span class="nc" id="L841">		Assert.notNull(criteria, &quot;DetachedCriteria must not be null&quot;);</span>
+<span class="nc" id="L842">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L843">			Criteria executableCriteria = criteria.getExecutableCriteria(session);</span>
+<span class="nc" id="L844">			prepareCriteria(executableCriteria);</span>
+<span class="nc bnc" id="L845" title="All 2 branches missed.">			if (firstResult &gt;= 0) {</span>
+<span class="nc" id="L846">				executableCriteria.setFirstResult(firstResult);</span>
+			}
+<span class="nc bnc" id="L848" title="All 2 branches missed.">			if (maxResults &gt; 0) {</span>
+<span class="nc" id="L849">				executableCriteria.setMaxResults(maxResults);</span>
+			}
+<span class="nc" id="L851">			return executableCriteria.list();</span>
+		}));
+	}
+
+	@Override
+	public &lt;T&gt; List&lt;T&gt; findByExample(T exampleEntity) throws DataAccessException {
+<span class="nc" id="L857">		return findByExample(null, exampleEntity, -1, -1);</span>
+	}
+
+	@Override
+	public &lt;T&gt; List&lt;T&gt; findByExample(String entityName, T exampleEntity) throws DataAccessException {
+<span class="nc" id="L862">		return findByExample(entityName, exampleEntity, -1, -1);</span>
+	}
+
+	@Override
+	public &lt;T&gt; List&lt;T&gt; findByExample(T exampleEntity, int firstResult, int maxResults) throws DataAccessException {
+<span class="nc" id="L867">		return findByExample(null, exampleEntity, firstResult, maxResults);</span>
+	}
+
+	@Override
+	@SuppressWarnings({&quot;unchecked&quot;, &quot;deprecation&quot;})
+	public &lt;T&gt; List&lt;T&gt; findByExample(
+			@Nullable final String entityName, final T exampleEntity, final int firstResult, final int maxResults)
+			throws DataAccessException {
+
+<span class="nc" id="L876">		Assert.notNull(exampleEntity, &quot;Example entity must not be null&quot;);</span>
+<span class="nc" id="L877">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;T&gt;&gt;) session -&gt; {</span>
+<span class="nc bnc" id="L878" title="All 2 branches missed.">			Criteria executableCriteria = (entityName != null ?</span>
+<span class="nc" id="L879">					session.createCriteria(entityName) : session.createCriteria(exampleEntity.getClass()));</span>
+<span class="nc" id="L880">			executableCriteria.add(Example.create(exampleEntity));</span>
+<span class="nc" id="L881">			prepareCriteria(executableCriteria);</span>
+<span class="nc bnc" id="L882" title="All 2 branches missed.">			if (firstResult &gt;= 0) {</span>
+<span class="nc" id="L883">				executableCriteria.setFirstResult(firstResult);</span>
+			}
+<span class="nc bnc" id="L885" title="All 2 branches missed.">			if (maxResults &gt; 0) {</span>
+<span class="nc" id="L886">				executableCriteria.setMaxResults(maxResults);</span>
+			}
+<span class="nc" id="L888">			return executableCriteria.list();</span>
+		}));
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Convenience finder methods for HQL strings
+	//-------------------------------------------------------------------------
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+	public List&lt;?&gt; find(final String queryString, @Nullable final Object... values) throws DataAccessException {
+<span class="nc" id="L901">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L902">			org.hibernate.Query queryObject = queryObject(</span>
+<span class="nc" id="L903">					ReflectionUtils.invokeMethod(createQueryMethod, session, queryString));</span>
+<span class="nc" id="L904">			prepareQuery(queryObject);</span>
+<span class="nc bnc" id="L905" title="All 2 branches missed.">			if (values != null) {</span>
+<span class="nc bnc" id="L906" title="All 2 branches missed.">				for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="nc" id="L907">					queryObject.setParameter(i, values[i]);</span>
+				}
+			}
+<span class="nc" id="L910">			return queryObject.list();</span>
+		}));
+	}
+
+	@Deprecated
+	@Override
+	public List&lt;?&gt; findByNamedParam(String queryString, String paramName, Object value)
+			throws DataAccessException {
+
+<span class="nc" id="L919">		return findByNamedParam(queryString, new String[] {paramName}, new Object[] {value});</span>
+	}
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+	public List&lt;?&gt; findByNamedParam(final String queryString, final String[] paramNames, final Object[] values)
+			throws DataAccessException {
+
+<span class="nc bnc" id="L928" title="All 2 branches missed.">		if (paramNames.length != values.length) {</span>
+<span class="nc" id="L929">			throw new IllegalArgumentException(&quot;Length of paramNames array must match length of values array&quot;);</span>
+		}
+<span class="nc" id="L931">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L932">			org.hibernate.Query queryObject = queryObject(</span>
+<span class="nc" id="L933">					ReflectionUtils.invokeMethod(createQueryMethod, session, queryString));</span>
+<span class="nc" id="L934">			prepareQuery(queryObject);</span>
+<span class="nc bnc" id="L935" title="All 2 branches missed.">			for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="nc" id="L936">				applyNamedParameterToQuery(queryObject, paramNames[i], values[i]);</span>
+			}
+<span class="nc" id="L938">			return queryObject.list();</span>
+		}));
+	}
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+	public List&lt;?&gt; findByValueBean(final String queryString, final Object valueBean)
+			throws DataAccessException {
+
+<span class="nc" id="L948">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L949">			org.hibernate.Query queryObject = queryObject(</span>
+<span class="nc" id="L950">					ReflectionUtils.invokeMethod(createQueryMethod, session, queryString));</span>
+<span class="nc" id="L951">			prepareQuery(queryObject);</span>
+<span class="nc" id="L952">			queryObject.setProperties(valueBean);</span>
+<span class="nc" id="L953">			return queryObject.list();</span>
+		}));
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Convenience finder methods for named queries
+	//-------------------------------------------------------------------------
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+	public List&lt;?&gt; findByNamedQuery(final String queryName, @Nullable final Object... values) throws DataAccessException {
+<span class="nc" id="L966">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L967">			org.hibernate.Query queryObject = queryObject(</span>
+<span class="nc" id="L968">					ReflectionUtils.invokeMethod(getNamedQueryMethod, session, queryName));</span>
+<span class="nc" id="L969">			prepareQuery(queryObject);</span>
+<span class="nc bnc" id="L970" title="All 2 branches missed.">			if (values != null) {</span>
+<span class="nc bnc" id="L971" title="All 2 branches missed.">				for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="nc" id="L972">					queryObject.setParameter(i, values[i]);</span>
+				}
+			}
+<span class="nc" id="L975">			return queryObject.list();</span>
+		}));
+	}
+
+	@Deprecated
+	@Override
+	public List&lt;?&gt; findByNamedQueryAndNamedParam(String queryName, String paramName, Object value)
+			throws DataAccessException {
+
+<span class="nc" id="L984">		return findByNamedQueryAndNamedParam(queryName, new String[] {paramName}, new Object[] {value});</span>
+	}
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+	public List&lt;?&gt; findByNamedQueryAndNamedParam(
+			final String queryName, @Nullable final String[] paramNames, @Nullable final Object[] values)
+			throws DataAccessException {
+
+<span class="nc bnc" id="L994" title="All 6 branches missed.">		if (values != null &amp;&amp; (paramNames == null || paramNames.length != values.length)) {</span>
+<span class="nc" id="L995">			throw new IllegalArgumentException(&quot;Length of paramNames array must match length of values array&quot;);</span>
+		}
+<span class="nc" id="L997">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L998">			org.hibernate.Query queryObject = (org.hibernate.Query)</span>
+<span class="nc" id="L999">					nonNull(ReflectionUtils.invokeMethod(getNamedQueryMethod, session, queryName));</span>
+<span class="nc" id="L1000">			prepareQuery(queryObject);</span>
+<span class="nc bnc" id="L1001" title="All 2 branches missed.">			if (values != null) {</span>
+<span class="nc bnc" id="L1002" title="All 2 branches missed.">				for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="nc" id="L1003">					applyNamedParameterToQuery(queryObject, paramNames[i], values[i]);</span>
+				}
+			}
+<span class="nc" id="L1006">			return queryObject.list();</span>
+		}));
+	}
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+	public List&lt;?&gt; findByNamedQueryAndValueBean(final String queryName, final Object valueBean)
+			throws DataAccessException {
+
+<span class="nc" id="L1016">		return nonNull(executeWithNativeSession((HibernateCallback&lt;List&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L1017">			org.hibernate.Query queryObject = queryObject(</span>
+<span class="nc" id="L1018">					ReflectionUtils.invokeMethod(getNamedQueryMethod, session, queryName));</span>
+<span class="nc" id="L1019">			prepareQuery(queryObject);</span>
+<span class="nc" id="L1020">			queryObject.setProperties(valueBean);</span>
+<span class="nc" id="L1021">			return queryObject.list();</span>
+		}));
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Convenience query methods for iteration and bulk updates/deletes
+	//-------------------------------------------------------------------------
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;deprecation&quot;})
+	public Iterator&lt;?&gt; iterate(final String queryString, @Nullable final Object... values) throws DataAccessException {
+<span class="nc" id="L1034">		return nonNull(executeWithNativeSession((HibernateCallback&lt;Iterator&lt;?&gt;&gt;) session -&gt; {</span>
+<span class="nc" id="L1035">			org.hibernate.Query queryObject = queryObject(</span>
+<span class="nc" id="L1036">					ReflectionUtils.invokeMethod(createQueryMethod, session, queryString));</span>
+<span class="nc" id="L1037">			prepareQuery(queryObject);</span>
+<span class="nc bnc" id="L1038" title="All 2 branches missed.">			if (values != null) {</span>
+<span class="nc bnc" id="L1039" title="All 2 branches missed.">				for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="nc" id="L1040">					queryObject.setParameter(i, values[i]);</span>
+				}
+			}
+<span class="nc" id="L1043">			return queryObject.iterate();</span>
+		}));
+	}
+
+	@Deprecated
+	@Override
+	public void closeIterator(Iterator&lt;?&gt; it) throws DataAccessException {
+		try {
+<span class="nc" id="L1051">			Hibernate.close(it);</span>
+		}
+<span class="nc" id="L1053">		catch (HibernateException ex) {</span>
+<span class="nc" id="L1054">			throw SessionFactoryUtils.convertHibernateAccessException(ex);</span>
+<span class="nc" id="L1055">		}</span>
+<span class="nc" id="L1056">	}</span>
+
+	@Deprecated
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;deprecation&quot;})
+	public int bulkUpdate(final String queryString, @Nullable final Object... values) throws DataAccessException {
+<span class="nc" id="L1062">		Integer result = executeWithNativeSession(session -&gt; {</span>
+<span class="nc" id="L1063">			org.hibernate.Query queryObject = queryObject(</span>
+<span class="nc" id="L1064">					ReflectionUtils.invokeMethod(createQueryMethod, session, queryString));</span>
+<span class="nc" id="L1065">			prepareQuery(queryObject);</span>
+<span class="nc bnc" id="L1066" title="All 2 branches missed.">			if (values != null) {</span>
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">				for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="nc" id="L1068">					queryObject.setParameter(i, values[i]);</span>
+				}
+			}
+<span class="nc" id="L1071">			return queryObject.executeUpdate();</span>
+		});
+<span class="nc bnc" id="L1073" title="All 2 branches missed.">		Assert.state(result != null, &quot;No update count&quot;);</span>
+<span class="nc" id="L1074">		return result;</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Helper methods used by the operations above
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Check whether write operations are allowed on the given Session.
+	 * &lt;p&gt;Default implementation throws an InvalidDataAccessApiUsageException in
+	 * case of {@code FlushMode.MANUAL}. Can be overridden in subclasses.
+	 * @param session current Hibernate Session
+	 * @throws InvalidDataAccessApiUsageException if write operations are not allowed
+	 * @see #setCheckWriteOperations
+	 * @see Session#getFlushMode()
+	 * @see FlushMode#MANUAL
+	 */
+	protected void checkWriteOperationAllowed(Session session) throws InvalidDataAccessApiUsageException {
+<span class="nc bnc" id="L1093" title="All 4 branches missed.">		if (isCheckWriteOperations() &amp;&amp; SessionFactoryUtils.getFlushMode(session).lessThan(FlushMode.COMMIT)) {</span>
+<span class="nc" id="L1094">			throw new InvalidDataAccessApiUsageException(</span>
+					&quot;Write operations are not allowed in read-only mode (FlushMode.MANUAL): &quot;+
+					&quot;Turn your Session into FlushMode.COMMIT/AUTO or remove 'readOnly' marker from transaction definition.&quot;);
+		}
+<span class="nc" id="L1098">	}</span>
+
+	/**
+	 * Prepare the given Criteria object, applying cache settings and/or
+	 * a transaction timeout.
+	 * @param criteria the Criteria object to prepare
+	 * @see #setCacheQueries
+	 * @see #setQueryCacheRegion
+	 */
+	protected void prepareCriteria(Criteria criteria) {
+<span class="nc bnc" id="L1108" title="All 2 branches missed.">		if (isCacheQueries()) {</span>
+<span class="nc" id="L1109">			criteria.setCacheable(true);</span>
+<span class="nc bnc" id="L1110" title="All 2 branches missed.">			if (getQueryCacheRegion() != null) {</span>
+<span class="nc" id="L1111">				criteria.setCacheRegion(getQueryCacheRegion());</span>
+			}
+		}
+<span class="nc bnc" id="L1114" title="All 2 branches missed.">		if (getFetchSize() &gt; 0) {</span>
+<span class="nc" id="L1115">			criteria.setFetchSize(getFetchSize());</span>
+		}
+<span class="nc bnc" id="L1117" title="All 2 branches missed.">		if (getMaxResults() &gt; 0) {</span>
+<span class="nc" id="L1118">			criteria.setMaxResults(getMaxResults());</span>
+		}
+
+<span class="nc" id="L1121">		ResourceHolderSupport sessionHolder =</span>
+<span class="nc" id="L1122">				(ResourceHolderSupport) TransactionSynchronizationManager.getResource(obtainSessionFactory());</span>
+<span class="nc bnc" id="L1123" title="All 4 branches missed.">		if (sessionHolder != null &amp;&amp; sessionHolder.hasTimeout()) {</span>
+<span class="nc" id="L1124">			criteria.setTimeout(sessionHolder.getTimeToLiveInSeconds());</span>
+		}
+<span class="nc" id="L1126">	}</span>
+
+	/**
+	 * Prepare the given Query object, applying cache settings and/or
+	 * a transaction timeout.
+	 * @param queryObject the Query object to prepare
+	 * @see #setCacheQueries
+	 * @see #setQueryCacheRegion
+	 */
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;deprecation&quot;})
+	protected void prepareQuery(org.hibernate.Query queryObject) {
+<span class="nc bnc" id="L1137" title="All 2 branches missed.">		if (isCacheQueries()) {</span>
+<span class="nc" id="L1138">			queryObject.setCacheable(true);</span>
+<span class="nc bnc" id="L1139" title="All 2 branches missed.">			if (getQueryCacheRegion() != null) {</span>
+<span class="nc" id="L1140">				queryObject.setCacheRegion(getQueryCacheRegion());</span>
+			}
+		}
+<span class="nc bnc" id="L1143" title="All 2 branches missed.">		if (getFetchSize() &gt; 0) {</span>
+<span class="nc" id="L1144">			queryObject.setFetchSize(getFetchSize());</span>
+		}
+<span class="nc bnc" id="L1146" title="All 2 branches missed.">		if (getMaxResults() &gt; 0) {</span>
+<span class="nc" id="L1147">			queryObject.setMaxResults(getMaxResults());</span>
+		}
+
+<span class="nc" id="L1150">		ResourceHolderSupport sessionHolder =</span>
+<span class="nc" id="L1151">				(ResourceHolderSupport) TransactionSynchronizationManager.getResource(obtainSessionFactory());</span>
+<span class="nc bnc" id="L1152" title="All 4 branches missed.">		if (sessionHolder != null &amp;&amp; sessionHolder.hasTimeout()) {</span>
+<span class="nc" id="L1153">			queryObject.setTimeout(sessionHolder.getTimeToLiveInSeconds());</span>
+		}
+<span class="nc" id="L1155">	}</span>
+
+	/**
+	 * Apply the given name parameter to the given Query object.
+	 * @param queryObject the Query object
+	 * @param paramName the name of the parameter
+	 * @param value the value of the parameter
+	 * @throws HibernateException if thrown by the Query object
+	 */
+	@Deprecated
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;deprecation&quot;})
+	protected void applyNamedParameterToQuery(org.hibernate.Query queryObject, String paramName, Object value)
+			throws HibernateException {
+
+<span class="nc bnc" id="L1169" title="All 2 branches missed.">		if (value instanceof Collection) {</span>
+<span class="nc" id="L1170">			queryObject.setParameterList(paramName, (Collection&lt;?&gt;) value);</span>
+		}
+<span class="nc bnc" id="L1172" title="All 2 branches missed.">		else if (value instanceof Object[]) {</span>
+<span class="nc" id="L1173">			queryObject.setParameterList(paramName, (Object[]) value);</span>
+		}
+		else {
+<span class="nc" id="L1176">			queryObject.setParameter(paramName, value);</span>
+		}
+<span class="nc" id="L1178">	}</span>
+
+	@Deprecated
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;deprecation&quot;})
+	private static org.hibernate.Query queryObject(@Nullable Object result) {
+<span class="nc bnc" id="L1183" title="All 2 branches missed.">		Assert.state(result != null, &quot;No Hibernate Query&quot;);</span>
+<span class="nc" id="L1184">		return (org.hibernate.Query) result;</span>
+	}
+
+	private static &lt;T&gt; T nonNull(@Nullable T result) {
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">		Assert.state(result != null, &quot;No result&quot;);</span>
+<span class="nc" id="L1189">		return result;</span>
+	}
+
+
+	/**
+	 * Invocation handler that suppresses close calls on Hibernate Sessions.
+	 * Also prepares returned Query and Criteria objects.
+	 * @see Session#close
+	 */
+	private class CloseSuppressingInvocationHandler implements InvocationHandler {
+
+		private final Session target;
+
+<span class="nc" id="L1202">		public CloseSuppressingInvocationHandler(Session target) {</span>
+<span class="nc" id="L1203">			this.target = target;</span>
+<span class="nc" id="L1204">		}</span>
+
+		@Override
+		@SuppressWarnings({&quot;rawtypes&quot;, &quot;deprecation&quot;})
+		@Nullable
+		public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on Session interface coming in...
+
+<span class="nc bnc" id="L1212" title="All 2 branches missed.">			if (method.getName().equals(&quot;equals&quot;)) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L1214" title="All 2 branches missed.">				return (proxy == args[0]);</span>
+			}
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of Session proxy.
+<span class="nc" id="L1218">				return System.identityHashCode(proxy);</span>
+			}
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">			else if (method.getName().equals(&quot;close&quot;)) {</span>
+				// Handle close method: suppress, not valid.
+<span class="nc" id="L1222">				return null;</span>
+			}
+
+			// Invoke method on target Session.
+			try {
+<span class="nc" id="L1227">				Object retVal = method.invoke(this.target, args);</span>
+
+				// If return value is a Query or Criteria, apply transaction timeout.
+				// Applies to createQuery, getNamedQuery, createCriteria.
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">				if (retVal instanceof Criteria) {</span>
+<span class="nc" id="L1232">					prepareCriteria(((Criteria) retVal));</span>
+				}
+<span class="nc bnc" id="L1234" title="All 2 branches missed.">				else if (retVal instanceof org.hibernate.Query) {</span>
+<span class="nc" id="L1235">					prepareQuery(((org.hibernate.Query) retVal));</span>
+				}
+
+<span class="nc" id="L1238">				return retVal;</span>
+			}
+<span class="nc" id="L1240">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L1241">				throw ex.getTargetException();</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

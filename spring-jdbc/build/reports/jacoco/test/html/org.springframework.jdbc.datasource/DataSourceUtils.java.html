@@ -1,0 +1,504 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DataSourceUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.datasource</a> &gt; <span class="el_source">DataSourceUtils.java</span></div><h1>DataSourceUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.datasource;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
+import javax.sql.DataSource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationAdapter;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+
+/**
+ * Helper class that provides static methods for obtaining JDBC Connections from
+ * a {@link javax.sql.DataSource}. Includes special support for Spring-managed
+ * transactional Connections, e.g. managed by {@link DataSourceTransactionManager}
+ * or {@link org.springframework.transaction.jta.JtaTransactionManager}.
+ *
+ * &lt;p&gt;Used internally by Spring's {@link org.springframework.jdbc.core.JdbcTemplate},
+ * Spring's JDBC operation objects and the JDBC {@link DataSourceTransactionManager}.
+ * Can also be used directly in application code.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @see #getConnection
+ * @see #releaseConnection
+ * @see DataSourceTransactionManager
+ * @see org.springframework.transaction.jta.JtaTransactionManager
+ * @see org.springframework.transaction.support.TransactionSynchronizationManager
+ */
+<span class="nc" id="L52">public abstract class DataSourceUtils {</span>
+
+	/**
+	 * Order value for TransactionSynchronization objects that clean up JDBC Connections.
+	 */
+	public static final int CONNECTION_SYNCHRONIZATION_ORDER = 1000;
+
+<span class="fc" id="L59">	private static final Log logger = LogFactory.getLog(DataSourceUtils.class);</span>
+
+
+	/**
+	 * Obtain a Connection from the given DataSource. Translates SQLExceptions into
+	 * the Spring hierarchy of unchecked generic data access exceptions, simplifying
+	 * calling code and making any exception that is thrown more meaningful.
+	 * &lt;p&gt;Is aware of a corresponding Connection bound to the current thread, for example
+	 * when using {@link DataSourceTransactionManager}. Will bind a Connection to the
+	 * thread if transaction synchronization is active, e.g. when running within a
+	 * {@link org.springframework.transaction.jta.JtaTransactionManager JTA} transaction).
+	 * @param dataSource the DataSource to obtain Connections from
+	 * @return a JDBC Connection from the given DataSource
+	 * @throws org.springframework.jdbc.CannotGetJdbcConnectionException
+	 * if the attempt to get a Connection failed
+	 * @see #releaseConnection
+	 */
+	public static Connection getConnection(DataSource dataSource) throws CannotGetJdbcConnectionException {
+		try {
+<span class="fc" id="L78">			return doGetConnection(dataSource);</span>
+		}
+<span class="fc" id="L80">		catch (SQLException ex) {</span>
+<span class="fc" id="L81">			throw new CannotGetJdbcConnectionException(&quot;Failed to obtain JDBC Connection&quot;, ex);</span>
+		}
+<span class="nc" id="L83">		catch (IllegalStateException ex) {</span>
+<span class="nc" id="L84">			throw new CannotGetJdbcConnectionException(&quot;Failed to obtain JDBC Connection: &quot; + ex.getMessage());</span>
+		}
+	}
+
+	/**
+	 * Actually obtain a JDBC Connection from the given DataSource.
+	 * Same as {@link #getConnection}, but throwing the original SQLException.
+	 * &lt;p&gt;Is aware of a corresponding Connection bound to the current thread, for example
+	 * when using {@link DataSourceTransactionManager}. Will bind a Connection to the thread
+	 * if transaction synchronization is active (e.g. if in a JTA transaction).
+	 * &lt;p&gt;Directly accessed by {@link TransactionAwareDataSourceProxy}.
+	 * @param dataSource the DataSource to obtain Connections from
+	 * @return a JDBC Connection from the given DataSource
+	 * @throws SQLException if thrown by JDBC methods
+	 * @see #doReleaseConnection
+	 */
+	public static Connection doGetConnection(DataSource dataSource) throws SQLException {
+<span class="fc" id="L101">		Assert.notNull(dataSource, &quot;No DataSource specified&quot;);</span>
+
+<span class="fc" id="L103">		ConnectionHolder conHolder = (ConnectionHolder) TransactionSynchronizationManager.getResource(dataSource);</span>
+<span class="fc bfc" id="L104" title="All 6 branches covered.">		if (conHolder != null &amp;&amp; (conHolder.hasConnection() || conHolder.isSynchronizedWithTransaction())) {</span>
+<span class="fc" id="L105">			conHolder.requested();</span>
+<span class="fc bfc" id="L106" title="All 2 branches covered.">			if (!conHolder.hasConnection()) {</span>
+<span class="fc" id="L107">				logger.debug(&quot;Fetching resumed JDBC Connection from DataSource&quot;);</span>
+<span class="fc" id="L108">				conHolder.setConnection(fetchConnection(dataSource));</span>
+			}
+<span class="fc" id="L110">			return conHolder.getConnection();</span>
+		}
+		// Else we either got no holder or an empty thread-bound holder here.
+
+<span class="fc" id="L114">		logger.debug(&quot;Fetching JDBC Connection from DataSource&quot;);</span>
+<span class="fc" id="L115">		Connection con = fetchConnection(dataSource);</span>
+
+<span class="fc bfc" id="L117" title="All 2 branches covered.">		if (TransactionSynchronizationManager.isSynchronizationActive()) {</span>
+			try {
+				// Use same Connection for further JDBC actions within the transaction.
+				// Thread-bound object will get removed by synchronization at transaction completion.
+<span class="fc" id="L121">				ConnectionHolder holderToUse = conHolder;</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">				if (holderToUse == null) {</span>
+<span class="fc" id="L123">					holderToUse = new ConnectionHolder(con);</span>
+				}
+				else {
+<span class="fc" id="L126">					holderToUse.setConnection(con);</span>
+				}
+<span class="fc" id="L128">				holderToUse.requested();</span>
+<span class="fc" id="L129">				TransactionSynchronizationManager.registerSynchronization(</span>
+						new ConnectionSynchronization(holderToUse, dataSource));
+<span class="fc" id="L131">				holderToUse.setSynchronizedWithTransaction(true);</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">				if (holderToUse != conHolder) {</span>
+<span class="fc" id="L133">					TransactionSynchronizationManager.bindResource(dataSource, holderToUse);</span>
+				}
+			}
+<span class="nc" id="L136">			catch (RuntimeException ex) {</span>
+				// Unexpected exception from external delegation call -&gt; close Connection and rethrow.
+<span class="nc" id="L138">				releaseConnection(con, dataSource);</span>
+<span class="nc" id="L139">				throw ex;</span>
+<span class="fc" id="L140">			}</span>
+		}
+
+<span class="fc" id="L143">		return con;</span>
+	}
+
+	/**
+	 * Actually fetch a {@link Connection} from the given {@link DataSource},
+	 * defensively turning an unexpected {@code null} return value from
+	 * {@link DataSource#getConnection()} into an {@link IllegalStateException}.
+	 * @param dataSource the DataSource to obtain Connections from
+	 * @return a JDBC Connection from the given DataSource (never {@code null})
+	 * @throws SQLException if thrown by JDBC methods
+	 * @throws IllegalStateException if the DataSource returned a null value
+	 * @see DataSource#getConnection()
+	 */
+	private static Connection fetchConnection(DataSource dataSource) throws SQLException {
+<span class="fc" id="L157">		Connection con = dataSource.getConnection();</span>
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">		if (con == null) {</span>
+<span class="nc" id="L159">			throw new IllegalStateException(&quot;DataSource returned null from getConnection(): &quot; + dataSource);</span>
+		}
+<span class="fc" id="L161">		return con;</span>
+	}
+
+	/**
+	 * Prepare the given Connection with the given transaction semantics.
+	 * @param con the Connection to prepare
+	 * @param definition the transaction definition to apply
+	 * @return the previous isolation level, if any
+	 * @throws SQLException if thrown by JDBC methods
+	 * @see #resetConnectionAfterTransaction
+	 */
+	@Nullable
+	public static Integer prepareConnectionForTransaction(Connection con, @Nullable TransactionDefinition definition)
+			throws SQLException {
+
+<span class="fc" id="L176">		Assert.notNull(con, &quot;No Connection specified&quot;);</span>
+
+		// Set read-only flag.
+<span class="pc bpc" id="L179" title="1 of 4 branches missed.">		if (definition != null &amp;&amp; definition.isReadOnly()) {</span>
+			try {
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L182">					logger.debug(&quot;Setting JDBC Connection [&quot; + con + &quot;] read-only&quot;);</span>
+				}
+<span class="fc" id="L184">				con.setReadOnly(true);</span>
+			}
+<span class="fc" id="L186">			catch (SQLException | RuntimeException ex) {</span>
+<span class="fc" id="L187">				Throwable exToCheck = ex;</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">				while (exToCheck != null) {</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">					if (exToCheck.getClass().getSimpleName().contains(&quot;Timeout&quot;)) {</span>
+						// Assume it's a connection timeout that would otherwise get lost: e.g. from JDBC 4.0
+<span class="nc" id="L191">						throw ex;</span>
+					}
+<span class="fc" id="L193">					exToCheck = exToCheck.getCause();</span>
+				}
+				// &quot;read-only not supported&quot; SQLException -&gt; ignore, it's just a hint anyway
+<span class="fc" id="L196">				logger.debug(&quot;Could not set JDBC Connection read-only&quot;, ex);</span>
+<span class="fc" id="L197">			}</span>
+		}
+
+		// Apply specific isolation level, if any.
+<span class="fc" id="L201">		Integer previousIsolationLevel = null;</span>
+<span class="pc bpc" id="L202" title="1 of 4 branches missed.">		if (definition != null &amp;&amp; definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT) {</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L204">				logger.debug(&quot;Changing isolation level of JDBC Connection [&quot; + con + &quot;] to &quot; +</span>
+<span class="nc" id="L205">						definition.getIsolationLevel());</span>
+			}
+<span class="fc" id="L207">			int currentIsolation = con.getTransactionIsolation();</span>
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">			if (currentIsolation != definition.getIsolationLevel()) {</span>
+<span class="fc" id="L209">				previousIsolationLevel = currentIsolation;</span>
+<span class="fc" id="L210">				con.setTransactionIsolation(definition.getIsolationLevel());</span>
+			}
+		}
+
+<span class="fc" id="L214">		return previousIsolationLevel;</span>
+	}
+
+	/**
+	 * Reset the given Connection after a transaction,
+	 * regarding read-only flag and isolation level.
+	 * @param con the Connection to reset
+	 * @param previousIsolationLevel the isolation level to restore, if any
+	 * @see #prepareConnectionForTransaction
+	 */
+	public static void resetConnectionAfterTransaction(Connection con, @Nullable Integer previousIsolationLevel) {
+<span class="fc" id="L225">		Assert.notNull(con, &quot;No Connection specified&quot;);</span>
+		try {
+			// Reset transaction isolation to previous value, if changed for the transaction.
+<span class="fc bfc" id="L228" title="All 2 branches covered.">			if (previousIsolationLevel != null) {</span>
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L230">					logger.debug(&quot;Resetting isolation level of JDBC Connection [&quot; +</span>
+							con + &quot;] to &quot; + previousIsolationLevel);
+				}
+<span class="fc" id="L233">				con.setTransactionIsolation(previousIsolationLevel);</span>
+			}
+
+			// Reset read-only flag.
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">			if (con.isReadOnly()) {</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L239">					logger.debug(&quot;Resetting read-only flag of JDBC Connection [&quot; + con + &quot;]&quot;);</span>
+				}
+<span class="nc" id="L241">				con.setReadOnly(false);</span>
+			}
+		}
+<span class="nc" id="L244">		catch (Throwable ex) {</span>
+<span class="nc" id="L245">			logger.debug(&quot;Could not reset JDBC Connection after transaction&quot;, ex);</span>
+<span class="fc" id="L246">		}</span>
+<span class="fc" id="L247">	}</span>
+
+	/**
+	 * Determine whether the given JDBC Connection is transactional, that is,
+	 * bound to the current thread by Spring's transaction facilities.
+	 * @param con the Connection to check
+	 * @param dataSource the DataSource that the Connection was obtained from
+	 * (may be {@code null})
+	 * @return whether the Connection is transactional
+	 */
+	public static boolean isConnectionTransactional(Connection con, @Nullable DataSource dataSource) {
+<span class="nc bnc" id="L258" title="All 2 branches missed.">		if (dataSource == null) {</span>
+<span class="nc" id="L259">			return false;</span>
+		}
+<span class="nc" id="L261">		ConnectionHolder conHolder = (ConnectionHolder) TransactionSynchronizationManager.getResource(dataSource);</span>
+<span class="nc bnc" id="L262" title="All 4 branches missed.">		return (conHolder != null &amp;&amp; connectionEquals(conHolder, con));</span>
+	}
+
+	/**
+	 * Apply the current transaction timeout, if any,
+	 * to the given JDBC Statement object.
+	 * @param stmt the JDBC Statement object
+	 * @param dataSource the DataSource that the Connection was obtained from
+	 * @throws SQLException if thrown by JDBC methods
+	 * @see java.sql.Statement#setQueryTimeout
+	 */
+	public static void applyTransactionTimeout(Statement stmt, @Nullable DataSource dataSource) throws SQLException {
+<span class="fc" id="L274">		applyTimeout(stmt, dataSource, -1);</span>
+<span class="fc" id="L275">	}</span>
+
+	/**
+	 * Apply the specified timeout - overridden by the current transaction timeout,
+	 * if any - to the given JDBC Statement object.
+	 * @param stmt the JDBC Statement object
+	 * @param dataSource the DataSource that the Connection was obtained from
+	 * @param timeout the timeout to apply (or 0 for no timeout outside of a transaction)
+	 * @throws SQLException if thrown by JDBC methods
+	 * @see java.sql.Statement#setQueryTimeout
+	 */
+	public static void applyTimeout(Statement stmt, @Nullable DataSource dataSource, int timeout) throws SQLException {
+<span class="fc" id="L287">		Assert.notNull(stmt, &quot;No Statement specified&quot;);</span>
+<span class="fc" id="L288">		ConnectionHolder holder = null;</span>
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">		if (dataSource != null) {</span>
+<span class="fc" id="L290">			holder = (ConnectionHolder) TransactionSynchronizationManager.getResource(dataSource);</span>
+		}
+<span class="pc bpc" id="L292" title="1 of 4 branches missed.">		if (holder != null &amp;&amp; holder.hasTimeout()) {</span>
+			// Remaining transaction timeout overrides specified value.
+<span class="nc" id="L294">			stmt.setQueryTimeout(holder.getTimeToLiveInSeconds());</span>
+		}
+<span class="fc bfc" id="L296" title="All 2 branches covered.">		else if (timeout &gt;= 0) {</span>
+			// No current transaction timeout -&gt; apply specified value.
+<span class="fc" id="L298">			stmt.setQueryTimeout(timeout);</span>
+		}
+<span class="fc" id="L300">	}</span>
+
+	/**
+	 * Close the given Connection, obtained from the given DataSource,
+	 * if it is not managed externally (that is, not bound to the thread).
+	 * @param con the Connection to close if necessary
+	 * (if this is {@code null}, the call will be ignored)
+	 * @param dataSource the DataSource that the Connection was obtained from
+	 * (may be {@code null})
+	 * @see #getConnection
+	 */
+	public static void releaseConnection(@Nullable Connection con, @Nullable DataSource dataSource) {
+		try {
+<span class="fc" id="L313">			doReleaseConnection(con, dataSource);</span>
+		}
+<span class="fc" id="L315">		catch (SQLException ex) {</span>
+<span class="fc" id="L316">			logger.debug(&quot;Could not close JDBC Connection&quot;, ex);</span>
+		}
+<span class="nc" id="L318">		catch (Throwable ex) {</span>
+<span class="nc" id="L319">			logger.debug(&quot;Unexpected exception on closing JDBC Connection&quot;, ex);</span>
+<span class="fc" id="L320">		}</span>
+<span class="fc" id="L321">	}</span>
+
+	/**
+	 * Actually close the given Connection, obtained from the given DataSource.
+	 * Same as {@link #releaseConnection}, but throwing the original SQLException.
+	 * &lt;p&gt;Directly accessed by {@link TransactionAwareDataSourceProxy}.
+	 * @param con the Connection to close if necessary
+	 * (if this is {@code null}, the call will be ignored)
+	 * @param dataSource the DataSource that the Connection was obtained from
+	 * (may be {@code null})
+	 * @throws SQLException if thrown by JDBC methods
+	 * @see #doGetConnection
+	 */
+	public static void doReleaseConnection(@Nullable Connection con, @Nullable DataSource dataSource) throws SQLException {
+<span class="fc bfc" id="L335" title="All 2 branches covered.">		if (con == null) {</span>
+<span class="fc" id="L336">			return;</span>
+		}
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">		if (dataSource != null) {</span>
+<span class="fc" id="L339">			ConnectionHolder conHolder = (ConnectionHolder) TransactionSynchronizationManager.getResource(dataSource);</span>
+<span class="pc bpc" id="L340" title="1 of 4 branches missed.">			if (conHolder != null &amp;&amp; connectionEquals(conHolder, con)) {</span>
+				// It's the transactional Connection: Don't close it.
+<span class="fc" id="L342">				conHolder.released();</span>
+<span class="fc" id="L343">				return;</span>
+			}
+		}
+<span class="fc" id="L346">		doCloseConnection(con, dataSource);</span>
+<span class="fc" id="L347">	}</span>
+
+	/**
+	 * Close the Connection, unless a {@link SmartDataSource} doesn't want us to.
+	 * @param con the Connection to close if necessary
+	 * @param dataSource the DataSource that the Connection was obtained from
+	 * @throws SQLException if thrown by JDBC methods
+	 * @see Connection#close()
+	 * @see SmartDataSource#shouldClose(Connection)
+	 */
+	public static void doCloseConnection(Connection con, @Nullable DataSource dataSource) throws SQLException {
+<span class="pc bpc" id="L358" title="1 of 4 branches missed.">		if (!(dataSource instanceof SmartDataSource) || ((SmartDataSource) dataSource).shouldClose(con)) {</span>
+<span class="fc" id="L359">			con.close();</span>
+		}
+<span class="fc" id="L361">	}</span>
+
+	/**
+	 * Determine whether the given two Connections are equal, asking the target
+	 * Connection in case of a proxy. Used to detect equality even if the
+	 * user passed in a raw target Connection while the held one is a proxy.
+	 * @param conHolder the ConnectionHolder for the held Connection (potentially a proxy)
+	 * @param passedInCon the Connection passed-in by the user
+	 * (potentially a target Connection without proxy)
+	 * @return whether the given Connections are equal
+	 * @see #getTargetConnection
+	 */
+	private static boolean connectionEquals(ConnectionHolder conHolder, Connection passedInCon) {
+<span class="pc bpc" id="L374" title="1 of 2 branches missed.">		if (!conHolder.hasConnection()) {</span>
+<span class="nc" id="L375">			return false;</span>
+		}
+<span class="fc" id="L377">		Connection heldCon = conHolder.getConnection();</span>
+		// Explicitly check for identity too: for Connection handles that do not implement
+		// &quot;equals&quot; properly, such as the ones Commons DBCP exposes).
+<span class="pc bpc" id="L380" title="3 of 4 branches missed.">		return (heldCon == passedInCon || heldCon.equals(passedInCon) ||</span>
+<span class="pc bnc" id="L381" title="All 2 branches missed.">				getTargetConnection(heldCon).equals(passedInCon));</span>
+	}
+
+	/**
+	 * Return the innermost target Connection of the given Connection. If the given
+	 * Connection is a proxy, it will be unwrapped until a non-proxy Connection is
+	 * found. Otherwise, the passed-in Connection will be returned as-is.
+	 * @param con the Connection proxy to unwrap
+	 * @return the innermost target Connection, or the passed-in one if no proxy
+	 * @see ConnectionProxy#getTargetConnection()
+	 */
+	public static Connection getTargetConnection(Connection con) {
+<span class="nc" id="L393">		Connection conToUse = con;</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">		while (conToUse instanceof ConnectionProxy) {</span>
+<span class="nc" id="L395">			conToUse = ((ConnectionProxy) conToUse).getTargetConnection();</span>
+		}
+<span class="nc" id="L397">		return conToUse;</span>
+	}
+
+	/**
+	 * Determine the connection synchronization order to use for the given
+	 * DataSource. Decreased for every level of nesting that a DataSource
+	 * has, checked through the level of DelegatingDataSource nesting.
+	 * @param dataSource the DataSource to check
+	 * @return the connection synchronization order to use
+	 * @see #CONNECTION_SYNCHRONIZATION_ORDER
+	 */
+	private static int getConnectionSynchronizationOrder(DataSource dataSource) {
+<span class="fc" id="L409">		int order = CONNECTION_SYNCHRONIZATION_ORDER;</span>
+<span class="fc" id="L410">		DataSource currDs = dataSource;</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">		while (currDs instanceof DelegatingDataSource) {</span>
+<span class="fc" id="L412">			order--;</span>
+<span class="fc" id="L413">			currDs = ((DelegatingDataSource) currDs).getTargetDataSource();</span>
+		}
+<span class="fc" id="L415">		return order;</span>
+	}
+
+
+	/**
+	 * Callback for resource cleanup at the end of a non-native JDBC transaction
+	 * (e.g. when participating in a JtaTransactionManager transaction).
+	 * @see org.springframework.transaction.jta.JtaTransactionManager
+	 */
+	private static class ConnectionSynchronization extends TransactionSynchronizationAdapter {
+
+		private final ConnectionHolder connectionHolder;
+
+		private final DataSource dataSource;
+
+		private int order;
+
+<span class="fc" id="L432">		private boolean holderActive = true;</span>
+
+<span class="fc" id="L434">		public ConnectionSynchronization(ConnectionHolder connectionHolder, DataSource dataSource) {</span>
+<span class="fc" id="L435">			this.connectionHolder = connectionHolder;</span>
+<span class="fc" id="L436">			this.dataSource = dataSource;</span>
+<span class="fc" id="L437">			this.order = getConnectionSynchronizationOrder(dataSource);</span>
+<span class="fc" id="L438">		}</span>
+
+		@Override
+		public int getOrder() {
+<span class="fc" id="L442">			return this.order;</span>
+		}
+
+		@Override
+		public void suspend() {
+<span class="pc bpc" id="L447" title="1 of 2 branches missed.">			if (this.holderActive) {</span>
+<span class="fc" id="L448">				TransactionSynchronizationManager.unbindResource(this.dataSource);</span>
+<span class="fc bfc" id="L449" title="All 4 branches covered.">				if (this.connectionHolder.hasConnection() &amp;&amp; !this.connectionHolder.isOpen()) {</span>
+					// Release Connection on suspend if the application doesn't keep
+					// a handle to it anymore. We will fetch a fresh Connection if the
+					// application accesses the ConnectionHolder again after resume,
+					// assuming that it will participate in the same transaction.
+<span class="fc" id="L454">					releaseConnection(this.connectionHolder.getConnection(), this.dataSource);</span>
+<span class="fc" id="L455">					this.connectionHolder.setConnection(null);</span>
+				}
+			}
+<span class="fc" id="L458">		}</span>
+
+		@Override
+		public void resume() {
+<span class="pc bpc" id="L462" title="1 of 2 branches missed.">			if (this.holderActive) {</span>
+<span class="fc" id="L463">				TransactionSynchronizationManager.bindResource(this.dataSource, this.connectionHolder);</span>
+			}
+<span class="fc" id="L465">		}</span>
+
+		@Override
+		public void beforeCompletion() {
+			// Release Connection early if the holder is not open anymore
+			// (that is, not used by another resource like a Hibernate Session
+			// that has its own cleanup via transaction synchronization),
+			// to avoid issues with strict JTA implementations that expect
+			// the close call before transaction completion.
+<span class="fc bfc" id="L474" title="All 2 branches covered.">			if (!this.connectionHolder.isOpen()) {</span>
+<span class="fc" id="L475">				TransactionSynchronizationManager.unbindResource(this.dataSource);</span>
+<span class="fc" id="L476">				this.holderActive = false;</span>
+<span class="fc bfc" id="L477" title="All 2 branches covered.">				if (this.connectionHolder.hasConnection()) {</span>
+<span class="fc" id="L478">					releaseConnection(this.connectionHolder.getConnection(), this.dataSource);</span>
+				}
+			}
+<span class="fc" id="L481">		}</span>
+
+		@Override
+		public void afterCompletion(int status) {
+			// If we haven't closed the Connection in beforeCompletion,
+			// close it now. The holder might have been used for other
+			// cleanup in the meantime, for example by a Hibernate Session.
+<span class="fc bfc" id="L488" title="All 2 branches covered.">			if (this.holderActive) {</span>
+				// The thread-bound ConnectionHolder might not be available anymore,
+				// since afterCompletion might get called from a different thread.
+<span class="fc" id="L491">				TransactionSynchronizationManager.unbindResourceIfPossible(this.dataSource);</span>
+<span class="fc" id="L492">				this.holderActive = false;</span>
+<span class="pc bpc" id="L493" title="1 of 2 branches missed.">				if (this.connectionHolder.hasConnection()) {</span>
+<span class="fc" id="L494">					releaseConnection(this.connectionHolder.getConnection(), this.dataSource);</span>
+					// Reset the ConnectionHolder: It might remain bound to the thread.
+<span class="fc" id="L496">					this.connectionHolder.setConnection(null);</span>
+				}
+			}
+<span class="fc" id="L499">			this.connectionHolder.reset();</span>
+<span class="fc" id="L500">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

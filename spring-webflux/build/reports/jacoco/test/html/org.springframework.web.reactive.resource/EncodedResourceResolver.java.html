@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EncodedResourceResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.resource</a> &gt; <span class="el_source">EncodedResourceResolver.java</span></div><h1>EncodedResourceResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.resource;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.io.AbstractResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * Resolver that delegates to the chain, and if a resource is found, it then
+ * attempts to find an encoded (e.g. gzip, brotli) variant that is acceptable
+ * based on the &quot;Accept-Encoding&quot; request header.
+ *
+ * &lt;p&gt;The list of supported {@link #setContentCodings(List) contentCodings} can
+ * be configured, in order of preference, and each coding must be associated
+ * with {@link #setExtensions(Map) extensions}.
+ *
+ * &lt;p&gt;Note that this resolver must be ordered ahead of a
+ * {@link VersionResourceResolver} with a content-based, version strategy to
+ * ensure the version calculation is not impacted by the encoding.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.1
+ */
+public class EncodedResourceResolver extends AbstractResourceResolver {
+
+	/**
+	 * The default content codings.
+	 */
+<span class="fc" id="L62">	public static final List&lt;String&gt; DEFAULT_CODINGS = Arrays.asList(&quot;br&quot;, &quot;gzip&quot;);</span>
+
+
+<span class="fc" id="L65">	private final List&lt;String&gt; contentCodings = new ArrayList&lt;&gt;(DEFAULT_CODINGS);</span>
+
+<span class="fc" id="L67">	private final Map&lt;String, String&gt; extensions = new LinkedHashMap&lt;&gt;();</span>
+
+
+<span class="fc" id="L70">	public EncodedResourceResolver() {</span>
+<span class="fc" id="L71">		this.extensions.put(&quot;gzip&quot;, &quot;.gz&quot;);</span>
+<span class="fc" id="L72">		this.extensions.put(&quot;br&quot;, &quot;.br&quot;);</span>
+<span class="fc" id="L73">	}</span>
+
+
+	/**
+	 * Configure the supported content codings in order of preference. The first
+	 * coding that is present in the {@literal &quot;Accept-Encoding&quot;} header for a
+	 * given request, and that has a file present with the associated extension,
+	 * is used.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Each coding must be associated with a file
+	 * extension via {@link #registerExtension} or {@link #setExtensions}. Also
+	 * customizations to the list of codings here should be matched by
+	 * customizations to the same list in {@link CachingResourceResolver} to
+	 * ensure encoded variants of a resource are cached under separate keys.
+	 * &lt;p&gt;By default this property is set to {@literal [&quot;br&quot;, &quot;gzip&quot;]}.
+	 * @param codings one or more supported content codings
+	 */
+	public void setContentCodings(List&lt;String&gt; codings) {
+<span class="nc" id="L90">		Assert.notEmpty(codings, &quot;At least one content coding expected&quot;);</span>
+<span class="nc" id="L91">		this.contentCodings.clear();</span>
+<span class="nc" id="L92">		this.contentCodings.addAll(codings);</span>
+<span class="nc" id="L93">	}</span>
+
+	/**
+	 * Return a read-only list with the supported content codings.
+	 */
+	public List&lt;String&gt; getContentCodings() {
+<span class="nc" id="L99">		return Collections.unmodifiableList(this.contentCodings);</span>
+	}
+
+	/**
+	 * Configure mappings from content codings to file extensions. A dot &quot;.&quot;
+	 * will be prepended in front of the extension value if not present.
+	 * &lt;p&gt;By default this is configured with {@literal [&quot;br&quot; -&gt; &quot;.br&quot;]} and
+	 * {@literal [&quot;gzip&quot; -&gt; &quot;.gz&quot;]}.
+	 * @param extensions the extensions to use.
+	 * @see #registerExtension(String, String)
+	 */
+	public void setExtensions(Map&lt;String, String&gt; extensions) {
+<span class="nc" id="L111">		extensions.forEach(this::registerExtension);</span>
+<span class="nc" id="L112">	}</span>
+
+	/**
+	 * Return a read-only map with coding-to-extension mappings.
+	 */
+	public Map&lt;String, String&gt; getExtensions() {
+<span class="nc" id="L118">		return Collections.unmodifiableMap(this.extensions);</span>
+	}
+
+	/**
+	 * Java config friendly alternative to {@link #setExtensions(Map)}.
+	 * @param coding the content coding
+	 * @param extension the associated file extension
+	 */
+	public void registerExtension(String coding, String extension) {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">		this.extensions.put(coding, (extension.startsWith(&quot;.&quot;) ? extension : &quot;.&quot; + extension));</span>
+<span class="nc" id="L128">	}</span>
+
+
+	@Override
+	protected Mono&lt;Resource&gt; resolveResourceInternal(@Nullable ServerWebExchange exchange,
+			String requestPath, List&lt;? extends Resource&gt; locations, ResourceResolverChain chain) {
+
+<span class="fc" id="L135">		return chain.resolveResource(exchange, requestPath, locations).map(resource -&gt; {</span>
+
+<span class="fc bfc" id="L137" title="All 2 branches covered.">			if (exchange == null) {</span>
+<span class="fc" id="L138">				return resource;</span>
+			}
+
+<span class="fc" id="L141">			String acceptEncoding = getAcceptEncoding(exchange);</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">			if (acceptEncoding == null) {</span>
+<span class="fc" id="L143">				return resource;</span>
+			}
+
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">			for (String coding : this.contentCodings) {</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">				if (acceptEncoding.contains(coding)) {</span>
+					try {
+<span class="fc" id="L149">						String extension = getExtension(coding);</span>
+<span class="fc" id="L150">						Resource encoded = new EncodedResource(resource, coding, extension);</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">						if (encoded.exists()) {</span>
+<span class="fc" id="L152">							return encoded;</span>
+						}
+					}
+<span class="nc" id="L155">					catch (IOException ex) {</span>
+<span class="nc" id="L156">						logger.trace(exchange.getLogPrefix() +</span>
+<span class="nc" id="L157">								&quot;No &quot; + coding + &quot; resource for [&quot; + resource.getFilename() + &quot;]&quot;, ex);</span>
+<span class="nc" id="L158">					}</span>
+				}
+<span class="fc" id="L160">			}</span>
+
+<span class="nc" id="L162">			return resource;</span>
+		});
+	}
+
+	@Nullable
+	private String getAcceptEncoding(ServerWebExchange exchange) {
+<span class="fc" id="L168">		ServerHttpRequest request = exchange.getRequest();</span>
+<span class="fc" id="L169">		String header = request.getHeaders().getFirst(HttpHeaders.ACCEPT_ENCODING);</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">		return (header != null ? header.toLowerCase() : null);</span>
+	}
+
+	private String getExtension(String coding) {
+<span class="fc" id="L174">		String extension = this.extensions.get(coding);</span>
+<span class="pc bpc" id="L175" title="1 of 2 branches missed.">		Assert.state(extension != null, () -&gt; &quot;No file extension associated with content coding &quot; + coding);</span>
+<span class="fc" id="L176">		return extension;</span>
+	}
+
+	@Override
+	protected Mono&lt;String&gt; resolveUrlPathInternal(String resourceUrlPath,
+			List&lt;? extends Resource&gt; locations, ResourceResolverChain chain) {
+
+<span class="nc" id="L183">		return chain.resolveUrlPath(resourceUrlPath, locations);</span>
+	}
+
+
+	/**
+	 * An encoded {@link HttpResource}.
+	 */
+	static final class EncodedResource extends AbstractResource implements HttpResource {
+
+		private final Resource original;
+
+		private final String coding;
+
+		private final Resource encoded;
+
+<span class="fc" id="L198">		EncodedResource(Resource original, String coding, String extension) throws IOException {</span>
+<span class="fc" id="L199">			this.original = original;</span>
+<span class="fc" id="L200">			this.coding = coding;</span>
+<span class="fc" id="L201">			this.encoded = original.createRelative(original.getFilename() + extension);</span>
+<span class="fc" id="L202">		}</span>
+
+		@Override
+		public InputStream getInputStream() throws IOException {
+<span class="nc" id="L206">			return this.encoded.getInputStream();</span>
+		}
+
+		@Override
+		public boolean exists() {
+<span class="fc" id="L211">			return this.encoded.exists();</span>
+		}
+
+		@Override
+		public boolean isReadable() {
+<span class="nc" id="L216">			return this.encoded.isReadable();</span>
+		}
+
+		@Override
+		public boolean isOpen() {
+<span class="nc" id="L221">			return this.encoded.isOpen();</span>
+		}
+
+		@Override
+		public boolean isFile() {
+<span class="nc" id="L226">			return this.encoded.isFile();</span>
+		}
+
+		@Override
+		public URL getURL() throws IOException {
+<span class="nc" id="L231">			return this.encoded.getURL();</span>
+		}
+
+		@Override
+		public URI getURI() throws IOException {
+<span class="nc" id="L236">			return this.encoded.getURI();</span>
+		}
+
+		@Override
+		public File getFile() throws IOException {
+<span class="nc" id="L241">			return this.encoded.getFile();</span>
+		}
+
+		@Override
+		public long contentLength() throws IOException {
+<span class="nc" id="L246">			return this.encoded.contentLength();</span>
+		}
+
+		@Override
+		public long lastModified() throws IOException {
+<span class="nc" id="L251">			return this.encoded.lastModified();</span>
+		}
+
+		@Override
+		public Resource createRelative(String relativePath) throws IOException {
+<span class="nc" id="L256">			return this.encoded.createRelative(relativePath);</span>
+		}
+
+		@Override
+		@Nullable
+		public String getFilename() {
+<span class="fc" id="L262">			return this.original.getFilename();</span>
+		}
+
+		@Override
+		public String getDescription() {
+<span class="fc" id="L267">			return this.encoded.getDescription();</span>
+		}
+
+		@Override
+		public HttpHeaders getResponseHeaders() {
+			HttpHeaders headers;
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">			if (this.original instanceof HttpResource) {</span>
+<span class="nc" id="L274">				headers = ((HttpResource) this.original).getResponseHeaders();</span>
+			}
+			else {
+<span class="fc" id="L277">				headers = new HttpHeaders();</span>
+			}
+<span class="fc" id="L279">			headers.add(HttpHeaders.CONTENT_ENCODING, this.coding);</span>
+<span class="fc" id="L280">			headers.add(HttpHeaders.VARY, HttpHeaders.ACCEPT_ENCODING);</span>
+<span class="fc" id="L281">			return headers;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

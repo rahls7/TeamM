@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReactiveTypeHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.mvc.method.annotation</a> &gt; <span class="el_source">ReactiveTypeHandler.java</span></div><h1>ReactiveTypeHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.mvc.method.annotation;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.core.task.SyncTaskExecutor;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MimeType;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.accept.ContentNegotiationManager;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.async.DeferredResult;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+import org.springframework.web.method.support.ModelAndViewContainer;
+import org.springframework.web.servlet.HandlerMapping;
+
+/**
+ * Private helper class to assist with handling &quot;reactive&quot; return values types
+ * that can be adapted to a Reactive Streams {@link Publisher} through the
+ * {@link ReactiveAdapterRegistry}.
+ *
+ * &lt;p&gt;Such return values may be bridged to a {@link ResponseBodyEmitter} for
+ * streaming purposes at the presence of a streaming media type or based on the
+ * generic type.
+ *
+ * &lt;p&gt;For all other cases {@code Publisher} output is collected and bridged to
+ * {@link DeferredResult} for standard async request processing.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+class ReactiveTypeHandler {
+
+	private static final long STREAMING_TIMEOUT_VALUE = -1;
+
+
+<span class="fc" id="L77">	private static Log logger = LogFactory.getLog(ReactiveTypeHandler.class);</span>
+
+	private final ReactiveAdapterRegistry reactiveRegistry;
+
+	private final TaskExecutor taskExecutor;
+
+	private Boolean taskExecutorWarning;
+
+	private final ContentNegotiationManager contentNegotiationManager;
+
+
+	public ReactiveTypeHandler() {
+<span class="fc" id="L89">		this(ReactiveAdapterRegistry.getSharedInstance(), new SyncTaskExecutor(), new ContentNegotiationManager());</span>
+<span class="fc" id="L90">	}</span>
+
+<span class="fc" id="L92">	ReactiveTypeHandler(ReactiveAdapterRegistry registry, TaskExecutor executor, ContentNegotiationManager manager) {</span>
+<span class="fc" id="L93">		Assert.notNull(registry, &quot;ReactiveAdapterRegistry is required&quot;);</span>
+<span class="fc" id="L94">		Assert.notNull(executor, &quot;TaskExecutor is required&quot;);</span>
+<span class="fc" id="L95">		Assert.notNull(manager, &quot;ContentNegotiationManager is required&quot;);</span>
+<span class="fc" id="L96">		this.reactiveRegistry = registry;</span>
+<span class="fc" id="L97">		this.taskExecutor = executor;</span>
+<span class="fc bfc" id="L98" title="All 4 branches covered.">		this.taskExecutorWarning = executor instanceof SimpleAsyncTaskExecutor || executor instanceof SyncTaskExecutor;</span>
+<span class="fc" id="L99">		this.contentNegotiationManager = manager;</span>
+<span class="fc" id="L100">	}</span>
+
+
+	/**
+	 * Whether the type can be adapted to a Reactive Streams {@link Publisher}.
+	 */
+	public boolean isReactiveType(Class&lt;?&gt; type) {
+<span class="pc bpc" id="L107" title="1 of 4 branches missed.">		return (this.reactiveRegistry.hasAdapters() &amp;&amp; this.reactiveRegistry.getAdapter(type) != null);</span>
+	}
+
+
+	/**
+	 * Process the given reactive return value and decide whether to adapt it
+	 * to a {@link ResponseBodyEmitter} or a {@link DeferredResult}.
+	 * @return an emitter for streaming, or {@code null} if handled internally
+	 * with a {@link DeferredResult}
+	 */
+	@Nullable
+	public ResponseBodyEmitter handleValue(Object returnValue, MethodParameter returnType,
+			ModelAndViewContainer mav, NativeWebRequest request) throws Exception {
+
+<span class="fc" id="L121">		Assert.notNull(returnValue, &quot;Expected return value&quot;);</span>
+<span class="fc" id="L122">		ReactiveAdapter adapter = this.reactiveRegistry.getAdapter(returnValue.getClass());</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">		Assert.state(adapter != null, () -&gt; &quot;Unexpected return value: &quot; + returnValue);</span>
+
+<span class="fc" id="L125">		ResolvableType elementType = ResolvableType.forMethodParameter(returnType).getGeneric();</span>
+<span class="fc" id="L126">		Class&lt;?&gt; elementClass = elementType.toClass();</span>
+
+<span class="fc" id="L128">		Collection&lt;MediaType&gt; mediaTypes = getMediaTypes(request);</span>
+<span class="fc" id="L129">		Optional&lt;MediaType&gt; mediaType = mediaTypes.stream().filter(MimeType::isConcrete).findFirst();</span>
+
+<span class="fc bfc" id="L131" title="All 2 branches covered.">		if (adapter.isMultiValue()) {</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">			if (mediaTypes.stream().anyMatch(MediaType.TEXT_EVENT_STREAM::includes) ||</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">					ServerSentEvent.class.isAssignableFrom(elementClass)) {</span>
+<span class="fc" id="L134">				logExecutorWarning(returnType);</span>
+<span class="fc" id="L135">				SseEmitter emitter = new SseEmitter(STREAMING_TIMEOUT_VALUE);</span>
+<span class="fc" id="L136">				new SseEmitterSubscriber(emitter, this.taskExecutor).connect(adapter, returnValue);</span>
+<span class="fc" id="L137">				return emitter;</span>
+			}
+<span class="fc bfc" id="L139" title="All 2 branches covered.">			if (CharSequence.class.isAssignableFrom(elementClass)) {</span>
+<span class="fc" id="L140">				logExecutorWarning(returnType);</span>
+<span class="fc" id="L141">				ResponseBodyEmitter emitter = getEmitter(mediaType.orElse(MediaType.TEXT_PLAIN));</span>
+<span class="fc" id="L142">				new TextEmitterSubscriber(emitter, this.taskExecutor).connect(adapter, returnValue);</span>
+<span class="fc" id="L143">				return emitter;</span>
+			}
+<span class="fc bfc" id="L145" title="All 2 branches covered.">			if (mediaTypes.stream().anyMatch(MediaType.APPLICATION_STREAM_JSON::includes)) {</span>
+<span class="fc" id="L146">				logExecutorWarning(returnType);</span>
+<span class="fc" id="L147">				ResponseBodyEmitter emitter = getEmitter(MediaType.APPLICATION_STREAM_JSON);</span>
+<span class="fc" id="L148">				new JsonEmitterSubscriber(emitter, this.taskExecutor).connect(adapter, returnValue);</span>
+<span class="fc" id="L149">				return emitter;</span>
+			}
+		}
+
+		// Not streaming...
+<span class="fc" id="L154">		DeferredResult&lt;Object&gt; result = new DeferredResult&lt;&gt;();</span>
+<span class="fc" id="L155">		new DeferredResultSubscriber(result, adapter, elementType).connect(adapter, returnValue);</span>
+<span class="fc" id="L156">		WebAsyncUtils.getAsyncManager(request).startDeferredResultProcessing(result, mav);</span>
+
+<span class="fc" id="L158">		return null;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private Collection&lt;MediaType&gt; getMediaTypes(NativeWebRequest request)
+			throws HttpMediaTypeNotAcceptableException {
+
+<span class="fc" id="L165">		Collection&lt;MediaType&gt; mediaTypes = (Collection&lt;MediaType&gt;) request.getAttribute(</span>
+				HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE, RequestAttributes.SCOPE_REQUEST);
+
+<span class="fc bfc" id="L168" title="All 2 branches covered.">		return CollectionUtils.isEmpty(mediaTypes) ?</span>
+<span class="fc" id="L169">				this.contentNegotiationManager.resolveMediaTypes(request) : mediaTypes;</span>
+	}
+
+	private ResponseBodyEmitter getEmitter(MediaType mediaType) {
+<span class="fc" id="L173">		return new ResponseBodyEmitter(STREAMING_TIMEOUT_VALUE) {</span>
+			@Override
+			protected void extendResponse(ServerHttpResponse outputMessage) {
+<span class="fc" id="L176">				outputMessage.getHeaders().setContentType(mediaType);</span>
+<span class="fc" id="L177">			}</span>
+		};
+	}
+
+	@SuppressWarnings(&quot;ConstantConditions&quot;)
+	private void logExecutorWarning(MethodParameter returnType) {
+<span class="pc bpc" id="L183" title="1 of 4 branches missed.">		if (this.taskExecutorWarning &amp;&amp; logger.isWarnEnabled()) {</span>
+<span class="fc" id="L184">			synchronized (this) {</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">				if (this.taskExecutorWarning) {</span>
+<span class="fc" id="L186">					String executorTypeName = this.taskExecutor.getClass().getSimpleName();</span>
+<span class="fc" id="L187">					logger.warn(&quot;\n!!!\n&quot; +</span>
+							&quot;Streaming through a reactive type requires an Executor to write to the response.\n&quot; +
+							&quot;Please, configure a TaskExecutor in the MVC config under \&quot;async support\&quot;.\n&quot; +
+							&quot;The &quot; + executorTypeName + &quot; currently in use is not suitable under load.\n&quot; +
+							&quot;-------------------------------\n&quot; +
+<span class="fc" id="L192">							&quot;Controller:\t&quot; + returnType.getContainingClass().getName() + &quot;\n&quot; +</span>
+<span class="fc" id="L193">							&quot;Method:\t\t&quot; + returnType.getMethod().getName() + &quot;\n&quot; +</span>
+<span class="fc" id="L194">							&quot;Returning:\t&quot; + ResolvableType.forMethodParameter(returnType).toString() + &quot;\n&quot; +</span>
+							&quot;!!!&quot;);
+<span class="fc" id="L196">					this.taskExecutorWarning = false;</span>
+				}
+<span class="fc" id="L198">			}</span>
+		}
+<span class="fc" id="L200">	}</span>
+
+
+	private abstract static class AbstractEmitterSubscriber implements Subscriber&lt;Object&gt;, Runnable {
+
+		private final ResponseBodyEmitter emitter;
+
+		private final TaskExecutor taskExecutor;
+
+		@Nullable
+		private Subscription subscription;
+
+<span class="fc" id="L212">		private final AtomicReference&lt;Object&gt; elementRef = new AtomicReference&lt;&gt;();</span>
+
+		@Nullable
+		private Throwable error;
+
+		private volatile boolean terminated;
+
+<span class="fc" id="L219">		private final AtomicLong executing = new AtomicLong();</span>
+
+		private volatile boolean done;
+
+<span class="fc" id="L223">		protected AbstractEmitterSubscriber(ResponseBodyEmitter emitter, TaskExecutor executor) {</span>
+<span class="fc" id="L224">			this.emitter = emitter;</span>
+<span class="fc" id="L225">			this.taskExecutor = executor;</span>
+<span class="fc" id="L226">		}</span>
+
+		public void connect(ReactiveAdapter adapter, Object returnValue) {
+<span class="fc" id="L229">			Publisher&lt;Object&gt; publisher = adapter.toPublisher(returnValue);</span>
+<span class="fc" id="L230">			publisher.subscribe(this);</span>
+<span class="fc" id="L231">		}</span>
+
+		protected ResponseBodyEmitter getEmitter() {
+<span class="fc" id="L234">			return this.emitter;</span>
+		}
+
+		@Override
+		public final void onSubscribe(Subscription subscription) {
+<span class="fc" id="L239">			this.subscription = subscription;</span>
+<span class="fc" id="L240">			this.emitter.onTimeout(() -&gt; {</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L242">					logger.trace(&quot;Connection timeout for &quot; + this.emitter);</span>
+				}
+<span class="nc" id="L244">				terminate();</span>
+<span class="nc" id="L245">				this.emitter.complete();</span>
+<span class="nc" id="L246">			});</span>
+<span class="fc" id="L247">			this.emitter.onError(this.emitter::completeWithError);</span>
+<span class="fc" id="L248">			subscription.request(1);</span>
+<span class="fc" id="L249">		}</span>
+
+		@Override
+		public final void onNext(Object element) {
+<span class="fc" id="L253">			this.elementRef.lazySet(element);</span>
+<span class="fc" id="L254">			trySchedule();</span>
+<span class="fc" id="L255">		}</span>
+
+		@Override
+		public final void onError(Throwable ex) {
+<span class="nc" id="L259">			this.error = ex;</span>
+<span class="nc" id="L260">			this.terminated = true;</span>
+<span class="nc" id="L261">			trySchedule();</span>
+<span class="nc" id="L262">		}</span>
+
+		@Override
+		public final void onComplete() {
+<span class="fc" id="L266">			this.terminated = true;</span>
+<span class="fc" id="L267">			trySchedule();</span>
+<span class="fc" id="L268">		}</span>
+
+		private void trySchedule() {
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">			if (this.executing.getAndIncrement() == 0) {</span>
+<span class="fc" id="L272">				schedule();</span>
+			}
+<span class="fc" id="L274">		}</span>
+
+		private void schedule() {
+			try {
+<span class="fc" id="L278">				this.taskExecutor.execute(this);</span>
+			}
+<span class="nc" id="L280">			catch (Throwable ex) {</span>
+				try {
+<span class="nc" id="L282">					terminate();</span>
+				}
+				finally {
+<span class="nc" id="L285">					this.executing.decrementAndGet();</span>
+<span class="nc" id="L286">					this.elementRef.lazySet(null);</span>
+				}
+<span class="fc" id="L288">			}</span>
+<span class="fc" id="L289">		}</span>
+
+		@Override
+		public void run() {
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">			if (this.done) {</span>
+<span class="nc" id="L294">				this.elementRef.lazySet(null);</span>
+<span class="nc" id="L295">				return;</span>
+			}
+
+			// Check terminal signal before processing element..
+<span class="fc" id="L299">			boolean isTerminated = this.terminated;</span>
+
+<span class="fc" id="L301">			Object element = this.elementRef.get();</span>
+<span class="fc bfc" id="L302" title="All 2 branches covered.">			if (element != null) {</span>
+<span class="fc" id="L303">				this.elementRef.lazySet(null);</span>
+<span class="pc bpc" id="L304" title="1 of 2 branches missed.">				Assert.state(this.subscription != null, &quot;No subscription&quot;);</span>
+				try {
+<span class="fc" id="L306">					send(element);</span>
+<span class="fc" id="L307">					this.subscription.request(1);</span>
+				}
+<span class="nc" id="L309">				catch (final Throwable ex) {</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L311">						logger.trace(&quot;Send for &quot; + this.emitter + &quot; failed: &quot; + ex);</span>
+					}
+<span class="nc" id="L313">					terminate();</span>
+<span class="nc" id="L314">					return;</span>
+<span class="fc" id="L315">				}</span>
+			}
+
+<span class="fc bfc" id="L318" title="All 2 branches covered.">			if (isTerminated) {</span>
+<span class="fc" id="L319">				this.done = true;</span>
+<span class="fc" id="L320">				Throwable ex = this.error;</span>
+<span class="fc" id="L321">				this.error = null;</span>
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">				if (ex != null) {</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L324">						logger.trace(&quot;Publisher for &quot; + this.emitter + &quot; failed: &quot; + ex);</span>
+					}
+<span class="nc" id="L326">					this.emitter.completeWithError(ex);</span>
+				}
+				else {
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L330">						logger.trace(&quot;Publisher for &quot; + this.emitter + &quot; completed&quot;);</span>
+					}
+<span class="fc" id="L332">					this.emitter.complete();</span>
+				}
+<span class="fc" id="L334">				return;</span>
+			}
+
+<span class="pc bpc" id="L337" title="1 of 2 branches missed.">			if (this.executing.decrementAndGet() != 0) {</span>
+<span class="nc" id="L338">				schedule();</span>
+			}
+<span class="fc" id="L340">		}</span>
+
+		protected abstract void send(Object element) throws IOException;
+
+		private void terminate() {
+<span class="nc" id="L345">			this.done = true;</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">			if (this.subscription != null) {</span>
+<span class="nc" id="L347">				this.subscription.cancel();</span>
+			}
+<span class="nc" id="L349">		}</span>
+	}
+
+
+	private static class SseEmitterSubscriber extends AbstractEmitterSubscriber {
+
+		SseEmitterSubscriber(SseEmitter sseEmitter, TaskExecutor executor) {
+<span class="fc" id="L356">			super(sseEmitter, executor);</span>
+<span class="fc" id="L357">		}</span>
+
+		@Override
+		protected void send(Object element) throws IOException {
+<span class="fc bfc" id="L361" title="All 2 branches covered.">			if (element instanceof ServerSentEvent) {</span>
+<span class="fc" id="L362">				ServerSentEvent&lt;?&gt; event = (ServerSentEvent&lt;?&gt;) element;</span>
+<span class="fc" id="L363">				((SseEmitter) getEmitter()).send(adapt(event));</span>
+<span class="fc" id="L364">			}</span>
+			else {
+<span class="fc" id="L366">				getEmitter().send(element, MediaType.APPLICATION_JSON);</span>
+			}
+<span class="fc" id="L368">		}</span>
+
+		private SseEmitter.SseEventBuilder adapt(ServerSentEvent&lt;?&gt; sse) {
+<span class="fc" id="L371">			SseEmitter.SseEventBuilder builder = SseEmitter.event();</span>
+<span class="fc" id="L372">			String id = sse.id();</span>
+<span class="fc" id="L373">			String event = sse.event();</span>
+<span class="fc" id="L374">			Duration retry = sse.retry();</span>
+<span class="fc" id="L375">			String comment = sse.comment();</span>
+<span class="fc" id="L376">			Object data = sse.data();</span>
+<span class="pc bpc" id="L377" title="1 of 2 branches missed.">			if (id != null) {</span>
+<span class="fc" id="L378">				builder.id(id);</span>
+			}
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">			if (event != null) {</span>
+<span class="nc" id="L381">				builder.name(event);</span>
+			}
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">			if (data != null) {</span>
+<span class="fc" id="L384">				builder.data(data);</span>
+			}
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">			if (retry != null) {</span>
+<span class="nc" id="L387">				builder.reconnectTime(retry.toMillis());</span>
+			}
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">			if (comment != null) {</span>
+<span class="nc" id="L390">				builder.comment(comment);</span>
+			}
+<span class="fc" id="L392">			return builder;</span>
+		}
+	}
+
+
+	private static class JsonEmitterSubscriber extends AbstractEmitterSubscriber {
+
+		JsonEmitterSubscriber(ResponseBodyEmitter emitter, TaskExecutor executor) {
+<span class="fc" id="L400">			super(emitter, executor);</span>
+<span class="fc" id="L401">		}</span>
+
+		@Override
+		protected void send(Object element) throws IOException {
+<span class="fc" id="L405">			getEmitter().send(element, MediaType.APPLICATION_JSON);</span>
+<span class="fc" id="L406">			getEmitter().send(&quot;\n&quot;, MediaType.TEXT_PLAIN);</span>
+<span class="fc" id="L407">		}</span>
+	}
+
+
+	private static class TextEmitterSubscriber extends AbstractEmitterSubscriber {
+
+		TextEmitterSubscriber(ResponseBodyEmitter emitter, TaskExecutor executor) {
+<span class="fc" id="L414">			super(emitter, executor);</span>
+<span class="fc" id="L415">		}</span>
+
+		@Override
+		protected void send(Object element) throws IOException {
+<span class="fc" id="L419">			getEmitter().send(element, MediaType.TEXT_PLAIN);</span>
+<span class="fc" id="L420">		}</span>
+	}
+
+
+	private static class DeferredResultSubscriber implements Subscriber&lt;Object&gt; {
+
+		private final DeferredResult&lt;Object&gt; result;
+
+		private final boolean multiValueSource;
+
+		private final CollectedValuesList values;
+
+<span class="fc" id="L432">		DeferredResultSubscriber(DeferredResult&lt;Object&gt; result, ReactiveAdapter adapter, ResolvableType elementType) {</span>
+<span class="fc" id="L433">			this.result = result;</span>
+<span class="fc" id="L434">			this.multiValueSource = adapter.isMultiValue();</span>
+<span class="fc" id="L435">			this.values = new CollectedValuesList(elementType);</span>
+<span class="fc" id="L436">		}</span>
+
+		public void connect(ReactiveAdapter adapter, Object returnValue) {
+<span class="fc" id="L439">			Publisher&lt;Object&gt; publisher = adapter.toPublisher(returnValue);</span>
+<span class="fc" id="L440">			publisher.subscribe(this);</span>
+<span class="fc" id="L441">		}</span>
+
+		@Override
+		public void onSubscribe(Subscription subscription) {
+<span class="fc" id="L445">			this.result.onTimeout(subscription::cancel);</span>
+<span class="fc" id="L446">			subscription.request(Long.MAX_VALUE);</span>
+<span class="fc" id="L447">		}</span>
+
+		@Override
+		public void onNext(Object element) {
+<span class="fc" id="L451">			this.values.add(element);</span>
+<span class="fc" id="L452">		}</span>
+
+		@Override
+		public void onError(Throwable ex) {
+<span class="fc" id="L456">			this.result.setErrorResult(ex);</span>
+<span class="fc" id="L457">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="pc bpc" id="L461" title="1 of 4 branches missed.">			if (this.values.size() &gt; 1 || this.multiValueSource) {</span>
+<span class="fc" id="L462">				this.result.setResult(this.values);</span>
+			}
+<span class="fc bfc" id="L464" title="All 2 branches covered.">			else if (this.values.size() == 1) {</span>
+<span class="fc" id="L465">				this.result.setResult(this.values.get(0));</span>
+			}
+			else {
+<span class="fc" id="L468">				this.result.setResult(null);</span>
+			}
+<span class="fc" id="L470">		}</span>
+	}
+
+
+	/**
+	 * List of collect values where all elements are a specified type.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	static class CollectedValuesList extends ArrayList&lt;Object&gt; {
+
+		private final ResolvableType elementType;
+
+<span class="fc" id="L482">		CollectedValuesList(ResolvableType elementType) {</span>
+<span class="fc" id="L483">			this.elementType = elementType;</span>
+<span class="fc" id="L484">		}</span>
+
+		public ResolvableType getReturnType() {
+<span class="fc" id="L487">			return ResolvableType.forClassWithGenerics(List.class, this.elementType);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

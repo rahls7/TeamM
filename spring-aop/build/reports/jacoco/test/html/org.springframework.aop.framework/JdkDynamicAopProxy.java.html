@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JdkDynamicAopProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.framework</a> &gt; <span class="el_source">JdkDynamicAopProxy.java</span></div><h1>JdkDynamicAopProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.framework;
+
+import java.io.Serializable;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.List;
+
+import org.aopalliance.intercept.MethodInvocation;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aop.AopInvocationException;
+import org.springframework.aop.RawTargetAccess;
+import org.springframework.aop.TargetSource;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.core.DecoratingProxy;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * JDK-based {@link AopProxy} implementation for the Spring AOP framework,
+ * based on JDK {@link java.lang.reflect.Proxy dynamic proxies}.
+ *
+ * &lt;p&gt;Creates a dynamic proxy, implementing the interfaces exposed by
+ * the AopProxy. Dynamic proxies &lt;i&gt;cannot&lt;/i&gt; be used to proxy methods
+ * defined in classes, rather than interfaces.
+ *
+ * &lt;p&gt;Objects of this type should be obtained through proxy factories,
+ * configured by an {@link AdvisedSupport} class. This class is internal
+ * to Spring's AOP framework and need not be used directly by client code.
+ *
+ * &lt;p&gt;Proxies created using this class will be thread-safe if the
+ * underlying (target) class is thread-safe.
+ *
+ * &lt;p&gt;Proxies are serializable so long as all Advisors (including Advices
+ * and Pointcuts) and the TargetSource are serializable.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Dave Syer
+ * @see java.lang.reflect.Proxy
+ * @see AdvisedSupport
+ * @see ProxyFactory
+ */
+final class JdkDynamicAopProxy implements AopProxy, InvocationHandler, Serializable {
+
+	/** use serialVersionUID from Spring 1.2 for interoperability. */
+	private static final long serialVersionUID = 5531744639992436476L;
+
+
+	/*
+	 * NOTE: We could avoid the code duplication between this class and the CGLIB
+	 * proxies by refactoring &quot;invoke&quot; into a template method. However, this approach
+	 * adds at least 10% performance overhead versus a copy-paste solution, so we sacrifice
+	 * elegance for performance. (We have a good test suite to ensure that the different
+	 * proxies behave the same :-)
+	 * This way, we can also more easily take advantage of minor optimizations in each class.
+	 */
+
+	/** We use a static Log to avoid serialization issues. */
+<span class="fc" id="L80">	private static final Log logger = LogFactory.getLog(JdkDynamicAopProxy.class);</span>
+
+	/** Config used to configure this proxy. */
+	private final AdvisedSupport advised;
+
+	/**
+	 * Is the {@link #equals} method defined on the proxied interfaces?
+	 */
+	private boolean equalsDefined;
+
+	/**
+	 * Is the {@link #hashCode} method defined on the proxied interfaces?
+	 */
+	private boolean hashCodeDefined;
+
+
+	/**
+	 * Construct a new JdkDynamicAopProxy for the given AOP configuration.
+	 * @param config the AOP configuration as AdvisedSupport object
+	 * @throws AopConfigException if the config is invalid. We try to throw an informative
+	 * exception in this case, rather than let a mysterious failure happen later.
+	 */
+<span class="fc" id="L102">	public JdkDynamicAopProxy(AdvisedSupport config) throws AopConfigException {</span>
+<span class="fc" id="L103">		Assert.notNull(config, &quot;AdvisedSupport must not be null&quot;);</span>
+<span class="pc bpc" id="L104" title="1 of 4 branches missed.">		if (config.getAdvisors().length == 0 &amp;&amp; config.getTargetSource() == AdvisedSupport.EMPTY_TARGET_SOURCE) {</span>
+<span class="nc" id="L105">			throw new AopConfigException(&quot;No advisors and no TargetSource specified&quot;);</span>
+		}
+<span class="fc" id="L107">		this.advised = config;</span>
+<span class="fc" id="L108">	}</span>
+
+
+	@Override
+	public Object getProxy() {
+<span class="fc" id="L113">		return getProxy(ClassUtils.getDefaultClassLoader());</span>
+	}
+
+	@Override
+	public Object getProxy(@Nullable ClassLoader classLoader) {
+<span class="pc bpc" id="L118" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L119">			logger.trace(&quot;Creating JDK dynamic proxy: &quot; + this.advised.getTargetSource());</span>
+		}
+<span class="fc" id="L121">		Class&lt;?&gt;[] proxiedInterfaces = AopProxyUtils.completeProxiedInterfaces(this.advised, true);</span>
+<span class="fc" id="L122">		findDefinedEqualsAndHashCodeMethods(proxiedInterfaces);</span>
+<span class="fc" id="L123">		return Proxy.newProxyInstance(classLoader, proxiedInterfaces, this);</span>
+	}
+
+	/**
+	 * Finds any {@link #equals} or {@link #hashCode} method that may be defined
+	 * on the supplied set of interfaces.
+	 * @param proxiedInterfaces the interfaces to introspect
+	 */
+	private void findDefinedEqualsAndHashCodeMethods(Class&lt;?&gt;[] proxiedInterfaces) {
+<span class="fc bfc" id="L132" title="All 2 branches covered.">		for (Class&lt;?&gt; proxiedInterface : proxiedInterfaces) {</span>
+<span class="fc" id="L133">			Method[] methods = proxiedInterface.getDeclaredMethods();</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">			for (Method method : methods) {</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">				if (AopUtils.isEqualsMethod(method)) {</span>
+<span class="fc" id="L136">					this.equalsDefined = true;</span>
+				}
+<span class="fc bfc" id="L138" title="All 2 branches covered.">				if (AopUtils.isHashCodeMethod(method)) {</span>
+<span class="fc" id="L139">					this.hashCodeDefined = true;</span>
+				}
+<span class="fc bfc" id="L141" title="All 4 branches covered.">				if (this.equalsDefined &amp;&amp; this.hashCodeDefined) {</span>
+<span class="fc" id="L142">					return;</span>
+				}
+			}
+		}
+<span class="fc" id="L146">	}</span>
+
+
+	/**
+	 * Implementation of {@code InvocationHandler.invoke}.
+	 * &lt;p&gt;Callers will see exactly the exception thrown by the target,
+	 * unless a hook method throws an exception.
+	 */
+	@Override
+	@Nullable
+	public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+		MethodInvocation invocation;
+<span class="fc" id="L158">		Object oldProxy = null;</span>
+<span class="fc" id="L159">		boolean setProxyContext = false;</span>
+
+<span class="fc" id="L161">		TargetSource targetSource = this.advised.targetSource;</span>
+<span class="fc" id="L162">		Object target = null;</span>
+
+		try {
+<span class="pc bpc" id="L165" title="1 of 4 branches missed.">			if (!this.equalsDefined &amp;&amp; AopUtils.isEqualsMethod(method)) {</span>
+				// The target does not implement the equals(Object) method itself.
+<span class="nc" id="L167">				return equals(args[0]);</span>
+			}
+<span class="pc bpc" id="L169" title="1 of 4 branches missed.">			else if (!this.hashCodeDefined &amp;&amp; AopUtils.isHashCodeMethod(method)) {</span>
+				// The target does not implement the hashCode() method itself.
+<span class="nc" id="L171">				return hashCode();</span>
+			}
+<span class="fc bfc" id="L173" title="All 2 branches covered.">			else if (method.getDeclaringClass() == DecoratingProxy.class) {</span>
+				// There is only getDecoratedClass() declared -&gt; dispatch to proxy config.
+<span class="fc" id="L175">				return AopProxyUtils.ultimateTargetClass(this.advised);</span>
+			}
+<span class="pc bpc" id="L177" title="1 of 4 branches missed.">			else if (!this.advised.opaque &amp;&amp; method.getDeclaringClass().isInterface() &amp;&amp;</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">					method.getDeclaringClass().isAssignableFrom(Advised.class)) {</span>
+				// Service invocations on ProxyConfig with the proxy config...
+<span class="fc" id="L180">				return AopUtils.invokeJoinpointUsingReflection(this.advised, method, args);</span>
+			}
+
+			Object retVal;
+
+<span class="fc bfc" id="L185" title="All 2 branches covered.">			if (this.advised.exposeProxy) {</span>
+				// Make invocation available if necessary.
+<span class="fc" id="L187">				oldProxy = AopContext.setCurrentProxy(proxy);</span>
+<span class="fc" id="L188">				setProxyContext = true;</span>
+			}
+
+			// Get as late as possible to minimize the time we &quot;own&quot; the target,
+			// in case it comes from a pool.
+<span class="fc" id="L193">			target = targetSource.getTarget();</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">			Class&lt;?&gt; targetClass = (target != null ? target.getClass() : null);</span>
+
+			// Get the interception chain for this method.
+<span class="fc" id="L197">			List&lt;Object&gt; chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);</span>
+
+			// Check whether we have any advice. If we don't, we can fallback on direct
+			// reflective invocation of the target, and avoid creating a MethodInvocation.
+<span class="fc bfc" id="L201" title="All 2 branches covered.">			if (chain.isEmpty()) {</span>
+				// We can skip creating a MethodInvocation: just invoke the target directly
+				// Note that the final invoker must be an InvokerInterceptor so we know it does
+				// nothing but a reflective operation on the target, and no hot swapping or fancy proxying.
+<span class="fc" id="L205">				Object[] argsToUse = AopProxyUtils.adaptArgumentsIfNecessary(method, args);</span>
+<span class="fc" id="L206">				retVal = AopUtils.invokeJoinpointUsingReflection(target, method, argsToUse);</span>
+<span class="fc" id="L207">			}</span>
+			else {
+				// We need to create a method invocation...
+<span class="fc" id="L210">				invocation = new ReflectiveMethodInvocation(proxy, target, method, args, targetClass, chain);</span>
+				// Proceed to the joinpoint through the interceptor chain.
+<span class="fc" id="L212">				retVal = invocation.proceed();</span>
+			}
+
+			// Massage return value if necessary.
+<span class="fc" id="L216">			Class&lt;?&gt; returnType = method.getReturnType();</span>
+<span class="pc bpc" id="L217" title="3 of 6 branches missed.">			if (retVal != null &amp;&amp; retVal == target &amp;&amp;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">					returnType != Object.class &amp;&amp; returnType.isInstance(proxy) &amp;&amp;</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">					!RawTargetAccess.class.isAssignableFrom(method.getDeclaringClass())) {</span>
+				// Special case: it returned &quot;this&quot; and the return type of the method
+				// is type-compatible. Note that we can't help if the target sets
+				// a reference to itself in another returned object.
+<span class="nc" id="L223">				retVal = proxy;</span>
+			}
+<span class="fc bfc" id="L225" title="All 6 branches covered.">			else if (retVal == null &amp;&amp; returnType != Void.TYPE &amp;&amp; returnType.isPrimitive()) {</span>
+<span class="fc" id="L226">				throw new AopInvocationException(</span>
+						&quot;Null return value from advice does not match primitive return type for: &quot; + method);
+			}
+<span class="fc" id="L229">			return retVal;</span>
+		}
+		finally {
+<span class="fc bfc" id="L232" title="All 4 branches covered.">			if (target != null &amp;&amp; !targetSource.isStatic()) {</span>
+				// Must have come from TargetSource.
+<span class="fc" id="L234">				targetSource.releaseTarget(target);</span>
+			}
+<span class="fc bfc" id="L236" title="All 2 branches covered.">			if (setProxyContext) {</span>
+				// Restore old proxy.
+<span class="fc" id="L238">				AopContext.setCurrentProxy(oldProxy);</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Equality means interfaces, advisors and TargetSource are equal.
+	 * &lt;p&gt;The compared object may be a JdkDynamicAopProxy instance itself
+	 * or a dynamic proxy wrapping a JdkDynamicAopProxy instance.
+	 */
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L251" title="All 2 branches missed.">		if (other == this) {</span>
+<span class="nc" id="L252">			return true;</span>
+		}
+<span class="nc bnc" id="L254" title="All 2 branches missed.">		if (other == null) {</span>
+<span class="nc" id="L255">			return false;</span>
+		}
+
+		JdkDynamicAopProxy otherProxy;
+<span class="nc bnc" id="L259" title="All 2 branches missed.">		if (other instanceof JdkDynamicAopProxy) {</span>
+<span class="nc" id="L260">			otherProxy = (JdkDynamicAopProxy) other;</span>
+		}
+<span class="nc bnc" id="L262" title="All 2 branches missed.">		else if (Proxy.isProxyClass(other.getClass())) {</span>
+<span class="nc" id="L263">			InvocationHandler ih = Proxy.getInvocationHandler(other);</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">			if (!(ih instanceof JdkDynamicAopProxy)) {</span>
+<span class="nc" id="L265">				return false;</span>
+			}
+<span class="nc" id="L267">			otherProxy = (JdkDynamicAopProxy) ih;</span>
+<span class="nc" id="L268">		}</span>
+		else {
+			// Not a valid comparison...
+<span class="nc" id="L271">			return false;</span>
+		}
+
+		// If we get here, otherProxy is the other AopProxy.
+<span class="nc" id="L275">		return AopProxyUtils.equalsInProxy(this.advised, otherProxy.advised);</span>
+	}
+
+	/**
+	 * Proxy uses the hash code of the TargetSource.
+	 */
+	@Override
+	public int hashCode() {
+<span class="nc" id="L283">		return JdkDynamicAopProxy.class.hashCode() * 13 + this.advised.getTargetSource().hashCode();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

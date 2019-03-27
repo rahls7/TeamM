@@ -1,0 +1,582 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConfigurationClassEnhancer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.annotation</a> &gt; <span class="el_source">ConfigurationClassEnhancer.java</span></div><h1>ConfigurationClassEnhancer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.annotation;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Proxy;
+import java.util.Arrays;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aop.scope.ScopedProxyFactoryBean;
+import org.springframework.asm.Type;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.support.SimpleInstantiationStrategy;
+import org.springframework.cglib.core.ClassGenerator;
+import org.springframework.cglib.core.Constants;
+import org.springframework.cglib.core.DefaultGeneratorStrategy;
+import org.springframework.cglib.core.SpringNamingPolicy;
+import org.springframework.cglib.proxy.Callback;
+import org.springframework.cglib.proxy.CallbackFilter;
+import org.springframework.cglib.proxy.Enhancer;
+import org.springframework.cglib.proxy.Factory;
+import org.springframework.cglib.proxy.MethodInterceptor;
+import org.springframework.cglib.proxy.MethodProxy;
+import org.springframework.cglib.proxy.NoOp;
+import org.springframework.cglib.transform.ClassEmitterTransformer;
+import org.springframework.cglib.transform.TransformingClassGenerator;
+import org.springframework.lang.Nullable;
+import org.springframework.objenesis.ObjenesisException;
+import org.springframework.objenesis.SpringObjenesis;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Enhances {@link Configuration} classes by generating a CGLIB subclass which
+ * interacts with the Spring container to respect bean scoping semantics for
+ * {@code @Bean} methods. Each such {@code @Bean} method will be overridden in
+ * the generated subclass, only delegating to the actual {@code @Bean} method
+ * implementation if the container actually requests the construction of a new
+ * instance. Otherwise, a call to such an {@code @Bean} method serves as a
+ * reference back to the container, obtaining the corresponding bean by name.
+ *
+ * @author Chris Beams
+ * @author Juergen Hoeller
+ * @since 3.0
+ * @see #enhance
+ * @see ConfigurationClassPostProcessor
+ */
+<span class="fc" id="L73">class ConfigurationClassEnhancer {</span>
+
+	// The callbacks to use. Note that these callbacks must be stateless.
+<span class="fc" id="L76">	private static final Callback[] CALLBACKS = new Callback[] {</span>
+			new BeanMethodInterceptor(),
+			new BeanFactoryAwareMethodInterceptor(),
+			NoOp.INSTANCE
+	};
+
+<span class="fc" id="L82">	private static final ConditionalCallbackFilter CALLBACK_FILTER = new ConditionalCallbackFilter(CALLBACKS);</span>
+
+	private static final String BEAN_FACTORY_FIELD = &quot;$$beanFactory&quot;;
+
+
+<span class="fc" id="L87">	private static final Log logger = LogFactory.getLog(ConfigurationClassEnhancer.class);</span>
+
+<span class="fc" id="L89">	private static final SpringObjenesis objenesis = new SpringObjenesis();</span>
+
+
+	/**
+	 * Loads the specified class and generates a CGLIB subclass of it equipped with
+	 * container-aware callbacks capable of respecting scoping and other bean semantics.
+	 * @return the enhanced subclass
+	 */
+	public Class&lt;?&gt; enhance(Class&lt;?&gt; configClass, @Nullable ClassLoader classLoader) {
+<span class="fc bfc" id="L98" title="All 2 branches covered.">		if (EnhancedConfiguration.class.isAssignableFrom(configClass)) {</span>
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L100">				logger.debug(String.format(&quot;Ignoring request to enhance %s as it has &quot; +</span>
+						&quot;already been enhanced. This usually indicates that more than one &quot; +
+						&quot;ConfigurationClassPostProcessor has been registered (e.g. via &quot; +
+						&quot;&lt;context:annotation-config&gt;). This is harmless, but you may &quot; +
+						&quot;want check your configuration and remove one CCPP if possible&quot;,
+<span class="nc" id="L105">						configClass.getName()));</span>
+			}
+<span class="fc" id="L107">			return configClass;</span>
+		}
+<span class="fc" id="L109">		Class&lt;?&gt; enhancedClass = createClass(newEnhancer(configClass, classLoader));</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L111">			logger.trace(String.format(&quot;Successfully enhanced %s; enhanced class name is: %s&quot;,</span>
+<span class="nc" id="L112">					configClass.getName(), enhancedClass.getName()));</span>
+		}
+<span class="fc" id="L114">		return enhancedClass;</span>
+	}
+
+	/**
+	 * Creates a new CGLIB {@link Enhancer} instance.
+	 */
+	private Enhancer newEnhancer(Class&lt;?&gt; configSuperClass, @Nullable ClassLoader classLoader) {
+<span class="fc" id="L121">		Enhancer enhancer = new Enhancer();</span>
+<span class="fc" id="L122">		enhancer.setSuperclass(configSuperClass);</span>
+<span class="fc" id="L123">		enhancer.setInterfaces(new Class&lt;?&gt;[] {EnhancedConfiguration.class});</span>
+<span class="fc" id="L124">		enhancer.setUseFactory(false);</span>
+<span class="fc" id="L125">		enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);</span>
+<span class="fc" id="L126">		enhancer.setStrategy(new BeanFactoryAwareGeneratorStrategy(classLoader));</span>
+<span class="fc" id="L127">		enhancer.setCallbackFilter(CALLBACK_FILTER);</span>
+<span class="fc" id="L128">		enhancer.setCallbackTypes(CALLBACK_FILTER.getCallbackTypes());</span>
+<span class="fc" id="L129">		return enhancer;</span>
+	}
+
+	/**
+	 * Uses enhancer to generate a subclass of superclass,
+	 * ensuring that callbacks are registered for the new subclass.
+	 */
+	private Class&lt;?&gt; createClass(Enhancer enhancer) {
+<span class="fc" id="L137">		Class&lt;?&gt; subclass = enhancer.createClass();</span>
+		// Registering callbacks statically (as opposed to thread-local)
+		// is critical for usage in an OSGi environment (SPR-5932)...
+<span class="fc" id="L140">		Enhancer.registerStaticCallbacks(subclass, CALLBACKS);</span>
+<span class="fc" id="L141">		return subclass;</span>
+	}
+
+
+	/**
+	 * Marker interface to be implemented by all @Configuration CGLIB subclasses.
+	 * Facilitates idempotent behavior for {@link ConfigurationClassEnhancer#enhance}
+	 * through checking to see if candidate classes are already assignable to it, e.g.
+	 * have already been enhanced.
+	 * &lt;p&gt;Also extends {@link BeanFactoryAware}, as all enhanced {@code @Configuration}
+	 * classes require access to the {@link BeanFactory} that created them.
+	 * &lt;p&gt;Note that this interface is intended for framework-internal use only, however
+	 * must remain public in order to allow access to subclasses generated from other
+	 * packages (i.e. user code).
+	 */
+	public interface EnhancedConfiguration extends BeanFactoryAware {
+	}
+
+
+	/**
+	 * Conditional {@link Callback}.
+	 * @see ConditionalCallbackFilter
+	 */
+	private interface ConditionalCallback extends Callback {
+
+		boolean isMatch(Method candidateMethod);
+	}
+
+
+	/**
+	 * A {@link CallbackFilter} that works by interrogating {@link Callback Callbacks} in the order
+	 * that they are defined via {@link ConditionalCallback}.
+	 */
+	private static class ConditionalCallbackFilter implements CallbackFilter {
+
+		private final Callback[] callbacks;
+
+		private final Class&lt;?&gt;[] callbackTypes;
+
+<span class="fc" id="L180">		public ConditionalCallbackFilter(Callback[] callbacks) {</span>
+<span class="fc" id="L181">			this.callbacks = callbacks;</span>
+<span class="fc" id="L182">			this.callbackTypes = new Class&lt;?&gt;[callbacks.length];</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">			for (int i = 0; i &lt; callbacks.length; i++) {</span>
+<span class="fc" id="L184">				this.callbackTypes[i] = callbacks[i].getClass();</span>
+			}
+<span class="fc" id="L186">		}</span>
+
+		@Override
+		public int accept(Method method) {
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">			for (int i = 0; i &lt; this.callbacks.length; i++) {</span>
+<span class="fc" id="L191">				Callback callback = this.callbacks[i];</span>
+<span class="fc bfc" id="L192" title="All 4 branches covered.">				if (!(callback instanceof ConditionalCallback) || ((ConditionalCallback) callback).isMatch(method)) {</span>
+<span class="fc" id="L193">					return i;</span>
+				}
+			}
+<span class="nc" id="L196">			throw new IllegalStateException(&quot;No callback available for method &quot; + method.getName());</span>
+		}
+
+		public Class&lt;?&gt;[] getCallbackTypes() {
+<span class="fc" id="L200">			return this.callbackTypes;</span>
+		}
+	}
+
+
+	/**
+	 * Custom extension of CGLIB's DefaultGeneratorStrategy, introducing a {@link BeanFactory} field.
+	 * Also exposes the application ClassLoader as thread context ClassLoader for the time of
+	 * class generation (in order for ASM to pick it up when doing common superclass resolution).
+	 */
+	private static class BeanFactoryAwareGeneratorStrategy extends DefaultGeneratorStrategy {
+
+		@Nullable
+		private final ClassLoader classLoader;
+
+<span class="fc" id="L215">		public BeanFactoryAwareGeneratorStrategy(@Nullable ClassLoader classLoader) {</span>
+<span class="fc" id="L216">			this.classLoader = classLoader;</span>
+<span class="fc" id="L217">		}</span>
+
+		@Override
+		protected ClassGenerator transform(ClassGenerator cg) throws Exception {
+<span class="fc" id="L221">			ClassEmitterTransformer transformer = new ClassEmitterTransformer() {</span>
+				@Override
+				public void end_class() {
+<span class="fc" id="L224">					declare_field(Constants.ACC_PUBLIC, BEAN_FACTORY_FIELD, Type.getType(BeanFactory.class), null);</span>
+<span class="fc" id="L225">					super.end_class();</span>
+<span class="fc" id="L226">				}</span>
+			};
+<span class="fc" id="L228">			return new TransformingClassGenerator(cg, transformer);</span>
+		}
+
+		@Override
+		public byte[] generate(ClassGenerator cg) throws Exception {
+<span class="fc bfc" id="L233" title="All 2 branches covered.">			if (this.classLoader == null) {</span>
+<span class="fc" id="L234">				return super.generate(cg);</span>
+			}
+
+<span class="fc" id="L237">			Thread currentThread = Thread.currentThread();</span>
+			ClassLoader threadContextClassLoader;
+			try {
+<span class="fc" id="L240">				threadContextClassLoader = currentThread.getContextClassLoader();</span>
+			}
+<span class="nc" id="L242">			catch (Throwable ex) {</span>
+				// Cannot access thread context ClassLoader - falling back...
+<span class="nc" id="L244">				return super.generate(cg);</span>
+<span class="fc" id="L245">			}</span>
+
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">			boolean overrideClassLoader = !this.classLoader.equals(threadContextClassLoader);</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">			if (overrideClassLoader) {</span>
+<span class="nc" id="L249">				currentThread.setContextClassLoader(this.classLoader);</span>
+			}
+			try {
+<span class="fc" id="L252">				return super.generate(cg);</span>
+			}
+			finally {
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">				if (overrideClassLoader) {</span>
+					// Reset original thread context ClassLoader.
+<span class="nc" id="L257">					currentThread.setContextClassLoader(threadContextClassLoader);</span>
+				}
+			}
+		}
+	}
+
+
+	/**
+	 * Intercepts the invocation of any {@link BeanFactoryAware#setBeanFactory(BeanFactory)} on
+	 * {@code @Configuration} class instances for the purpose of recording the {@link BeanFactory}.
+	 * @see EnhancedConfiguration
+	 */
+	private static class BeanFactoryAwareMethodInterceptor implements MethodInterceptor, ConditionalCallback {
+
+		@Override
+		@Nullable
+		public Object intercept(Object obj, Method method, Object[] args, MethodProxy proxy) throws Throwable {
+<span class="fc" id="L274">			Field field = ReflectionUtils.findField(obj.getClass(), BEAN_FACTORY_FIELD);</span>
+<span class="pc bpc" id="L275" title="1 of 2 branches missed.">			Assert.state(field != null, &quot;Unable to find generated BeanFactory field&quot;);</span>
+<span class="fc" id="L276">			field.set(obj, args[0]);</span>
+
+			// Does the actual (non-CGLIB) superclass implement BeanFactoryAware?
+			// If so, call its setBeanFactory() method. If not, just exit.
+<span class="fc bfc" id="L280" title="All 2 branches covered.">			if (BeanFactoryAware.class.isAssignableFrom(ClassUtils.getUserClass(obj.getClass().getSuperclass()))) {</span>
+<span class="fc" id="L281">				return proxy.invokeSuper(obj, args);</span>
+			}
+<span class="fc" id="L283">			return null;</span>
+		}
+
+		@Override
+		public boolean isMatch(Method candidateMethod) {
+<span class="fc" id="L288">			return isSetBeanFactory(candidateMethod);</span>
+		}
+
+		public static boolean isSetBeanFactory(Method candidateMethod) {
+<span class="fc bfc" id="L292" title="All 2 branches covered.">			return (candidateMethod.getName().equals(&quot;setBeanFactory&quot;) &amp;&amp;</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">					candidateMethod.getParameterCount() == 1 &amp;&amp;</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">					BeanFactory.class == candidateMethod.getParameterTypes()[0] &amp;&amp;</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">					BeanFactoryAware.class.isAssignableFrom(candidateMethod.getDeclaringClass()));</span>
+		}
+	}
+
+
+	/**
+	 * Intercepts the invocation of any {@link Bean}-annotated methods in order to ensure proper
+	 * handling of bean semantics such as scoping and AOP proxying.
+	 * @see Bean
+	 * @see ConfigurationClassEnhancer
+	 */
+	private static class BeanMethodInterceptor implements MethodInterceptor, ConditionalCallback {
+
+		/**
+		 * Enhance a {@link Bean @Bean} method to check the supplied BeanFactory for the
+		 * existence of this bean object.
+		 * @throws Throwable as a catch-all for any exception that may be thrown when invoking the
+		 * super implementation of the proxied method i.e., the actual {@code @Bean} method
+		 */
+		@Override
+		@Nullable
+		public Object intercept(Object enhancedConfigInstance, Method beanMethod, Object[] beanMethodArgs,
+					MethodProxy cglibMethodProxy) throws Throwable {
+
+<span class="fc" id="L319">			ConfigurableBeanFactory beanFactory = getBeanFactory(enhancedConfigInstance);</span>
+<span class="fc" id="L320">			String beanName = BeanAnnotationHelper.determineBeanNameFor(beanMethod);</span>
+
+			// Determine whether this bean is a scoped-proxy
+<span class="fc bfc" id="L323" title="All 2 branches covered.">			if (BeanAnnotationHelper.isScopedProxy(beanMethod)) {</span>
+<span class="fc" id="L324">				String scopedBeanName = ScopedProxyCreator.getTargetBeanName(beanName);</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">				if (beanFactory.isCurrentlyInCreation(scopedBeanName)) {</span>
+<span class="fc" id="L326">					beanName = scopedBeanName;</span>
+				}
+			}
+
+			// To handle the case of an inter-bean method reference, we must explicitly check the
+			// container for already cached instances.
+
+			// First, check to see if the requested bean is a FactoryBean. If so, create a subclass
+			// proxy that intercepts calls to getObject() and returns any cached bean instance.
+			// This ensures that the semantics of calling a FactoryBean from within @Bean methods
+			// is the same as that of referring to a FactoryBean within XML. See SPR-6602.
+<span class="fc bfc" id="L337" title="All 2 branches covered.">			if (factoryContainsBean(beanFactory, BeanFactory.FACTORY_BEAN_PREFIX + beanName) &amp;&amp;</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">					factoryContainsBean(beanFactory, beanName)) {</span>
+<span class="fc" id="L339">				Object factoryBean = beanFactory.getBean(BeanFactory.FACTORY_BEAN_PREFIX + beanName);</span>
+<span class="fc bfc" id="L340" title="All 2 branches covered.">				if (factoryBean instanceof ScopedProxyFactoryBean) {</span>
+					// Scoped proxy factory beans are a special case and should not be further proxied
+				}
+				else {
+					// It is a candidate FactoryBean - go ahead with enhancement
+<span class="fc" id="L345">					return enhanceFactoryBean(factoryBean, beanMethod.getReturnType(), beanFactory, beanName);</span>
+				}
+			}
+
+<span class="fc bfc" id="L349" title="All 2 branches covered.">			if (isCurrentlyInvokedFactoryMethod(beanMethod)) {</span>
+				// The factory is calling the bean method in order to instantiate and register the bean
+				// (i.e. via a getBean() call) -&gt; invoke the super implementation of the method to actually
+				// create the bean instance.
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">				if (logger.isInfoEnabled() &amp;&amp;</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">						BeanFactoryPostProcessor.class.isAssignableFrom(beanMethod.getReturnType())) {</span>
+<span class="nc" id="L355">					logger.info(String.format(&quot;@Bean method %s.%s is non-static and returns an object &quot; +</span>
+									&quot;assignable to Spring's BeanFactoryPostProcessor interface. This will &quot; +
+									&quot;result in a failure to process annotations such as @Autowired, &quot; +
+									&quot;@Resource and @PostConstruct within the method's declaring &quot; +
+									&quot;@Configuration class. Add the 'static' modifier to this method to avoid &quot; +
+									&quot;these container lifecycle issues; see @Bean javadoc for complete details.&quot;,
+<span class="nc" id="L361">							beanMethod.getDeclaringClass().getSimpleName(), beanMethod.getName()));</span>
+				}
+<span class="fc" id="L363">				return cglibMethodProxy.invokeSuper(enhancedConfigInstance, beanMethodArgs);</span>
+			}
+
+<span class="fc" id="L366">			return resolveBeanReference(beanMethod, beanMethodArgs, beanFactory, beanName);</span>
+		}
+
+		private Object resolveBeanReference(Method beanMethod, Object[] beanMethodArgs,
+				ConfigurableBeanFactory beanFactory, String beanName) {
+
+			// The user (i.e. not the factory) is requesting this bean through a call to
+			// the bean method, direct or indirect. The bean may have already been marked
+			// as 'in creation' in certain autowiring scenarios; if so, temporarily set
+			// the in-creation status to false in order to avoid an exception.
+<span class="fc" id="L376">			boolean alreadyInCreation = beanFactory.isCurrentlyInCreation(beanName);</span>
+			try {
+<span class="fc bfc" id="L378" title="All 2 branches covered.">				if (alreadyInCreation) {</span>
+<span class="fc" id="L379">					beanFactory.setCurrentlyInCreation(beanName, false);</span>
+				}
+<span class="fc bfc" id="L381" title="All 2 branches covered.">				boolean useArgs = !ObjectUtils.isEmpty(beanMethodArgs);</span>
+<span class="fc bfc" id="L382" title="All 4 branches covered.">				if (useArgs &amp;&amp; beanFactory.isSingleton(beanName)) {</span>
+					// Stubbed null arguments just for reference purposes,
+					// expecting them to be autowired for regular singleton references?
+					// A safe assumption since @Bean singleton arguments cannot be optional...
+<span class="fc bfc" id="L386" title="All 2 branches covered.">					for (Object arg : beanMethodArgs) {</span>
+<span class="fc bfc" id="L387" title="All 2 branches covered.">						if (arg == null) {</span>
+<span class="fc" id="L388">							useArgs = false;</span>
+<span class="fc" id="L389">							break;</span>
+						}
+					}
+				}
+<span class="fc bfc" id="L393" title="All 2 branches covered.">				Object beanInstance = (useArgs ? beanFactory.getBean(beanName, beanMethodArgs) :</span>
+<span class="fc" id="L394">						beanFactory.getBean(beanName));</span>
+<span class="fc bfc" id="L395" title="All 2 branches covered.">				if (!ClassUtils.isAssignableValue(beanMethod.getReturnType(), beanInstance)) {</span>
+					// Detect package-protected NullBean instance through equals(null) check
+<span class="fc bfc" id="L397" title="All 2 branches covered.">					if (beanInstance.equals(null)) {</span>
+<span class="pc bpc" id="L398" title="1 of 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L399">							logger.debug(String.format(&quot;@Bean method %s.%s called as bean reference &quot; +</span>
+									&quot;for type [%s] returned null bean; resolving to null value.&quot;,
+<span class="nc" id="L401">									beanMethod.getDeclaringClass().getSimpleName(), beanMethod.getName(),</span>
+<span class="nc" id="L402">									beanMethod.getReturnType().getName()));</span>
+						}
+<span class="fc" id="L404">						beanInstance = null;</span>
+					}
+					else {
+<span class="fc" id="L407">						String msg = String.format(&quot;@Bean method %s.%s called as bean reference &quot; +</span>
+								&quot;for type [%s] but overridden by non-compatible bean instance of type [%s].&quot;,
+<span class="fc" id="L409">								beanMethod.getDeclaringClass().getSimpleName(), beanMethod.getName(),</span>
+<span class="fc" id="L410">								beanMethod.getReturnType().getName(), beanInstance.getClass().getName());</span>
+						try {
+<span class="fc" id="L412">							BeanDefinition beanDefinition = beanFactory.getMergedBeanDefinition(beanName);</span>
+<span class="fc" id="L413">							msg += &quot; Overriding bean of same name declared in: &quot; + beanDefinition.getResourceDescription();</span>
+						}
+<span class="nc" id="L415">						catch (NoSuchBeanDefinitionException ex) {</span>
+							// Ignore - simply no detailed message then.
+<span class="fc" id="L417">						}</span>
+<span class="fc" id="L418">						throw new IllegalStateException(msg);</span>
+					}
+				}
+<span class="fc" id="L421">				Method currentlyInvoked = SimpleInstantiationStrategy.getCurrentlyInvokedFactoryMethod();</span>
+<span class="fc bfc" id="L422" title="All 2 branches covered.">				if (currentlyInvoked != null) {</span>
+<span class="fc" id="L423">					String outerBeanName = BeanAnnotationHelper.determineBeanNameFor(currentlyInvoked);</span>
+<span class="fc" id="L424">					beanFactory.registerDependentBean(beanName, outerBeanName);</span>
+				}
+<span class="fc" id="L426">				return beanInstance;</span>
+			}
+			finally {
+<span class="fc bfc" id="L429" title="All 2 branches covered.">				if (alreadyInCreation) {</span>
+<span class="fc" id="L430">					beanFactory.setCurrentlyInCreation(beanName, true);</span>
+				}
+			}
+		}
+
+		@Override
+		public boolean isMatch(Method candidateMethod) {
+<span class="fc bfc" id="L437" title="All 2 branches covered.">			return (candidateMethod.getDeclaringClass() != Object.class &amp;&amp;</span>
+<span class="fc bfc" id="L438" title="All 2 branches covered.">					!BeanFactoryAwareMethodInterceptor.isSetBeanFactory(candidateMethod) &amp;&amp;</span>
+<span class="fc bfc" id="L439" title="All 2 branches covered.">					BeanAnnotationHelper.isBeanAnnotated(candidateMethod));</span>
+		}
+
+		private ConfigurableBeanFactory getBeanFactory(Object enhancedConfigInstance) {
+<span class="fc" id="L443">			Field field = ReflectionUtils.findField(enhancedConfigInstance.getClass(), BEAN_FACTORY_FIELD);</span>
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">			Assert.state(field != null, &quot;Unable to find generated bean factory field&quot;);</span>
+<span class="fc" id="L445">			Object beanFactory = ReflectionUtils.getField(field, enhancedConfigInstance);</span>
+<span class="fc bfc" id="L446" title="All 2 branches covered.">			Assert.state(beanFactory != null, &quot;BeanFactory has not been injected into @Configuration class&quot;);</span>
+<span class="fc" id="L447">			Assert.state(beanFactory instanceof ConfigurableBeanFactory,</span>
+					&quot;Injected BeanFactory is not a ConfigurableBeanFactory&quot;);
+<span class="fc" id="L449">			return (ConfigurableBeanFactory) beanFactory;</span>
+		}
+
+		/**
+		 * Check the BeanFactory to see whether the bean named &lt;var&gt;beanName&lt;/var&gt; already
+		 * exists. Accounts for the fact that the requested bean may be &quot;in creation&quot;, i.e.:
+		 * we're in the middle of servicing the initial request for this bean. From an enhanced
+		 * factory method's perspective, this means that the bean does not actually yet exist,
+		 * and that it is now our job to create it for the first time by executing the logic
+		 * in the corresponding factory method.
+		 * &lt;p&gt;Said another way, this check repurposes
+		 * {@link ConfigurableBeanFactory#isCurrentlyInCreation(String)} to determine whether
+		 * the container is calling this method or the user is calling this method.
+		 * @param beanName name of bean to check for
+		 * @return whether &lt;var&gt;beanName&lt;/var&gt; already exists in the factory
+		 */
+		private boolean factoryContainsBean(ConfigurableBeanFactory beanFactory, String beanName) {
+<span class="fc bfc" id="L466" title="All 4 branches covered.">			return (beanFactory.containsBean(beanName) &amp;&amp; !beanFactory.isCurrentlyInCreation(beanName));</span>
+		}
+
+		/**
+		 * Check whether the given method corresponds to the container's currently invoked
+		 * factory method. Compares method name and parameter types only in order to work
+		 * around a potential problem with covariant return types (currently only known
+		 * to happen on Groovy classes).
+		 */
+		private boolean isCurrentlyInvokedFactoryMethod(Method method) {
+<span class="fc" id="L476">			Method currentlyInvoked = SimpleInstantiationStrategy.getCurrentlyInvokedFactoryMethod();</span>
+<span class="fc bfc" id="L477" title="All 4 branches covered.">			return (currentlyInvoked != null &amp;&amp; method.getName().equals(currentlyInvoked.getName()) &amp;&amp;</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">					Arrays.equals(method.getParameterTypes(), currentlyInvoked.getParameterTypes()));</span>
+		}
+
+		/**
+		 * Create a subclass proxy that intercepts calls to getObject(), delegating to the current BeanFactory
+		 * instead of creating a new instance. These proxies are created only when calling a FactoryBean from
+		 * within a Bean method, allowing for proper scoping semantics even when working against the FactoryBean
+		 * instance directly. If a FactoryBean instance is fetched through the container via &amp;-dereferencing,
+		 * it will not be proxied. This too is aligned with the way XML configuration works.
+		 */
+		private Object enhanceFactoryBean(final Object factoryBean, Class&lt;?&gt; exposedType,
+				final ConfigurableBeanFactory beanFactory, final String beanName) {
+
+			try {
+<span class="fc" id="L492">				Class&lt;?&gt; clazz = factoryBean.getClass();</span>
+<span class="fc" id="L493">				boolean finalClass = Modifier.isFinal(clazz.getModifiers());</span>
+<span class="fc" id="L494">				boolean finalMethod = Modifier.isFinal(clazz.getMethod(&quot;getObject&quot;).getModifiers());</span>
+<span class="fc bfc" id="L495" title="All 4 branches covered.">				if (finalClass || finalMethod) {</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">					if (exposedType.isInterface()) {</span>
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L498">							logger.trace(&quot;Creating interface proxy for FactoryBean '&quot; + beanName + &quot;' of type [&quot; +</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">									clazz.getName() + &quot;] for use within another @Bean method because its &quot; +</span>
+									(finalClass ? &quot;implementation class&quot; : &quot;getObject() method&quot;) +
+									&quot; is final: Otherwise a getObject() call would not be routed to the factory.&quot;);
+						}
+<span class="fc" id="L503">						return createInterfaceProxyForFactoryBean(factoryBean, exposedType, beanFactory, beanName);</span>
+					}
+					else {
+<span class="pc bpc" id="L506" title="1 of 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L507">							logger.debug(&quot;Unable to proxy FactoryBean '&quot; + beanName + &quot;' of type [&quot; +</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">									clazz.getName() + &quot;] for use within another @Bean method because its &quot; +</span>
+									(finalClass ? &quot;implementation class&quot; : &quot;getObject() method&quot;) +
+									&quot; is final: A getObject() call will NOT be routed to the factory. &quot; +
+									&quot;Consider declaring the return type as a FactoryBean interface.&quot;);
+						}
+<span class="fc" id="L513">						return factoryBean;</span>
+					}
+				}
+			}
+<span class="nc" id="L517">			catch (NoSuchMethodException ex) {</span>
+				// No getObject() method -&gt; shouldn't happen, but as long as nobody is trying to call it...
+<span class="fc" id="L519">			}</span>
+
+<span class="fc" id="L521">			return createCglibProxyForFactoryBean(factoryBean, beanFactory, beanName);</span>
+		}
+
+		private Object createInterfaceProxyForFactoryBean(final Object factoryBean, Class&lt;?&gt; interfaceType,
+				final ConfigurableBeanFactory beanFactory, final String beanName) {
+
+<span class="fc" id="L527">			return Proxy.newProxyInstance(</span>
+<span class="fc" id="L528">					factoryBean.getClass().getClassLoader(), new Class&lt;?&gt;[] {interfaceType},</span>
+					(proxy, method, args) -&gt; {
+<span class="pc bpc" id="L530" title="1 of 4 branches missed.">						if (method.getName().equals(&quot;getObject&quot;) &amp;&amp; args == null) {</span>
+<span class="fc" id="L531">							return beanFactory.getBean(beanName);</span>
+						}
+<span class="fc" id="L533">						return ReflectionUtils.invokeMethod(method, factoryBean, args);</span>
+					});
+		}
+
+		private Object createCglibProxyForFactoryBean(final Object factoryBean,
+				final ConfigurableBeanFactory beanFactory, final String beanName) {
+
+<span class="fc" id="L540">			Enhancer enhancer = new Enhancer();</span>
+<span class="fc" id="L541">			enhancer.setSuperclass(factoryBean.getClass());</span>
+<span class="fc" id="L542">			enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);</span>
+<span class="fc" id="L543">			enhancer.setCallbackType(MethodInterceptor.class);</span>
+
+			// Ideally create enhanced FactoryBean proxy without constructor side effects,
+			// analogous to AOP proxy creation in ObjenesisCglibAopProxy...
+<span class="fc" id="L547">			Class&lt;?&gt; fbClass = enhancer.createClass();</span>
+<span class="fc" id="L548">			Object fbProxy = null;</span>
+
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">			if (objenesis.isWorthTrying()) {</span>
+				try {
+<span class="fc" id="L552">					fbProxy = objenesis.newInstance(fbClass, enhancer.getUseCache());</span>
+				}
+<span class="nc" id="L554">				catch (ObjenesisException ex) {</span>
+<span class="nc" id="L555">					logger.debug(&quot;Unable to instantiate enhanced FactoryBean using Objenesis, &quot; +</span>
+							&quot;falling back to regular construction&quot;, ex);
+<span class="fc" id="L557">				}</span>
+			}
+
+<span class="pc bpc" id="L560" title="1 of 2 branches missed.">			if (fbProxy == null) {</span>
+				try {
+<span class="nc" id="L562">					fbProxy = ReflectionUtils.accessibleConstructor(fbClass).newInstance();</span>
+				}
+<span class="nc" id="L564">				catch (Throwable ex) {</span>
+<span class="nc" id="L565">					throw new IllegalStateException(&quot;Unable to instantiate enhanced FactoryBean using Objenesis, &quot; +</span>
+							&quot;and regular FactoryBean instantiation via default constructor fails as well&quot;, ex);
+<span class="nc" id="L567">				}</span>
+			}
+
+<span class="fc" id="L570">			((Factory) fbProxy).setCallback(0, (MethodInterceptor) (obj, method, args, proxy) -&gt; {</span>
+<span class="pc bpc" id="L571" title="1 of 4 branches missed.">				if (method.getName().equals(&quot;getObject&quot;) &amp;&amp; args.length == 0) {</span>
+<span class="fc" id="L572">					return beanFactory.getBean(beanName);</span>
+				}
+<span class="fc" id="L574">				return proxy.invoke(factoryBean, args);</span>
+			});
+
+<span class="fc" id="L577">			return fbProxy;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

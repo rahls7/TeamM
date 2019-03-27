@@ -1,0 +1,405 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ServletWebRequest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.context.request</a> &gt; <span class="el_source">ServletWebRequest.java</span></div><h1>ServletWebRequest.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.context.request;
+
+import java.security.Principal;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Enumeration;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
+
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.lang.Nullable;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.util.WebUtils;
+
+/**
+ * {@link WebRequest} adapter for an {@link javax.servlet.http.HttpServletRequest}.
+ *
+ * @author Juergen Hoeller
+ * @author Brian Clozel
+ * @author Markus Malkusch
+ * @since 2.0
+ */
+public class ServletWebRequest extends ServletRequestAttributes implements NativeWebRequest {
+
+	private static final String ETAG = &quot;ETag&quot;;
+
+	private static final String IF_MODIFIED_SINCE = &quot;If-Modified-Since&quot;;
+
+	private static final String IF_UNMODIFIED_SINCE = &quot;If-Unmodified-Since&quot;;
+
+	private static final String IF_NONE_MATCH = &quot;If-None-Match&quot;;
+
+	private static final String LAST_MODIFIED = &quot;Last-Modified&quot;;
+
+<span class="fc" id="L63">	private static final List&lt;String&gt; SAFE_METHODS = Arrays.asList(&quot;GET&quot;, &quot;HEAD&quot;);</span>
+
+	/**
+	 * Pattern matching ETag multiple field values in headers such as &quot;If-Match&quot;, &quot;If-None-Match&quot;.
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7232#section-2.3&quot;&gt;Section 2.3 of RFC 7232&lt;/a&gt;
+	 */
+<span class="fc" id="L69">	private static final Pattern ETAG_HEADER_VALUE_PATTERN = Pattern.compile(&quot;\\*|\\s*((W\\/)?(\&quot;[^\&quot;]*\&quot;))\\s*,?&quot;);</span>
+
+	/**
+	 * Date formats as specified in the HTTP RFC.
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7231#section-7.1.1.1&quot;&gt;Section 7.1.1.1 of RFC 7231&lt;/a&gt;
+	 */
+<span class="fc" id="L75">	private static final String[] DATE_FORMATS = new String[] {</span>
+			&quot;EEE, dd MMM yyyy HH:mm:ss zzz&quot;,
+			&quot;EEE, dd-MMM-yy HH:mm:ss zzz&quot;,
+			&quot;EEE MMM dd HH:mm:ss yyyy&quot;
+	};
+
+<span class="fc" id="L81">	private static final TimeZone GMT = TimeZone.getTimeZone(&quot;GMT&quot;);</span>
+
+<span class="fc" id="L83">	private boolean notModified = false;</span>
+
+
+	/**
+	 * Create a new ServletWebRequest instance for the given request.
+	 * @param request current HTTP request
+	 */
+	public ServletWebRequest(HttpServletRequest request) {
+<span class="fc" id="L91">		super(request);</span>
+<span class="fc" id="L92">	}</span>
+
+	/**
+	 * Create a new ServletWebRequest instance for the given request/response pair.
+	 * @param request current HTTP request
+	 * @param response current HTTP response (for automatic last-modified handling)
+	 */
+	public ServletWebRequest(HttpServletRequest request, @Nullable HttpServletResponse response) {
+<span class="fc" id="L100">		super(request, response);</span>
+<span class="fc" id="L101">	}</span>
+
+
+	@Override
+	public Object getNativeRequest() {
+<span class="fc" id="L106">		return getRequest();</span>
+	}
+
+	@Override
+	public Object getNativeResponse() {
+<span class="fc" id="L111">		return getResponse();</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getNativeRequest(@Nullable Class&lt;T&gt; requiredType) {
+<span class="fc" id="L116">		return WebUtils.getNativeRequest(getRequest(), requiredType);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getNativeResponse(@Nullable Class&lt;T&gt; requiredType) {
+<span class="fc" id="L121">		HttpServletResponse response = getResponse();</span>
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">		return (response != null ? WebUtils.getNativeResponse(response, requiredType) : null);</span>
+	}
+
+	/**
+	 * Return the HTTP method of the request.
+	 * @since 4.0.2
+	 */
+	@Nullable
+	public HttpMethod getHttpMethod() {
+<span class="nc" id="L131">		return HttpMethod.resolve(getRequest().getMethod());</span>
+	}
+
+	@Override
+	@Nullable
+	public String getHeader(String headerName) {
+<span class="fc" id="L137">		return getRequest().getHeader(headerName);</span>
+	}
+
+	@Override
+	@Nullable
+	public String[] getHeaderValues(String headerName) {
+<span class="fc" id="L143">		String[] headerValues = StringUtils.toStringArray(getRequest().getHeaders(headerName));</span>
+<span class="fc bfc" id="L144" title="All 2 branches covered.">		return (!ObjectUtils.isEmpty(headerValues) ? headerValues : null);</span>
+	}
+
+	@Override
+	public Iterator&lt;String&gt; getHeaderNames() {
+<span class="fc" id="L149">		return CollectionUtils.toIterator(getRequest().getHeaderNames());</span>
+	}
+
+	@Override
+	@Nullable
+	public String getParameter(String paramName) {
+<span class="fc" id="L155">		return getRequest().getParameter(paramName);</span>
+	}
+
+	@Override
+	@Nullable
+	public String[] getParameterValues(String paramName) {
+<span class="fc" id="L161">		return getRequest().getParameterValues(paramName);</span>
+	}
+
+	@Override
+	public Iterator&lt;String&gt; getParameterNames() {
+<span class="nc" id="L166">		return CollectionUtils.toIterator(getRequest().getParameterNames());</span>
+	}
+
+	@Override
+	public Map&lt;String, String[]&gt; getParameterMap() {
+<span class="fc" id="L171">		return getRequest().getParameterMap();</span>
+	}
+
+	@Override
+	public Locale getLocale() {
+<span class="fc" id="L176">		return getRequest().getLocale();</span>
+	}
+
+	@Override
+	public String getContextPath() {
+<span class="nc" id="L181">		return getRequest().getContextPath();</span>
+	}
+
+	@Override
+	@Nullable
+	public String getRemoteUser() {
+<span class="nc" id="L187">		return getRequest().getRemoteUser();</span>
+	}
+
+	@Override
+	@Nullable
+	public Principal getUserPrincipal() {
+<span class="nc" id="L193">		return getRequest().getUserPrincipal();</span>
+	}
+
+	@Override
+	public boolean isUserInRole(String role) {
+<span class="nc" id="L198">		return getRequest().isUserInRole(role);</span>
+	}
+
+	@Override
+	public boolean isSecure() {
+<span class="nc" id="L203">		return getRequest().isSecure();</span>
+	}
+
+
+	@Override
+	public boolean checkNotModified(long lastModifiedTimestamp) {
+<span class="fc" id="L209">		return checkNotModified(null, lastModifiedTimestamp);</span>
+	}
+
+	@Override
+	public boolean checkNotModified(String etag) {
+<span class="fc" id="L214">		return checkNotModified(etag, -1);</span>
+	}
+
+	@Override
+	public boolean checkNotModified(@Nullable String etag, long lastModifiedTimestamp) {
+<span class="fc" id="L219">		HttpServletResponse response = getResponse();</span>
+<span class="pc bpc" id="L220" title="2 of 6 branches missed.">		if (this.notModified || (response != null &amp;&amp; HttpStatus.OK.value() != response.getStatus())) {</span>
+<span class="fc" id="L221">			return this.notModified;</span>
+		}
+
+		// Evaluate conditions in order of precedence.
+		// See https://tools.ietf.org/html/rfc7232#section-6
+
+<span class="fc bfc" id="L227" title="All 2 branches covered.">		if (validateIfUnmodifiedSince(lastModifiedTimestamp)) {</span>
+<span class="pc bpc" id="L228" title="1 of 4 branches missed.">			if (this.notModified &amp;&amp; response != null) {</span>
+<span class="fc" id="L229">				response.setStatus(HttpStatus.PRECONDITION_FAILED.value());</span>
+			}
+<span class="fc" id="L231">			return this.notModified;</span>
+		}
+
+<span class="fc" id="L234">		boolean validated = validateIfNoneMatch(etag);</span>
+<span class="fc bfc" id="L235" title="All 2 branches covered.">		if (!validated) {</span>
+<span class="fc" id="L236">			validateIfModifiedSince(lastModifiedTimestamp);</span>
+		}
+
+		// Update response
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">		if (response != null) {</span>
+<span class="fc" id="L241">			boolean isHttpGetOrHead = SAFE_METHODS.contains(getRequest().getMethod());</span>
+<span class="fc bfc" id="L242" title="All 2 branches covered.">			if (this.notModified) {</span>
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">				response.setStatus(isHttpGetOrHead ?</span>
+<span class="pc" id="L244">						HttpStatus.NOT_MODIFIED.value() : HttpStatus.PRECONDITION_FAILED.value());</span>
+			}
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">			if (isHttpGetOrHead) {</span>
+<span class="fc bfc" id="L247" title="All 4 branches covered.">				if (lastModifiedTimestamp &gt; 0 &amp;&amp; parseDateValue(response.getHeader(LAST_MODIFIED)) == -1) {</span>
+<span class="fc" id="L248">					response.setDateHeader(LAST_MODIFIED, lastModifiedTimestamp);</span>
+				}
+<span class="pc bpc" id="L250" title="1 of 4 branches missed.">				if (StringUtils.hasLength(etag) &amp;&amp; response.getHeader(ETAG) == null) {</span>
+<span class="fc" id="L251">					response.setHeader(ETAG, padEtagIfNecessary(etag));</span>
+				}
+			}
+		}
+
+<span class="fc" id="L256">		return this.notModified;</span>
+	}
+
+	private boolean validateIfUnmodifiedSince(long lastModifiedTimestamp) {
+<span class="fc bfc" id="L260" title="All 2 branches covered.">		if (lastModifiedTimestamp &lt; 0) {</span>
+<span class="fc" id="L261">			return false;</span>
+		}
+<span class="fc" id="L263">		long ifUnmodifiedSince = parseDateHeader(IF_UNMODIFIED_SINCE);</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		if (ifUnmodifiedSince == -1) {</span>
+<span class="fc" id="L265">			return false;</span>
+		}
+		// We will perform this validation...
+<span class="fc bfc" id="L268" title="All 2 branches covered.">		this.notModified = (ifUnmodifiedSince &lt; (lastModifiedTimestamp / 1000 * 1000));</span>
+<span class="fc" id="L269">		return true;</span>
+	}
+
+	private boolean validateIfNoneMatch(@Nullable String etag) {
+<span class="fc bfc" id="L273" title="All 2 branches covered.">		if (!StringUtils.hasLength(etag)) {</span>
+<span class="fc" id="L274">			return false;</span>
+		}
+
+		Enumeration&lt;String&gt; ifNoneMatch;
+		try {
+<span class="fc" id="L279">			ifNoneMatch = getRequest().getHeaders(IF_NONE_MATCH);</span>
+		}
+<span class="nc" id="L281">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L282">			return false;</span>
+<span class="fc" id="L283">		}</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">		if (!ifNoneMatch.hasMoreElements()) {</span>
+<span class="nc" id="L285">			return false;</span>
+		}
+
+		// We will perform this validation...
+<span class="fc" id="L289">		etag = padEtagIfNecessary(etag);</span>
+<span class="fc bfc" id="L290" title="All 2 branches covered.">		if (etag.startsWith(&quot;W/&quot;)) {</span>
+<span class="fc" id="L291">			etag = etag.substring(2);</span>
+		}
+<span class="fc bfc" id="L293" title="All 2 branches covered.">		while (ifNoneMatch.hasMoreElements()) {</span>
+<span class="fc" id="L294">			String clientETags = ifNoneMatch.nextElement();</span>
+<span class="fc" id="L295">			Matcher etagMatcher = ETAG_HEADER_VALUE_PATTERN.matcher(clientETags);</span>
+			// Compare weak/strong ETags as per https://tools.ietf.org/html/rfc7232#section-2.3
+<span class="fc bfc" id="L297" title="All 2 branches covered.">			while (etagMatcher.find()) {</span>
+<span class="pc bpc" id="L298" title="1 of 4 branches missed.">				if (StringUtils.hasLength(etagMatcher.group()) &amp;&amp; etag.equals(etagMatcher.group(3))) {</span>
+<span class="fc" id="L299">					this.notModified = true;</span>
+<span class="fc" id="L300">					break;</span>
+				}
+			}
+<span class="fc" id="L303">		}</span>
+
+<span class="fc" id="L305">		return true;</span>
+	}
+
+	private String padEtagIfNecessary(String etag) {
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">		if (!StringUtils.hasLength(etag)) {</span>
+<span class="nc" id="L310">			return etag;</span>
+		}
+<span class="pc bpc" id="L312" title="1 of 6 branches missed.">		if ((etag.startsWith(&quot;\&quot;&quot;) || etag.startsWith(&quot;W/\&quot;&quot;)) &amp;&amp; etag.endsWith(&quot;\&quot;&quot;)) {</span>
+<span class="fc" id="L313">			return etag;</span>
+		}
+<span class="fc" id="L315">		return &quot;\&quot;&quot; + etag + &quot;\&quot;&quot;;</span>
+	}
+
+	private boolean validateIfModifiedSince(long lastModifiedTimestamp) {
+<span class="pc bpc" id="L319" title="1 of 2 branches missed.">		if (lastModifiedTimestamp &lt; 0) {</span>
+<span class="nc" id="L320">			return false;</span>
+		}
+<span class="fc" id="L322">		long ifModifiedSince = parseDateHeader(IF_MODIFIED_SINCE);</span>
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">		if (ifModifiedSince == -1) {</span>
+<span class="nc" id="L324">			return false;</span>
+		}
+		// We will perform this validation...
+<span class="fc bfc" id="L327" title="All 2 branches covered.">		this.notModified = ifModifiedSince &gt;= (lastModifiedTimestamp / 1000 * 1000);</span>
+<span class="fc" id="L328">		return true;</span>
+	}
+
+	public boolean isNotModified() {
+<span class="nc" id="L332">		return this.notModified;</span>
+	}
+
+	private long parseDateHeader(String headerName) {
+<span class="fc" id="L336">		long dateValue = -1;</span>
+		try {
+<span class="fc" id="L338">			dateValue = getRequest().getDateHeader(headerName);</span>
+		}
+<span class="nc" id="L340">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L341">			String headerValue = getHeader(headerName);</span>
+			// Possibly an IE 10 style value: &quot;Wed, 09 Apr 2014 09:57:42 GMT; length=13774&quot;
+<span class="nc bnc" id="L343" title="All 2 branches missed.">			if (headerValue != null) {</span>
+<span class="nc" id="L344">				int separatorIndex = headerValue.indexOf(';');</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">				if (separatorIndex != -1) {</span>
+<span class="nc" id="L346">					String datePart = headerValue.substring(0, separatorIndex);</span>
+<span class="nc" id="L347">					dateValue = parseDateValue(datePart);</span>
+				}
+			}
+<span class="fc" id="L350">		}</span>
+<span class="fc" id="L351">		return dateValue;</span>
+	}
+
+	private long parseDateValue(@Nullable String headerValue) {
+<span class="fc bfc" id="L355" title="All 2 branches covered.">		if (headerValue == null) {</span>
+			// No header value sent at all
+<span class="fc" id="L357">			return -1;</span>
+		}
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">		if (headerValue.length() &gt;= 3) {</span>
+			// Short &quot;0&quot; or &quot;-1&quot; like values are never valid HTTP date headers...
+			// Let's only bother with SimpleDateFormat parsing for long enough values.
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">			for (String dateFormat : DATE_FORMATS) {</span>
+<span class="fc" id="L363">				SimpleDateFormat simpleDateFormat = new SimpleDateFormat(dateFormat, Locale.US);</span>
+<span class="fc" id="L364">				simpleDateFormat.setTimeZone(GMT);</span>
+				try {
+<span class="fc" id="L366">					return simpleDateFormat.parse(headerValue).getTime();</span>
+				}
+<span class="nc" id="L368">				catch (ParseException ex) {</span>
+					// ignore
+				}
+			}
+		}
+<span class="nc" id="L373">		return -1;</span>
+	}
+
+	@Override
+	public String getDescription(boolean includeClientInfo) {
+<span class="nc" id="L378">		HttpServletRequest request = getRequest();</span>
+<span class="nc" id="L379">		StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L380">		sb.append(&quot;uri=&quot;).append(request.getRequestURI());</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">		if (includeClientInfo) {</span>
+<span class="nc" id="L382">			String client = request.getRemoteAddr();</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">			if (StringUtils.hasLength(client)) {</span>
+<span class="nc" id="L384">				sb.append(&quot;;client=&quot;).append(client);</span>
+			}
+<span class="nc" id="L386">			HttpSession session = request.getSession(false);</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">			if (session != null) {</span>
+<span class="nc" id="L388">				sb.append(&quot;;session=&quot;).append(session.getId());</span>
+			}
+<span class="nc" id="L390">			String user = request.getRemoteUser();</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">			if (StringUtils.hasLength(user)) {</span>
+<span class="nc" id="L392">				sb.append(&quot;;user=&quot;).append(user);</span>
+			}
+		}
+<span class="nc" id="L395">		return sb.toString();</span>
+	}
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L401">		return &quot;ServletWebRequest: &quot; + getDescription(true);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

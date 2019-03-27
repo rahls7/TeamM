@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AppCacheManifestTransformer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.resource</a> &gt; <span class="el_source">AppCacheManifestTransformer.java</span></div><h1>AppCacheManifestTransformer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.resource;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Scanner;
+import java.util.function.Consumer;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.SynchronousSink;
+
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.lang.Nullable;
+import org.springframework.util.DigestUtils;
+import org.springframework.util.StreamUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * A {@link ResourceTransformer} HTML5 AppCache manifests.
+ *
+ * &lt;p&gt;This transformer:
+ * &lt;ul&gt;
+ * &lt;li&gt;modifies links to match the public URL paths that should be exposed to
+ * clients, using configured {@code ResourceResolver} strategies
+ * &lt;li&gt;appends a comment in the manifest, containing a Hash
+ * (e.g. &quot;# Hash: 9de0f09ed7caf84e885f1f0f11c7e326&quot;), thus changing the content
+ * of the manifest in order to trigger an appcache reload in the browser.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;All files with an &quot;.appcache&quot; file extension (or the extension given
+ * to the constructor) will be transformed by this class. The hash is computed
+ * using the content of the appcache manifest so that changes in the manifest
+ * should invalidate the browser cache. This should also work with changes in
+ * referenced resources whose links are also versioned.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @since 5.0
+ * @see &lt;a href=&quot;https://html.spec.whatwg.org/multipage/browsers.html#offline&quot;&gt;HTML5 offline applications spec&lt;/a&gt;
+ */
+public class AppCacheManifestTransformer extends ResourceTransformerSupport {
+
+<span class="fc" id="L71">	private static final Collection&lt;String&gt; MANIFEST_SECTION_HEADERS =</span>
+<span class="fc" id="L72">			Arrays.asList(&quot;CACHE MANIFEST&quot;, &quot;NETWORK:&quot;, &quot;FALLBACK:&quot;, &quot;CACHE:&quot;);</span>
+
+	private static final String MANIFEST_HEADER = &quot;CACHE MANIFEST&quot;;
+
+	private static final String CACHE_HEADER = &quot;CACHE:&quot;;
+
+<span class="fc" id="L78">	private static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;</span>
+
+<span class="fc" id="L80">	private static final Log logger = LogFactory.getLog(AppCacheManifestTransformer.class);</span>
+
+
+	private final String fileExtension;
+
+
+	/**
+	 * Create an AppCacheResourceTransformer that transforms files with extension &quot;.appcache&quot;.
+	 */
+	public AppCacheManifestTransformer() {
+<span class="fc" id="L90">		this(&quot;appcache&quot;);</span>
+<span class="fc" id="L91">	}</span>
+
+	/**
+	 * Create an AppCacheResourceTransformer that transforms files with the extension
+	 * given as a parameter.
+	 */
+<span class="fc" id="L97">	public AppCacheManifestTransformer(String fileExtension) {</span>
+<span class="fc" id="L98">		this.fileExtension = fileExtension;</span>
+<span class="fc" id="L99">	}</span>
+
+
+	@Override
+	public Mono&lt;Resource&gt; transform(ServerWebExchange exchange, Resource inputResource,
+			ResourceTransformerChain chain) {
+
+<span class="fc" id="L106">		return chain.transform(exchange, inputResource)</span>
+<span class="fc" id="L107">				.flatMap(outputResource -&gt; {</span>
+<span class="fc" id="L108">					String name = outputResource.getFilename();</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">					if (!this.fileExtension.equals(StringUtils.getFilenameExtension(name))) {</span>
+<span class="fc" id="L110">						return Mono.just(outputResource);</span>
+					}
+<span class="fc" id="L112">					DataBufferFactory bufferFactory = exchange.getResponse().bufferFactory();</span>
+<span class="fc" id="L113">					Flux&lt;DataBuffer&gt; flux = DataBufferUtils</span>
+<span class="fc" id="L114">							.read(outputResource, bufferFactory, StreamUtils.BUFFER_SIZE);</span>
+<span class="fc" id="L115">					return DataBufferUtils.join(flux)</span>
+<span class="fc" id="L116">							.flatMap(dataBuffer -&gt; {</span>
+<span class="fc" id="L117">								CharBuffer charBuffer = DEFAULT_CHARSET.decode(dataBuffer.asByteBuffer());</span>
+<span class="fc" id="L118">								DataBufferUtils.release(dataBuffer);</span>
+<span class="fc" id="L119">								String content = charBuffer.toString();</span>
+<span class="fc" id="L120">								return transform(content, outputResource, chain, exchange);</span>
+							});
+				});
+	}
+
+	private Mono&lt;? extends Resource&gt; transform(String content, Resource resource,
+			ResourceTransformerChain chain, ServerWebExchange exchange) {
+
+<span class="fc bfc" id="L128" title="All 2 branches covered.">		if (!content.startsWith(MANIFEST_HEADER)) {</span>
+<span class="pc bpc" id="L129" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L130">				logger.trace(exchange.getLogPrefix() +</span>
+						&quot;Skipping &quot; + resource + &quot;: Manifest does not start with 'CACHE MANIFEST'&quot;);
+			}
+<span class="fc" id="L133">			return Mono.just(resource);</span>
+		}
+<span class="fc" id="L135">		return Flux.generate(new LineInfoGenerator(content))</span>
+<span class="fc" id="L136">				.concatMap(info -&gt; processLine(info, exchange, resource, chain))</span>
+<span class="fc" id="L137">				.reduce(new ByteArrayOutputStream(), (out, line) -&gt; {</span>
+<span class="fc" id="L138">					writeToByteArrayOutputStream(out, line + &quot;\n&quot;);</span>
+<span class="fc" id="L139">					return out;</span>
+				})
+<span class="fc" id="L141">				.map(out -&gt; {</span>
+<span class="fc" id="L142">					String hash = DigestUtils.md5DigestAsHex(out.toByteArray());</span>
+<span class="fc" id="L143">					writeToByteArrayOutputStream(out, &quot;\n&quot; + &quot;# Hash: &quot; + hash);</span>
+<span class="fc" id="L144">					return new TransformedResource(resource, out.toByteArray());</span>
+				});
+	}
+
+	private static void writeToByteArrayOutputStream(ByteArrayOutputStream out, String toWrite) {
+		try {
+<span class="fc" id="L150">			byte[] bytes = toWrite.getBytes(DEFAULT_CHARSET);</span>
+<span class="fc" id="L151">			out.write(bytes);</span>
+		}
+<span class="nc" id="L153">		catch (IOException ex) {</span>
+<span class="nc" id="L154">			throw Exceptions.propagate(ex);</span>
+<span class="fc" id="L155">		}</span>
+<span class="fc" id="L156">	}</span>
+
+	private Mono&lt;String&gt; processLine(LineInfo info, ServerWebExchange exchange,
+			Resource resource, ResourceTransformerChain chain) {
+
+<span class="fc bfc" id="L161" title="All 2 branches covered.">		if (!info.isLink()) {</span>
+<span class="fc" id="L162">			return Mono.just(info.getLine());</span>
+		}
+
+<span class="fc" id="L165">		String link = toAbsolutePath(info.getLine(), exchange);</span>
+<span class="fc" id="L166">		return resolveUrlPath(link, exchange, resource, chain);</span>
+	}
+
+
+	private static class LineInfoGenerator implements Consumer&lt;SynchronousSink&lt;LineInfo&gt;&gt; {
+
+		private final Scanner scanner;
+
+		@Nullable
+		private LineInfo previous;
+
+
+<span class="fc" id="L178">		LineInfoGenerator(String content) {</span>
+<span class="fc" id="L179">			this.scanner = new Scanner(content);</span>
+<span class="fc" id="L180">		}</span>
+
+
+		@Override
+		public void accept(SynchronousSink&lt;LineInfo&gt; sink) {
+<span class="fc bfc" id="L185" title="All 2 branches covered.">			if (this.scanner.hasNext()) {</span>
+<span class="fc" id="L186">				String line = this.scanner.nextLine();</span>
+<span class="fc" id="L187">				LineInfo current = new LineInfo(line, this.previous);</span>
+<span class="fc" id="L188">				sink.next(current);</span>
+<span class="fc" id="L189">				this.previous = current;</span>
+<span class="fc" id="L190">			}</span>
+			else {
+<span class="fc" id="L192">				sink.complete();</span>
+			}
+<span class="fc" id="L194">		}</span>
+	}
+
+
+	private static class LineInfo {
+
+		private final String line;
+
+		private final boolean cacheSection;
+
+		private final boolean link;
+
+
+<span class="fc" id="L207">		LineInfo(String line, @Nullable LineInfo previousLine) {</span>
+<span class="fc" id="L208">			this.line = line;</span>
+<span class="fc" id="L209">			this.cacheSection = initCacheSectionFlag(line, previousLine);</span>
+<span class="fc" id="L210">			this.link = iniLinkFlag(line, this.cacheSection);</span>
+<span class="fc" id="L211">		}</span>
+
+
+		private static boolean initCacheSectionFlag(String line, @Nullable LineInfo previousLine) {
+<span class="fc bfc" id="L215" title="All 2 branches covered.">			if (MANIFEST_SECTION_HEADERS.contains(line.trim())) {</span>
+<span class="fc" id="L216">				return line.trim().equals(CACHE_HEADER);</span>
+			}
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">			else if (previousLine != null) {</span>
+<span class="fc" id="L219">				return previousLine.isCacheSection();</span>
+			}
+<span class="nc" id="L221">			throw new IllegalStateException(</span>
+					&quot;Manifest does not start with &quot; + MANIFEST_HEADER + &quot;: &quot; + line);
+		}
+
+		private static boolean iniLinkFlag(String line, boolean isCacheSection) {
+<span class="pc bpc" id="L226" title="1 of 6 branches missed.">			return (isCacheSection &amp;&amp; StringUtils.hasText(line) &amp;&amp; !line.startsWith(&quot;#&quot;)</span>
+<span class="fc bfc" id="L227" title="All 4 branches covered.">					&amp;&amp; !line.startsWith(&quot;//&quot;) &amp;&amp; !hasScheme(line));</span>
+		}
+
+		private static boolean hasScheme(String line) {
+<span class="fc" id="L231">			int index = line.indexOf(':');</span>
+<span class="pc bpc" id="L232" title="2 of 6 branches missed.">			return (line.startsWith(&quot;//&quot;) || (index &gt; 0 &amp;&amp; !line.substring(0, index).contains(&quot;/&quot;)));</span>
+		}
+
+
+		public String getLine() {
+<span class="fc" id="L237">			return this.line;</span>
+		}
+
+		public boolean isCacheSection() {
+<span class="fc" id="L241">			return this.cacheSection;</span>
+		}
+
+		public boolean isLink() {
+<span class="fc" id="L245">			return this.link;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

@@ -1,0 +1,335 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractContextLoader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.support</a> &gt; <span class="el_source">AbstractContextLoader.java</span></div><h1>AbstractContextLoader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.support;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextException;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.GenericTypeResolver;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.env.PropertySource;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.test.context.ContextConfigurationAttributes;
+import org.springframework.test.context.ContextCustomizer;
+import org.springframework.test.context.ContextLoader;
+import org.springframework.test.context.MergedContextConfiguration;
+import org.springframework.test.context.SmartContextLoader;
+import org.springframework.test.context.util.TestContextResourceUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ResourceUtils;
+
+/**
+ * Abstract application context loader that provides a basis for all concrete
+ * implementations of the {@link ContextLoader} SPI. Provides a
+ * &lt;em&gt;Template Method&lt;/em&gt; based approach for {@link #processLocations processing}
+ * resource locations.
+ *
+ * &lt;p&gt;As of Spring 3.1, {@code AbstractContextLoader} also provides a basis
+ * for all concrete implementations of the {@link SmartContextLoader} SPI. For
+ * backwards compatibility with the {@code ContextLoader} SPI,
+ * {@link #processContextConfiguration(ContextConfigurationAttributes)} delegates
+ * to {@link #processLocations(Class, String...)}.
+ *
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @author Phillip Webb
+ * @since 2.5
+ * @see #generateDefaultLocations
+ * @see #getResourceSuffixes
+ * @see #modifyLocations
+ * @see #prepareContext
+ * @see #customizeContext
+ */
+<span class="fc" id="L68">public abstract class AbstractContextLoader implements SmartContextLoader {</span>
+
+<span class="fc" id="L70">	private static final String[] EMPTY_STRING_ARRAY = new String[0];</span>
+
+<span class="fc" id="L72">	private static final Log logger = LogFactory.getLog(AbstractContextLoader.class);</span>
+
+
+	// SmartContextLoader
+
+	/**
+	 * For backwards compatibility with the {@link ContextLoader} SPI, the
+	 * default implementation simply delegates to {@link #processLocations(Class, String...)},
+	 * passing it the {@link ContextConfigurationAttributes#getDeclaringClass()
+	 * declaring class} and {@link ContextConfigurationAttributes#getLocations()
+	 * resource locations} retrieved from the supplied
+	 * {@link ContextConfigurationAttributes configuration attributes}. The
+	 * processed locations are then
+	 * {@link ContextConfigurationAttributes#setLocations(String[]) set} in
+	 * the supplied configuration attributes.
+	 * &lt;p&gt;Can be overridden in subclasses &amp;mdash; for example, to process
+	 * annotated classes instead of resource locations.
+	 * @since 3.1
+	 * @see #processLocations(Class, String...)
+	 */
+	@Override
+	public void processContextConfiguration(ContextConfigurationAttributes configAttributes) {
+<span class="fc" id="L94">		String[] processedLocations =</span>
+<span class="fc" id="L95">				processLocations(configAttributes.getDeclaringClass(), configAttributes.getLocations());</span>
+<span class="fc" id="L96">		configAttributes.setLocations(processedLocations);</span>
+<span class="fc" id="L97">	}</span>
+
+	/**
+	 * Prepare the {@link ConfigurableApplicationContext} created by this
+	 * {@code SmartContextLoader} &lt;i&gt;before&lt;/i&gt; bean definitions are read.
+	 * &lt;p&gt;The default implementation:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Sets the &lt;em&gt;active bean definition profiles&lt;/em&gt; from the supplied
+	 * {@code MergedContextConfiguration} in the
+	 * {@link org.springframework.core.env.Environment Environment} of the
+	 * context.&lt;/li&gt;
+	 * &lt;li&gt;Adds {@link PropertySource PropertySources} for all
+	 * {@linkplain MergedContextConfiguration#getPropertySourceLocations()
+	 * resource locations} and
+	 * {@linkplain MergedContextConfiguration#getPropertySourceProperties()
+	 * inlined properties} from the supplied {@code MergedContextConfiguration}
+	 * to the {@code Environment} of the context.&lt;/li&gt;
+	 * &lt;li&gt;Determines what (if any) context initializer classes have been supplied
+	 * via the {@code MergedContextConfiguration} and instantiates and
+	 * {@linkplain ApplicationContextInitializer#initialize invokes} each with the
+	 * given application context.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Any {@code ApplicationContextInitializers} implementing
+	 * {@link org.springframework.core.Ordered Ordered} or annotated with {@link
+	 * org.springframework.core.annotation.Order @Order} will be sorted appropriately.&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * &lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * @param context the newly created application context
+	 * @param mergedConfig the merged context configuration
+	 * @since 3.2
+	 * @see TestPropertySourceUtils#addPropertiesFilesToEnvironment
+	 * @see TestPropertySourceUtils#addInlinedPropertiesToEnvironment
+	 * @see ApplicationContextInitializer#initialize(ConfigurableApplicationContext)
+	 * @see #loadContext(MergedContextConfiguration)
+	 * @see ConfigurableApplicationContext#setId
+	 */
+	protected void prepareContext(ConfigurableApplicationContext context, MergedContextConfiguration mergedConfig) {
+<span class="fc" id="L135">		context.getEnvironment().setActiveProfiles(mergedConfig.getActiveProfiles());</span>
+<span class="fc" id="L136">		TestPropertySourceUtils.addPropertiesFilesToEnvironment(context, mergedConfig.getPropertySourceLocations());</span>
+<span class="fc" id="L137">		TestPropertySourceUtils.addInlinedPropertiesToEnvironment(context, mergedConfig.getPropertySourceProperties());</span>
+<span class="fc" id="L138">		invokeApplicationContextInitializers(context, mergedConfig);</span>
+<span class="fc" id="L139">	}</span>
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private void invokeApplicationContextInitializers(ConfigurableApplicationContext context,
+			MergedContextConfiguration mergedConfig) {
+
+<span class="fc" id="L145">		Set&lt;Class&lt;? extends ApplicationContextInitializer&lt;?&gt;&gt;&gt; initializerClasses =</span>
+<span class="fc" id="L146">				mergedConfig.getContextInitializerClasses();</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">		if (initializerClasses.isEmpty()) {</span>
+			// no ApplicationContextInitializers have been declared -&gt; nothing to do
+<span class="fc" id="L149">			return;</span>
+		}
+
+<span class="fc" id="L152">		List&lt;ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;&gt; initializerInstances = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L153">		Class&lt;?&gt; contextClass = context.getClass();</span>
+
+<span class="fc bfc" id="L155" title="All 2 branches covered.">		for (Class&lt;? extends ApplicationContextInitializer&lt;?&gt;&gt; initializerClass : initializerClasses) {</span>
+<span class="fc" id="L156">			Class&lt;?&gt; initializerContextClass =</span>
+<span class="fc" id="L157">					GenericTypeResolver.resolveTypeArgument(initializerClass, ApplicationContextInitializer.class);</span>
+<span class="pc bpc" id="L158" title="2 of 4 branches missed.">			if (initializerContextClass != null &amp;&amp; !initializerContextClass.isInstance(context)) {</span>
+<span class="nc" id="L159">				throw new ApplicationContextException(String.format(</span>
+						&quot;Could not apply context initializer [%s] since its generic parameter [%s] &quot; +
+						&quot;is not assignable from the type of application context used by this &quot; +
+<span class="nc" id="L162">						&quot;context loader: [%s]&quot;, initializerClass.getName(), initializerContextClass.getName(),</span>
+<span class="nc" id="L163">						contextClass.getName()));</span>
+			}
+<span class="fc" id="L165">			initializerInstances.add((ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt;) BeanUtils.instantiateClass(initializerClass));</span>
+<span class="fc" id="L166">		}</span>
+
+<span class="fc" id="L168">		AnnotationAwareOrderComparator.sort(initializerInstances);</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">		for (ApplicationContextInitializer&lt;ConfigurableApplicationContext&gt; initializer : initializerInstances) {</span>
+<span class="fc" id="L170">			initializer.initialize(context);</span>
+<span class="fc" id="L171">		}</span>
+<span class="fc" id="L172">	}</span>
+
+	/**
+	 * Customize the {@link ConfigurableApplicationContext} created by this
+	 * {@code ContextLoader} &lt;em&gt;after&lt;/em&gt; bean definitions have been loaded
+	 * into the context but &lt;em&gt;before&lt;/em&gt; the context has been refreshed.
+	 * &lt;p&gt;The default implementation delegates to all
+	 * {@link MergedContextConfiguration#getContextCustomizers context customizers}
+	 * that have been registered with the supplied {@code mergedConfig}.
+	 * @param context the newly created application context
+	 * @param mergedConfig the merged context configuration
+	 * @since 4.3
+	 */
+	protected void customizeContext(ConfigurableApplicationContext context, MergedContextConfiguration mergedConfig) {
+<span class="fc bfc" id="L186" title="All 2 branches covered.">		for (ContextCustomizer contextCustomizer : mergedConfig.getContextCustomizers()) {</span>
+<span class="fc" id="L187">			contextCustomizer.customizeContext(context, mergedConfig);</span>
+<span class="fc" id="L188">		}</span>
+<span class="fc" id="L189">	}</span>
+
+
+	// ContextLoader
+
+	/**
+	 * If the supplied {@code locations} are {@code null} or &lt;em&gt;empty&lt;/em&gt;
+	 * and {@link #isGenerateDefaultLocations()} returns {@code true},
+	 * default locations will be {@link #generateDefaultLocations(Class)
+	 * generated} (i.e., detected) for the specified {@link Class class}
+	 * and the configured {@linkplain #getResourceSuffixes() resource suffixes};
+	 * otherwise, the supplied {@code locations} will be
+	 * {@linkplain #modifyLocations modified} if necessary and returned.
+	 * @param clazz the class with which the locations are associated: to be
+	 * used when generating default locations
+	 * @param locations the unmodified locations to use for loading the
+	 * application context (can be {@code null} or empty)
+	 * @return a processed array of application context resource locations
+	 * @since 2.5
+	 * @see #isGenerateDefaultLocations()
+	 * @see #generateDefaultLocations(Class)
+	 * @see #modifyLocations(Class, String...)
+	 * @see org.springframework.test.context.ContextLoader#processLocations(Class, String...)
+	 * @see #processContextConfiguration(ContextConfigurationAttributes)
+	 */
+	@Override
+	public final String[] processLocations(Class&lt;?&gt; clazz, String... locations) {
+<span class="pc bpc" id="L216" title="1 of 4 branches missed.">		return (ObjectUtils.isEmpty(locations) &amp;&amp; isGenerateDefaultLocations()) ?</span>
+<span class="fc" id="L217">				generateDefaultLocations(clazz) : modifyLocations(clazz, locations);</span>
+	}
+
+	/**
+	 * Generate the default classpath resource locations array based on the
+	 * supplied class.
+	 * &lt;p&gt;For example, if the supplied class is {@code com.example.MyTest},
+	 * the generated locations will contain a single string with a value of
+	 * {@code &quot;classpath:com/example/MyTest&lt;suffix&gt;&quot;}, where {@code &lt;suffix&gt;}
+	 * is the value of the first configured
+	 * {@linkplain #getResourceSuffixes() resource suffix} for which the
+	 * generated location actually exists in the classpath.
+	 * &lt;p&gt;As of Spring 3.1, the implementation of this method adheres to the
+	 * contract defined in the {@link SmartContextLoader} SPI. Specifically,
+	 * this method will &lt;em&gt;preemptively&lt;/em&gt; verify that the generated default
+	 * location actually exists. If it does not exist, this method will log a
+	 * warning and return an empty array.
+	 * &lt;p&gt;Subclasses can override this method to implement a different
+	 * &lt;em&gt;default location generation&lt;/em&gt; strategy.
+	 * @param clazz the class for which the default locations are to be generated
+	 * @return an array of default application context resource locations
+	 * @since 2.5
+	 * @see #getResourceSuffixes()
+	 */
+	protected String[] generateDefaultLocations(Class&lt;?&gt; clazz) {
+<span class="fc" id="L242">		Assert.notNull(clazz, &quot;Class must not be null&quot;);</span>
+
+<span class="fc" id="L244">		String[] suffixes = getResourceSuffixes();</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">		for (String suffix : suffixes) {</span>
+<span class="fc" id="L246">			Assert.hasText(suffix, &quot;Resource suffix must not be empty&quot;);</span>
+<span class="fc" id="L247">			String resourcePath = ClassUtils.convertClassNameToResourcePath(clazz.getName()) + suffix;</span>
+<span class="fc" id="L248">			String prefixedResourcePath = ResourceUtils.CLASSPATH_URL_PREFIX + resourcePath;</span>
+<span class="fc" id="L249">			ClassPathResource classPathResource = new ClassPathResource(resourcePath);</span>
+<span class="fc bfc" id="L250" title="All 2 branches covered.">			if (classPathResource.exists()) {</span>
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">				if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L252">					logger.info(String.format(&quot;Detected default resource location \&quot;%s\&quot; for test class [%s]&quot;,</span>
+<span class="nc" id="L253">							prefixedResourcePath, clazz.getName()));</span>
+				}
+<span class="fc" id="L255">				return new String[] {prefixedResourcePath};</span>
+			}
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L258">				logger.debug(String.format(&quot;Did not detect default resource location for test class [%s]: &quot; +</span>
+<span class="nc" id="L259">						&quot;%s does not exist&quot;, clazz.getName(), classPathResource));</span>
+			}
+		}
+
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">		if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L264">			logger.info(String.format(&quot;Could not detect default resource locations for test class [%s]: &quot; +</span>
+<span class="nc" id="L265">					&quot;no resource found for suffixes %s.&quot;, clazz.getName(), ObjectUtils.nullSafeToString(suffixes)));</span>
+		}
+
+<span class="fc" id="L268">		return EMPTY_STRING_ARRAY;</span>
+	}
+
+	/**
+	 * Generate a modified version of the supplied locations array and return it.
+	 * &lt;p&gt;The default implementation simply delegates to
+	 * {@link TestContextResourceUtils#convertToClasspathResourcePaths}.
+	 * &lt;p&gt;Subclasses can override this method to implement a different
+	 * &lt;em&gt;location modification&lt;/em&gt; strategy.
+	 * @param clazz the class with which the locations are associated
+	 * @param locations the resource locations to be modified
+	 * @return an array of modified application context resource locations
+	 * @since 2.5
+	 */
+	protected String[] modifyLocations(Class&lt;?&gt; clazz, String... locations) {
+<span class="fc" id="L283">		return TestContextResourceUtils.convertToClasspathResourcePaths(clazz, locations);</span>
+	}
+
+	/**
+	 * Determine whether or not &lt;em&gt;default&lt;/em&gt; resource locations should be
+	 * generated if the {@code locations} provided to
+	 * {@link #processLocations(Class, String...)} are {@code null} or empty.
+	 * &lt;p&gt;As of Spring 3.1, the semantics of this method have been overloaded
+	 * to include detection of either default resource locations or default
+	 * configuration classes. Consequently, this method can also be used to
+	 * determine whether or not &lt;em&gt;default&lt;/em&gt; configuration classes should be
+	 * detected if the {@code classes} present in the
+	 * {@link ContextConfigurationAttributes configuration attributes} supplied
+	 * to {@link #processContextConfiguration(ContextConfigurationAttributes)}
+	 * are {@code null} or empty.
+	 * &lt;p&gt;Can be overridden by subclasses to change the default behavior.
+	 * @return always {@code true} by default
+	 * @since 2.5
+	 */
+	protected boolean isGenerateDefaultLocations() {
+<span class="fc" id="L303">		return true;</span>
+	}
+
+	/**
+	 * Get the suffixes to append to {@link ApplicationContext} resource locations
+	 * when detecting default locations.
+	 * &lt;p&gt;The default implementation simply wraps the value returned by
+	 * {@link #getResourceSuffix()} in a single-element array, but this
+	 * can be overridden by subclasses in order to support multiple suffixes.
+	 * @return the resource suffixes; never {@code null} or empty
+	 * @since 4.1
+	 * @see #generateDefaultLocations(Class)
+	 */
+	protected String[] getResourceSuffixes() {
+<span class="fc" id="L317">		return new String[] {getResourceSuffix()};</span>
+	}
+
+	/**
+	 * Get the suffix to append to {@link ApplicationContext} resource locations
+	 * when detecting default locations.
+	 * &lt;p&gt;Subclasses must provide an implementation of this method that returns
+	 * a single suffix. Alternatively subclasses may provide a  &lt;em&gt;no-op&lt;/em&gt;
+	 * implementation of this method and override {@link #getResourceSuffixes()}
+	 * in order to provide multiple custom suffixes.
+	 * @return the resource suffix; never {@code null} or empty
+	 * @since 2.5
+	 * @see #generateDefaultLocations(Class)
+	 * @see #getResourceSuffixes()
+	 */
+	protected abstract String getResourceSuffix();
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

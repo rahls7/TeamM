@@ -1,0 +1,626 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractSockJsService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-websocket</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.sockjs.support</a> &gt; <span class="el_source">AbstractSockJsService.java</span></div><h1>AbstractSockJsService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.sockjs.support;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import javax.servlet.http.HttpServletRequest;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.InvalidMediaTypeException;
+import org.springframework.http.MediaType;
+import org.springframework.http.server.ServerHttpRequest;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.lang.Nullable;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.DigestUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.CorsUtils;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.sockjs.SockJsException;
+import org.springframework.web.socket.sockjs.SockJsService;
+import org.springframework.web.util.WebUtils;
+
+/**
+ * An abstract base class for {@link SockJsService} implementations that provides SockJS
+ * path resolution and handling of static SockJS requests (e.g. &quot;/info&quot;, &quot;/iframe.html&quot;,
+ * etc). Sub-classes must handle session URLs (i.e. transport-specific requests).
+ *
+ * By default, only same origin requests are allowed. Use {@link #setAllowedOrigins}
+ * to specify a list of allowed origins (a list containing &quot;*&quot; will allow all origins).
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @since 4.0
+ */
+public abstract class AbstractSockJsService implements SockJsService, CorsConfigurationSource {
+
+<span class="fc" id="L71">	private static final long ONE_YEAR = TimeUnit.DAYS.toSeconds(365);</span>
+
+<span class="fc" id="L73">	private static final Random random = new Random();</span>
+
+	private static final String XFRAME_OPTIONS_HEADER = &quot;X-Frame-Options&quot;;
+
+<span class="fc" id="L77">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	private final TaskScheduler taskScheduler;
+
+<span class="fc" id="L81">	private String name = &quot;SockJSService@&quot; + ObjectUtils.getIdentityHexString(this);</span>
+
+<span class="fc" id="L83">	private String clientLibraryUrl = &quot;https://cdn.jsdelivr.net/sockjs/1.0.0/sockjs.min.js&quot;;</span>
+
+<span class="fc" id="L85">	private int streamBytesLimit = 128 * 1024;</span>
+
+<span class="fc" id="L87">	private boolean sessionCookieNeeded = true;</span>
+
+<span class="fc" id="L89">	private long heartbeatTime = TimeUnit.SECONDS.toMillis(25);</span>
+
+<span class="fc" id="L91">	private long disconnectDelay = TimeUnit.SECONDS.toMillis(5);</span>
+
+<span class="fc" id="L93">	private int httpMessageCacheSize = 100;</span>
+
+<span class="fc" id="L95">	private boolean webSocketEnabled = true;</span>
+
+<span class="fc" id="L97">	private boolean suppressCors = false;</span>
+
+<span class="fc" id="L99">	protected final Set&lt;String&gt; allowedOrigins = new LinkedHashSet&lt;&gt;();</span>
+
+<span class="fc" id="L101">	private final SockJsRequestHandler infoHandler = new InfoHandler();</span>
+
+<span class="fc" id="L103">	private final SockJsRequestHandler iframeHandler = new IframeHandler();</span>
+
+
+<span class="fc" id="L106">	public AbstractSockJsService(TaskScheduler scheduler) {</span>
+<span class="fc" id="L107">		Assert.notNull(scheduler, &quot;TaskScheduler must not be null&quot;);</span>
+<span class="fc" id="L108">		this.taskScheduler = scheduler;</span>
+<span class="fc" id="L109">	}</span>
+
+
+	/**
+	 * A scheduler instance to use for scheduling heart-beat messages.
+	 */
+	public TaskScheduler getTaskScheduler() {
+<span class="fc" id="L116">		return this.taskScheduler;</span>
+	}
+
+	/**
+	 * Set a unique name for this service (mainly for logging purposes).
+	 */
+	public void setName(String name) {
+<span class="fc" id="L123">		this.name = name;</span>
+<span class="fc" id="L124">	}</span>
+
+	/**
+	 * Return the unique name associated with this service.
+	 */
+	public String getName() {
+<span class="fc" id="L130">		return this.name;</span>
+	}
+
+	/**
+	 * Transports with no native cross-domain communication (e.g. &quot;eventsource&quot;,
+	 * &quot;htmlfile&quot;) must get a simple page from the &quot;foreign&quot; domain in an invisible
+	 * iframe so that code in the iframe can run from  a domain local to the SockJS
+	 * server. Since the iframe needs to load the SockJS javascript client library,
+	 * this property allows specifying where to load it from.
+	 * &lt;p&gt;By default this is set to point to
+	 * &quot;https://cdn.jsdelivr.net/sockjs/1.0.0/sockjs.min.js&quot;.
+	 * However, it can also be set to point to a URL served by the application.
+	 * &lt;p&gt;Note that it's possible to specify a relative URL in which case the URL
+	 * must be relative to the iframe URL. For example assuming a SockJS endpoint
+	 * mapped to &quot;/sockjs&quot;, and resulting iframe URL &quot;/sockjs/iframe.html&quot;, then the
+	 * the relative URL must start with &quot;../../&quot; to traverse up to the location
+	 * above the SockJS mapping. In case of a prefix-based Servlet mapping one more
+	 * traversal may be needed.
+	 */
+	public void setSockJsClientLibraryUrl(String clientLibraryUrl) {
+<span class="fc" id="L150">		this.clientLibraryUrl = clientLibraryUrl;</span>
+<span class="fc" id="L151">	}</span>
+
+	/**
+	 * Return he URL to the SockJS JavaScript client library.
+	 */
+	public String getSockJsClientLibraryUrl() {
+<span class="fc" id="L157">		return this.clientLibraryUrl;</span>
+	}
+
+	/**
+	 * Streaming transports save responses on the client side and don't free
+	 * memory used by delivered messages. Such transports need to recycle the
+	 * connection once in a while. This property sets a minimum number of bytes
+	 * that can be sent over a single HTTP streaming request before it will be
+	 * closed. After that client will open a new request. Setting this value to
+	 * one effectively disables streaming and will make streaming transports to
+	 * behave like polling transports.
+	 * &lt;p&gt;The default value is 128K (i.e. 128 * 1024).
+	 */
+	public void setStreamBytesLimit(int streamBytesLimit) {
+<span class="fc" id="L171">		this.streamBytesLimit = streamBytesLimit;</span>
+<span class="fc" id="L172">	}</span>
+
+	/**
+	 * Return the minimum number of bytes that can be sent over a single HTTP
+	 * streaming request before it will be closed.
+	 */
+	public int getStreamBytesLimit() {
+<span class="fc" id="L179">		return this.streamBytesLimit;</span>
+	}
+
+	/**
+	 * The SockJS protocol requires a server to respond to an initial &quot;/info&quot; request from
+	 * clients with a &quot;cookie_needed&quot; boolean property that indicates whether the use of a
+	 * JSESSIONID cookie is required for the application to function correctly, e.g. for
+	 * load balancing or in Java Servlet containers for the use of an HTTP session.
+	 * &lt;p&gt;This is especially important for IE 8,9 that support XDomainRequest -- a modified
+	 * AJAX/XHR -- that can do requests across domains but does not send any cookies. In
+	 * those cases, the SockJS client prefers the &quot;iframe-htmlfile&quot; transport over
+	 * &quot;xdr-streaming&quot; in order to be able to send cookies.
+	 * &lt;p&gt;The SockJS protocol also expects a SockJS service to echo back the JSESSIONID
+	 * cookie when this property is set to true. However, when running in a Servlet
+	 * container this is not necessary since the container takes care of it.
+	 * &lt;p&gt;The default value is &quot;true&quot; to maximize the chance for applications to work
+	 * correctly in IE 8,9 with support for cookies (and the JSESSIONID cookie in
+	 * particular). However, an application can choose to set this to &quot;false&quot; if
+	 * the use of cookies (and HTTP session) is not required.
+	 */
+	public void setSessionCookieNeeded(boolean sessionCookieNeeded) {
+<span class="fc" id="L200">		this.sessionCookieNeeded = sessionCookieNeeded;</span>
+<span class="fc" id="L201">	}</span>
+
+	/**
+	 * Return whether the JSESSIONID cookie is required for the application to function.
+	 */
+	public boolean isSessionCookieNeeded() {
+<span class="fc" id="L207">		return this.sessionCookieNeeded;</span>
+	}
+
+	/**
+	 * Specify the amount of time in milliseconds when the server has not sent
+	 * any messages and after which the server should send a heartbeat frame
+	 * to the client in order to keep the connection from breaking.
+	 * &lt;p&gt;The default value is 25,000 (25 seconds).
+	 */
+	public void setHeartbeatTime(long heartbeatTime) {
+<span class="fc" id="L217">		this.heartbeatTime = heartbeatTime;</span>
+<span class="fc" id="L218">	}</span>
+
+	/**
+	 * Return the amount of time in milliseconds when the server has not sent
+	 * any messages.
+	 */
+	public long getHeartbeatTime() {
+<span class="fc" id="L225">		return this.heartbeatTime;</span>
+	}
+
+	/**
+	 * The amount of time in milliseconds before a client is considered
+	 * disconnected after not having a receiving connection, i.e. an active
+	 * connection over which the server can send data to the client.
+	 * &lt;p&gt;The default value is 5000.
+	 */
+	public void setDisconnectDelay(long disconnectDelay) {
+<span class="fc" id="L235">		this.disconnectDelay = disconnectDelay;</span>
+<span class="fc" id="L236">	}</span>
+
+	/**
+	 * Return the amount of time in milliseconds before a client is considered disconnected.
+	 */
+	public long getDisconnectDelay() {
+<span class="fc" id="L242">		return this.disconnectDelay;</span>
+	}
+
+	/**
+	 * The number of server-to-client messages that a session can cache while waiting
+	 * for the next HTTP polling request from the client. All HTTP transports use this
+	 * property since even streaming transports recycle HTTP requests periodically.
+	 * &lt;p&gt;The amount of time between HTTP requests should be relatively brief and will
+	 * not exceed the allows disconnect delay (see {@link #setDisconnectDelay(long)});
+	 * 5 seconds by default.
+	 * &lt;p&gt;The default size is 100.
+	 */
+	public void setHttpMessageCacheSize(int httpMessageCacheSize) {
+<span class="fc" id="L255">		this.httpMessageCacheSize = httpMessageCacheSize;</span>
+<span class="fc" id="L256">	}</span>
+
+	/**
+	 * Return the size of the HTTP message cache.
+	 */
+	public int getHttpMessageCacheSize() {
+<span class="fc" id="L262">		return this.httpMessageCacheSize;</span>
+	}
+
+	/**
+	 * Some load balancers do not support WebSocket. This option can be used to
+	 * disable the WebSocket transport on the server side.
+	 * &lt;p&gt;The default value is &quot;true&quot;.
+	 */
+	public void setWebSocketEnabled(boolean webSocketEnabled) {
+<span class="fc" id="L271">		this.webSocketEnabled = webSocketEnabled;</span>
+<span class="fc" id="L272">	}</span>
+
+	/**
+	 * Return whether WebSocket transport is enabled.
+	 */
+	public boolean isWebSocketEnabled() {
+<span class="fc" id="L278">		return this.webSocketEnabled;</span>
+	}
+
+	/**
+	 * This option can be used to disable automatic addition of CORS headers for
+	 * SockJS requests.
+	 * &lt;p&gt;The default value is &quot;false&quot;.
+	 * @since 4.1.2
+	 */
+	public void setSuppressCors(boolean suppressCors) {
+<span class="fc" id="L288">		this.suppressCors = suppressCors;</span>
+<span class="fc" id="L289">	}</span>
+
+	/**
+	 * Return if automatic addition of CORS headers has been disabled.
+	 * @since 4.1.2
+	 * @see #setSuppressCors(boolean)
+	 */
+	public boolean shouldSuppressCors() {
+<span class="fc" id="L297">		return this.suppressCors;</span>
+	}
+
+	/**
+	 * Configure allowed {@code Origin} header values. This check is mostly
+	 * designed for browsers. There is nothing preventing other types of client
+	 * to modify the {@code Origin} header value.
+	 * &lt;p&gt;When SockJS is enabled and origins are restricted, transport types
+	 * that do not allow to check request origin (Iframe based transports)
+	 * are disabled. As a consequence, IE 6 to 9 are not supported when origins
+	 * are restricted.
+	 * &lt;p&gt;Each provided allowed origin must have a scheme, and optionally a port
+	 * (e.g. &quot;https://example.org&quot;, &quot;https://example.org:9090&quot;). An allowed origin
+	 * string may also be &quot;*&quot; in which case all origins are allowed.
+	 * @since 4.1.2
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc6454&quot;&gt;RFC 6454: The Web Origin Concept&lt;/a&gt;
+	 * @see &lt;a href=&quot;https://github.com/sockjs/sockjs-client#supported-transports-by-browser-html-served-from-http-or-https&quot;&gt;SockJS supported transports by browser&lt;/a&gt;
+	 */
+	public void setAllowedOrigins(Collection&lt;String&gt; allowedOrigins) {
+<span class="fc" id="L316">		Assert.notNull(allowedOrigins, &quot;Allowed origins Collection must not be null&quot;);</span>
+<span class="fc" id="L317">		this.allowedOrigins.clear();</span>
+<span class="fc" id="L318">		this.allowedOrigins.addAll(allowedOrigins);</span>
+<span class="fc" id="L319">	}</span>
+
+	/**
+	 * Return configure allowed {@code Origin} header values.
+	 * @since 4.1.2
+	 * @see #setAllowedOrigins
+	 */
+	public Collection&lt;String&gt; getAllowedOrigins() {
+<span class="fc" id="L327">		return Collections.unmodifiableSet(this.allowedOrigins);</span>
+	}
+
+
+	/**
+	 * This method determines the SockJS path and handles SockJS static URLs.
+	 * Session URLs and raw WebSocket requests are delegated to abstract methods.
+	 */
+	@Override
+	public final void handleRequest(ServerHttpRequest request, ServerHttpResponse response,
+			@Nullable String sockJsPath, WebSocketHandler wsHandler) throws SockJsException {
+
+<span class="pc bpc" id="L339" title="1 of 2 branches missed.">		if (sockJsPath == null) {</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L341">				logger.warn(&quot;Expected SockJS path. Failing request: &quot; + request.getURI());</span>
+			}
+<span class="nc" id="L343">			response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="nc" id="L344">			return;</span>
+		}
+
+		try {
+<span class="fc" id="L348">			request.getHeaders();</span>
+		}
+<span class="nc" id="L350">		catch (InvalidMediaTypeException ex) {</span>
+			// As per SockJS protocol content-type can be ignored (it's always json)
+<span class="fc" id="L352">		}</span>
+
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">		String requestInfo = (logger.isDebugEnabled() ? request.getMethod() + &quot; &quot; + request.getURI() : null);</span>
+
+		try {
+<span class="pc bpc" id="L357" title="1 of 4 branches missed.">			if (sockJsPath.equals(&quot;&quot;) || sockJsPath.equals(&quot;/&quot;)) {</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">				if (requestInfo != null) {</span>
+<span class="nc" id="L359">					logger.debug(&quot;Processing transport request: &quot; + requestInfo);</span>
+				}
+<span class="fc" id="L361">				response.getHeaders().setContentType(new MediaType(&quot;text&quot;, &quot;plain&quot;, StandardCharsets.UTF_8));</span>
+<span class="fc" id="L362">				response.getBody().write(&quot;Welcome to SockJS!\n&quot;.getBytes(StandardCharsets.UTF_8));</span>
+			}
+
+<span class="fc bfc" id="L365" title="All 2 branches covered.">			else if (sockJsPath.equals(&quot;/info&quot;)) {</span>
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">				if (requestInfo != null) {</span>
+<span class="nc" id="L367">					logger.debug(&quot;Processing transport request: &quot; + requestInfo);</span>
+				}
+<span class="fc" id="L369">				this.infoHandler.handle(request, response);</span>
+			}
+
+<span class="fc bfc" id="L372" title="All 2 branches covered.">			else if (sockJsPath.matches(&quot;/iframe[0-9-.a-z_]*.html&quot;)) {</span>
+<span class="fc bfc" id="L373" title="All 4 branches covered.">				if (!this.allowedOrigins.isEmpty() &amp;&amp; !this.allowedOrigins.contains(&quot;*&quot;)) {</span>
+<span class="pc bpc" id="L374" title="1 of 2 branches missed.">					if (requestInfo != null) {</span>
+<span class="nc" id="L375">						logger.debug(&quot;Iframe support is disabled when an origin check is required. &quot; +</span>
+								&quot;Ignoring transport request: &quot; + requestInfo);
+					}
+<span class="fc" id="L378">					response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="fc" id="L379">					return;</span>
+				}
+<span class="fc bfc" id="L381" title="All 2 branches covered.">				if (this.allowedOrigins.isEmpty()) {</span>
+<span class="fc" id="L382">					response.getHeaders().add(XFRAME_OPTIONS_HEADER, &quot;SAMEORIGIN&quot;);</span>
+				}
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">				if (requestInfo != null) {</span>
+<span class="nc" id="L385">					logger.debug(&quot;Processing transport request: &quot; + requestInfo);</span>
+				}
+<span class="fc" id="L387">				this.iframeHandler.handle(request, response);</span>
+			}
+
+<span class="fc bfc" id="L390" title="All 2 branches covered.">			else if (sockJsPath.equals(&quot;/websocket&quot;)) {</span>
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">				if (isWebSocketEnabled()) {</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">					if (requestInfo != null) {</span>
+<span class="nc" id="L393">						logger.debug(&quot;Processing transport request: &quot; + requestInfo);</span>
+					}
+<span class="fc" id="L395">					handleRawWebSocketRequest(request, response, wsHandler);</span>
+				}
+<span class="nc bnc" id="L397" title="All 2 branches missed.">				else if (requestInfo != null) {</span>
+<span class="nc" id="L398">					logger.debug(&quot;WebSocket disabled. Ignoring transport request: &quot; + requestInfo);</span>
+				}
+			}
+
+			else {
+<span class="fc" id="L403">				String[] pathSegments = StringUtils.tokenizeToStringArray(sockJsPath.substring(1), &quot;/&quot;);</span>
+<span class="fc bfc" id="L404" title="All 2 branches covered.">				if (pathSegments.length != 3) {</span>
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">					if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L406">						logger.warn(&quot;Invalid SockJS path '&quot; + sockJsPath + &quot;' - required to have 3 path segments&quot;);</span>
+					}
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">					if (requestInfo != null) {</span>
+<span class="nc" id="L409">						logger.debug(&quot;Ignoring transport request: &quot; + requestInfo);</span>
+					}
+<span class="fc" id="L411">					response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="fc" id="L412">					return;</span>
+				}
+
+<span class="fc" id="L415">				String serverId = pathSegments[0];</span>
+<span class="fc" id="L416">				String sessionId = pathSegments[1];</span>
+<span class="fc" id="L417">				String transport = pathSegments[2];</span>
+
+<span class="pc bpc" id="L419" title="1 of 4 branches missed.">				if (!isWebSocketEnabled() &amp;&amp; transport.equals(&quot;websocket&quot;)) {</span>
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">					if (requestInfo != null) {</span>
+<span class="nc" id="L421">						logger.debug(&quot;WebSocket disabled. Ignoring transport request: &quot; + requestInfo);</span>
+					}
+<span class="fc" id="L423">					response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="fc" id="L424">					return;</span>
+				}
+<span class="fc bfc" id="L426" title="All 4 branches covered.">				else if (!validateRequest(serverId, sessionId, transport) || !validatePath(request)) {</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">					if (requestInfo != null) {</span>
+<span class="nc" id="L428">						logger.debug(&quot;Ignoring transport request: &quot; + requestInfo);</span>
+					}
+<span class="fc" id="L430">					response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="fc" id="L431">					return;</span>
+				}
+
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">				if (requestInfo != null) {</span>
+<span class="nc" id="L435">					logger.debug(&quot;Processing transport request: &quot; + requestInfo);</span>
+				}
+<span class="fc" id="L437">				handleTransportRequest(request, response, wsHandler, sessionId, transport);</span>
+			}
+<span class="fc" id="L439">			response.close();</span>
+		}
+<span class="nc" id="L441">		catch (IOException ex) {</span>
+<span class="nc" id="L442">			throw new SockJsException(&quot;Failed to write to the response&quot;, null, ex);</span>
+<span class="fc" id="L443">		}</span>
+<span class="fc" id="L444">	}</span>
+
+	protected boolean validateRequest(String serverId, String sessionId, String transport) {
+<span class="pc bpc" id="L447" title="3 of 6 branches missed.">		if (!StringUtils.hasText(serverId) || !StringUtils.hasText(sessionId) || !StringUtils.hasText(transport)) {</span>
+<span class="nc" id="L448">			logger.warn(&quot;No server, session, or transport path segment in SockJS request.&quot;);</span>
+<span class="nc" id="L449">			return false;</span>
+		}
+
+		// Server and session id's must not contain &quot;.&quot;
+<span class="fc bfc" id="L453" title="All 4 branches covered.">		if (serverId.contains(&quot;.&quot;) || sessionId.contains(&quot;.&quot;)) {</span>
+<span class="fc" id="L454">			logger.warn(&quot;Either server or session contains a \&quot;.\&quot; which is not allowed by SockJS protocol.&quot;);</span>
+<span class="fc" id="L455">			return false;</span>
+		}
+
+<span class="fc" id="L458">		return true;</span>
+	}
+
+	/**
+	 * Ensure the path does not contain a file extension, either in the filename
+	 * (e.g. &quot;/jsonp.bat&quot;) or possibly after path parameters (&quot;/jsonp;Setup.bat&quot;)
+	 * which could be used for RFD exploits.
+	 * &lt;p&gt;Since the last part of the path is expected to be a transport type, the
+	 * presence of an extension would not work. All we need to do is check if
+	 * there are any path parameters, which would have been removed from the
+	 * SockJS path during request mapping, and if found reject the request.
+	 */
+	private boolean validatePath(ServerHttpRequest request) {
+<span class="fc" id="L471">		String path = request.getURI().getPath();</span>
+<span class="fc" id="L472">		int index = path.lastIndexOf('/') + 1;</span>
+<span class="fc" id="L473">		String filename = path.substring(index);</span>
+<span class="fc bfc" id="L474" title="All 2 branches covered.">		return (filename.indexOf(';') == -1);</span>
+	}
+
+	protected boolean checkOrigin(ServerHttpRequest request, ServerHttpResponse response, HttpMethod... httpMethods)
+			throws IOException {
+
+<span class="fc bfc" id="L480" title="All 2 branches covered.">		if (WebUtils.isSameOrigin(request)) {</span>
+<span class="fc" id="L481">			return true;</span>
+		}
+
+<span class="fc bfc" id="L484" title="All 2 branches covered.">		if (!WebUtils.isValidOrigin(request, this.allowedOrigins)) {</span>
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L486">				logger.warn(&quot;Origin header value '&quot; + request.getHeaders().getOrigin() + &quot;' not allowed.&quot;);</span>
+			}
+<span class="fc" id="L488">			response.setStatusCode(HttpStatus.FORBIDDEN);</span>
+<span class="fc" id="L489">			return false;</span>
+		}
+
+<span class="fc" id="L492">		return true;</span>
+	}
+
+	@Override
+	@Nullable
+	public CorsConfiguration getCorsConfiguration(HttpServletRequest request) {
+<span class="fc bfc" id="L498" title="All 4 branches covered.">		if (!this.suppressCors &amp;&amp; CorsUtils.isCorsRequest(request)) {</span>
+<span class="fc" id="L499">			CorsConfiguration config = new CorsConfiguration();</span>
+<span class="fc" id="L500">			config.setAllowedOrigins(new ArrayList&lt;&gt;(this.allowedOrigins));</span>
+<span class="fc" id="L501">			config.addAllowedMethod(&quot;*&quot;);</span>
+<span class="fc" id="L502">			config.setAllowCredentials(true);</span>
+<span class="fc" id="L503">			config.setMaxAge(ONE_YEAR);</span>
+<span class="fc" id="L504">			config.addAllowedHeader(&quot;*&quot;);</span>
+<span class="fc" id="L505">			return config;</span>
+		}
+<span class="fc" id="L507">		return null;</span>
+	}
+
+	protected void addCacheHeaders(ServerHttpResponse response) {
+<span class="fc" id="L511">		response.getHeaders().setCacheControl(&quot;public, max-age=&quot; + ONE_YEAR);</span>
+<span class="fc" id="L512">		response.getHeaders().setExpires(new Date().getTime() + ONE_YEAR * 1000);</span>
+<span class="fc" id="L513">	}</span>
+
+	protected void addNoCacheHeaders(ServerHttpResponse response) {
+<span class="fc" id="L516">		response.getHeaders().setCacheControl(&quot;no-store, no-cache, must-revalidate, max-age=0&quot;);</span>
+<span class="fc" id="L517">	}</span>
+
+	protected void sendMethodNotAllowed(ServerHttpResponse response, HttpMethod... httpMethods) {
+<span class="nc" id="L520">		logger.warn(&quot;Sending Method Not Allowed (405)&quot;);</span>
+<span class="nc" id="L521">		response.setStatusCode(HttpStatus.METHOD_NOT_ALLOWED);</span>
+<span class="nc" id="L522">		response.getHeaders().setAllow(new LinkedHashSet&lt;&gt;(Arrays.asList(httpMethods)));</span>
+<span class="nc" id="L523">	}</span>
+
+
+	/**
+	 * Handle request for raw WebSocket communication, i.e. without any SockJS message framing.
+	 */
+	protected abstract void handleRawWebSocketRequest(ServerHttpRequest request,
+			ServerHttpResponse response, WebSocketHandler webSocketHandler) throws IOException;
+
+	/**
+	 * Handle a SockJS session URL (i.e. transport-specific request).
+	 */
+	protected abstract void handleTransportRequest(ServerHttpRequest request, ServerHttpResponse response,
+			WebSocketHandler webSocketHandler, String sessionId, String transport) throws SockJsException;
+
+
+	private interface SockJsRequestHandler {
+
+		void handle(ServerHttpRequest request, ServerHttpResponse response) throws IOException;
+	}
+
+
+<span class="fc" id="L545">	private class InfoHandler implements SockJsRequestHandler {</span>
+
+		private static final String INFO_CONTENT =
+				&quot;{\&quot;entropy\&quot;:%s,\&quot;origins\&quot;:[\&quot;*:*\&quot;],\&quot;cookie_needed\&quot;:%s,\&quot;websocket\&quot;:%s}&quot;;
+
+		@Override
+		public void handle(ServerHttpRequest request, ServerHttpResponse response) throws IOException {
+<span class="fc bfc" id="L552" title="All 2 branches covered.">			if (request.getMethod() == HttpMethod.GET) {</span>
+<span class="fc" id="L553">				addNoCacheHeaders(response);</span>
+<span class="fc bfc" id="L554" title="All 2 branches covered.">				if (checkOrigin(request, response)) {</span>
+<span class="fc" id="L555">					response.getHeaders().setContentType(new MediaType(&quot;application&quot;, &quot;json&quot;, StandardCharsets.UTF_8));</span>
+<span class="fc" id="L556">					String content = String.format(</span>
+<span class="fc" id="L557">							INFO_CONTENT, random.nextInt(), isSessionCookieNeeded(), isWebSocketEnabled());</span>
+<span class="fc" id="L558">					response.getBody().write(content.getBytes());</span>
+<span class="fc" id="L559">				}</span>
+
+			}
+<span class="pc bpc" id="L562" title="1 of 2 branches missed.">			else if (request.getMethod() == HttpMethod.OPTIONS) {</span>
+<span class="fc bfc" id="L563" title="All 2 branches covered.">				if (checkOrigin(request, response)) {</span>
+<span class="fc" id="L564">					addCacheHeaders(response);</span>
+<span class="fc" id="L565">					response.setStatusCode(HttpStatus.NO_CONTENT);</span>
+				}
+			}
+			else {
+<span class="nc" id="L569">				sendMethodNotAllowed(response, HttpMethod.GET, HttpMethod.OPTIONS);</span>
+			}
+<span class="fc" id="L571">		}</span>
+	};
+
+
+<span class="fc" id="L575">	private class IframeHandler implements SockJsRequestHandler {</span>
+
+		private static final String IFRAME_CONTENT =
+				&quot;&lt;!DOCTYPE html&gt;\n&quot; +
+				&quot;&lt;html&gt;\n&quot; +
+				&quot;&lt;head&gt;\n&quot; +
+				&quot;  &lt;meta http-equiv=\&quot;X-UA-Compatible\&quot; content=\&quot;IE=edge\&quot; /&gt;\n&quot; +
+				&quot;  &lt;meta http-equiv=\&quot;Content-Type\&quot; content=\&quot;text/html; charset=UTF-8\&quot; /&gt;\n&quot; +
+				&quot;  &lt;script&gt;\n&quot; +
+				&quot;    document.domain = document.domain;\n&quot; +
+				&quot;    _sockjs_onload = function(){SockJS.bootstrap_iframe();};\n&quot; +
+				&quot;  &lt;/script&gt;\n&quot; +
+				&quot;  &lt;script src=\&quot;%s\&quot;&gt;&lt;/script&gt;\n&quot; +
+				&quot;&lt;/head&gt;\n&quot; +
+				&quot;&lt;body&gt;\n&quot; +
+				&quot;  &lt;h2&gt;Don't panic!&lt;/h2&gt;\n&quot; +
+				&quot;  &lt;p&gt;This is a SockJS hidden iframe. It's used for cross domain magic.&lt;/p&gt;\n&quot; +
+				&quot;&lt;/body&gt;\n&quot; +
+				&quot;&lt;/html&gt;&quot;;
+
+		@Override
+		public void handle(ServerHttpRequest request, ServerHttpResponse response) throws IOException {
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">			if (request.getMethod() != HttpMethod.GET) {</span>
+<span class="nc" id="L598">				sendMethodNotAllowed(response, HttpMethod.GET);</span>
+<span class="nc" id="L599">				return;</span>
+			}
+
+<span class="fc" id="L602">			String content = String.format(IFRAME_CONTENT, getSockJsClientLibraryUrl());</span>
+<span class="fc" id="L603">			byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);</span>
+<span class="fc" id="L604">			StringBuilder builder = new StringBuilder(&quot;\&quot;0&quot;);</span>
+<span class="fc" id="L605">			DigestUtils.appendMd5DigestAsHex(contentBytes, builder);</span>
+<span class="fc" id="L606">			builder.append('&quot;');</span>
+<span class="fc" id="L607">			String etagValue = builder.toString();</span>
+
+<span class="fc" id="L609">			List&lt;String&gt; ifNoneMatch = request.getHeaders().getIfNoneMatch();</span>
+<span class="pc bpc" id="L610" title="1 of 4 branches missed.">			if (!CollectionUtils.isEmpty(ifNoneMatch) &amp;&amp; ifNoneMatch.get(0).equals(etagValue)) {</span>
+<span class="fc" id="L611">				response.setStatusCode(HttpStatus.NOT_MODIFIED);</span>
+<span class="fc" id="L612">				return;</span>
+			}
+
+<span class="fc" id="L615">			response.getHeaders().setContentType(new MediaType(&quot;text&quot;, &quot;html&quot;, StandardCharsets.UTF_8));</span>
+<span class="fc" id="L616">			response.getHeaders().setContentLength(contentBytes.length);</span>
+
+			// No cache in order to check every time if IFrame are authorized
+<span class="fc" id="L619">			addNoCacheHeaders(response);</span>
+<span class="fc" id="L620">			response.getHeaders().setETag(etagValue);</span>
+<span class="fc" id="L621">			response.getBody().write(contentBytes);</span>
+<span class="fc" id="L622">		}</span>
+	};
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

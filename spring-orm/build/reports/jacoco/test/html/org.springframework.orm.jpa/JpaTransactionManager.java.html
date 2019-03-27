@@ -1,0 +1,796 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JpaTransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.jpa</a> &gt; <span class="el_source">JpaTransactionManager.java</span></div><h1>JpaTransactionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.jpa;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
+import javax.persistence.EntityManager;
+import javax.persistence.EntityManagerFactory;
+import javax.persistence.EntityTransaction;
+import javax.persistence.PersistenceException;
+import javax.persistence.RollbackException;
+import javax.sql.DataSource;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.support.DataAccessUtils;
+import org.springframework.jdbc.datasource.ConnectionHandle;
+import org.springframework.jdbc.datasource.ConnectionHolder;
+import org.springframework.jdbc.datasource.JdbcTransactionObjectSupport;
+import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.springframework.lang.Nullable;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.NestedTransactionNotSupportedException;
+import org.springframework.transaction.SavepointManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.DelegatingTransactionDefinition;
+import org.springframework.transaction.support.ResourceTransactionDefinition;
+import org.springframework.transaction.support.ResourceTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+
+/**
+ * {@link org.springframework.transaction.PlatformTransactionManager} implementation
+ * for a single JPA {@link javax.persistence.EntityManagerFactory}. Binds a JPA
+ * EntityManager from the specified factory to the thread, potentially allowing for
+ * one thread-bound EntityManager per factory. {@link SharedEntityManagerCreator} and
+ * {@code @PersistenceContext} are aware of thread-bound entity managers and participate
+ * in such transactions automatically. Using either is required for JPA access code
+ * supporting this transaction management mechanism.
+ *
+ * &lt;p&gt;This transaction manager is appropriate for applications that use a single
+ * JPA EntityManagerFactory for transactional data access. JTA (usually through
+ * {@link org.springframework.transaction.jta.JtaTransactionManager}) is necessary
+ * for accessing multiple transactional resources within the same transaction.
+ * Note that you need to configure your JPA provider accordingly in order to make
+ * it participate in JTA transactions.
+ *
+ * &lt;p&gt;This transaction manager also supports direct DataSource access within a
+ * transaction (i.e. plain JDBC code working with the same DataSource).
+ * This allows for mixing services which access JPA and services which use plain
+ * JDBC (without being aware of JPA)! Application code needs to stick to the
+ * same simple Connection lookup pattern as with
+ * {@link org.springframework.jdbc.datasource.DataSourceTransactionManager}
+ * (i.e. {@link org.springframework.jdbc.datasource.DataSourceUtils#getConnection}
+ * or going through a
+ * {@link org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy}).
+ * Note that this requires a vendor-specific {@link JpaDialect} to be configured.
+ *
+ * &lt;p&gt;Note: To be able to register a DataSource's Connection for plain JDBC code,
+ * this instance needs to be aware of the DataSource ({@link #setDataSource}).
+ * The given DataSource should obviously match the one used by the given
+ * EntityManagerFactory. This transaction manager will autodetect the DataSource
+ * used as the connection factory of the EntityManagerFactory, so you usually
+ * don't need to explicitly specify the &quot;dataSource&quot; property.
+ *
+ * &lt;p&gt;This transaction manager supports nested transactions via JDBC 3.0 Savepoints.
+ * The {@link #setNestedTransactionAllowed &quot;nestedTransactionAllowed&quot;} flag defaults
+ * to {@code false} though, since nested transactions will just apply to the JDBC
+ * Connection, not to the JPA EntityManager and its cached entity objects and related
+ * context. You can manually set the flag to {@code true} if you want to use nested
+ * transactions for JDBC access code which participates in JPA transactions (provided
+ * that your JDBC driver supports Savepoints). &lt;i&gt;Note that JPA itself does not support
+ * nested transactions! Hence, do not expect JPA access code to semantically
+ * participate in a nested transaction.&lt;/i&gt;
+ *
+ * @author Juergen Hoeller
+ * @since 2.0
+ * @see #setEntityManagerFactory
+ * @see #setDataSource
+ * @see LocalEntityManagerFactoryBean
+ * @see org.springframework.orm.jpa.support.SharedEntityManagerBean
+ * @see org.springframework.jdbc.datasource.DataSourceUtils#getConnection
+ * @see org.springframework.jdbc.datasource.DataSourceUtils#releaseConnection
+ * @see org.springframework.jdbc.core.JdbcTemplate
+ * @see org.springframework.jdbc.datasource.DataSourceTransactionManager
+ * @see org.springframework.transaction.jta.JtaTransactionManager
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class JpaTransactionManager extends AbstractPlatformTransactionManager
+		implements ResourceTransactionManager, BeanFactoryAware, InitializingBean {
+
+	@Nullable
+	private EntityManagerFactory entityManagerFactory;
+
+	@Nullable
+	private String persistenceUnitName;
+
+<span class="fc" id="L123">	private final Map&lt;String, Object&gt; jpaPropertyMap = new HashMap&lt;&gt;();</span>
+
+	@Nullable
+	private DataSource dataSource;
+
+<span class="fc" id="L128">	private JpaDialect jpaDialect = new DefaultJpaDialect();</span>
+
+
+	/**
+	 * Create a new JpaTransactionManager instance.
+	 * &lt;p&gt;An EntityManagerFactory has to be set to be able to use it.
+	 * @see #setEntityManagerFactory
+	 */
+<span class="fc" id="L136">	public JpaTransactionManager() {</span>
+<span class="fc" id="L137">		setNestedTransactionAllowed(true);</span>
+<span class="fc" id="L138">	}</span>
+
+	/**
+	 * Create a new JpaTransactionManager instance.
+	 * @param emf the EntityManagerFactory to manage transactions for
+	 */
+	public JpaTransactionManager(EntityManagerFactory emf) {
+<span class="fc" id="L145">		this();</span>
+<span class="fc" id="L146">		this.entityManagerFactory = emf;</span>
+<span class="fc" id="L147">		afterPropertiesSet();</span>
+<span class="fc" id="L148">	}</span>
+
+
+	/**
+	 * Set the EntityManagerFactory that this instance should manage transactions for.
+	 * &lt;p&gt;Alternatively, specify the persistence unit name of the target EntityManagerFactory.
+	 * By default, a default EntityManagerFactory will be retrieved by finding a
+	 * single unique bean of type EntityManagerFactory in the containing BeanFactory.
+	 * @see #setPersistenceUnitName
+	 */
+	public void setEntityManagerFactory(@Nullable EntityManagerFactory emf) {
+<span class="fc" id="L159">		this.entityManagerFactory = emf;</span>
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Return the EntityManagerFactory that this instance should manage transactions for.
+	 */
+	@Nullable
+	public EntityManagerFactory getEntityManagerFactory() {
+<span class="fc" id="L167">		return this.entityManagerFactory;</span>
+	}
+
+	/**
+	 * Obtain the EntityManagerFactory for actual use.
+	 * @return the EntityManagerFactory (never {@code null})
+	 * @throws IllegalStateException in case of no EntityManagerFactory set
+	 * @since 5.0
+	 */
+	protected final EntityManagerFactory obtainEntityManagerFactory() {
+<span class="fc" id="L177">		EntityManagerFactory emf = getEntityManagerFactory();</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">		Assert.state(emf != null, &quot;No EntityManagerFactory set&quot;);</span>
+<span class="fc" id="L179">		return emf;</span>
+	}
+
+	/**
+	 * Set the name of the persistence unit to manage transactions for.
+	 * &lt;p&gt;This is an alternative to specifying the EntityManagerFactory by direct reference,
+	 * resolving it by its persistence unit name instead. If no EntityManagerFactory and
+	 * no persistence unit name have been specified, a default EntityManagerFactory will
+	 * be retrieved by finding a single unique bean of type EntityManagerFactory.
+	 * @see #setEntityManagerFactory
+	 */
+	public void setPersistenceUnitName(@Nullable String persistenceUnitName) {
+<span class="nc" id="L191">		this.persistenceUnitName = persistenceUnitName;</span>
+<span class="nc" id="L192">	}</span>
+
+	/**
+	 * Return the name of the persistence unit to manage transactions for, if any.
+	 */
+	@Nullable
+	public String getPersistenceUnitName() {
+<span class="nc" id="L199">		return this.persistenceUnitName;</span>
+	}
+
+	/**
+	 * Specify JPA properties, to be passed into
+	 * {@code EntityManagerFactory.createEntityManager(Map)} (if any).
+	 * &lt;p&gt;Can be populated with a String &quot;value&quot; (parsed via PropertiesEditor)
+	 * or a &quot;props&quot; element in XML bean definitions.
+	 * @see javax.persistence.EntityManagerFactory#createEntityManager(java.util.Map)
+	 */
+	public void setJpaProperties(@Nullable Properties jpaProperties) {
+<span class="nc" id="L210">		CollectionUtils.mergePropertiesIntoMap(jpaProperties, this.jpaPropertyMap);</span>
+<span class="nc" id="L211">	}</span>
+
+	/**
+	 * Specify JPA properties as a Map, to be passed into
+	 * {@code EntityManagerFactory.createEntityManager(Map)} (if any).
+	 * &lt;p&gt;Can be populated with a &quot;map&quot; or &quot;props&quot; element in XML bean definitions.
+	 * @see javax.persistence.EntityManagerFactory#createEntityManager(java.util.Map)
+	 */
+	public void setJpaPropertyMap(@Nullable Map&lt;String, ?&gt; jpaProperties) {
+<span class="nc bnc" id="L220" title="All 2 branches missed.">		if (jpaProperties != null) {</span>
+<span class="nc" id="L221">			this.jpaPropertyMap.putAll(jpaProperties);</span>
+		}
+<span class="nc" id="L223">	}</span>
+
+	/**
+	 * Allow Map access to the JPA properties to be passed to the persistence
+	 * provider, with the option to add or override specific entries.
+	 * &lt;p&gt;Useful for specifying entries directly, for example via &quot;jpaPropertyMap[myKey]&quot;.
+	 */
+	public Map&lt;String, Object&gt; getJpaPropertyMap() {
+<span class="fc" id="L231">		return this.jpaPropertyMap;</span>
+	}
+
+	/**
+	 * Set the JDBC DataSource that this instance should manage transactions for.
+	 * The DataSource should match the one used by the JPA EntityManagerFactory:
+	 * for example, you could specify the same JNDI DataSource for both.
+	 * &lt;p&gt;If the EntityManagerFactory uses a known DataSource as its connection factory,
+	 * the DataSource will be autodetected: You can still explicitly specify the
+	 * DataSource, but you don't need to in this case.
+	 * &lt;p&gt;A transactional JDBC Connection for this DataSource will be provided to
+	 * application code accessing this DataSource directly via DataSourceUtils
+	 * or JdbcTemplate. The Connection will be taken from the JPA EntityManager.
+	 * &lt;p&gt;Note that you need to use a JPA dialect for a specific JPA implementation
+	 * to allow for exposing JPA transactions as JDBC transactions.
+	 * &lt;p&gt;The DataSource specified here should be the target DataSource to manage
+	 * transactions for, not a TransactionAwareDataSourceProxy. Only data access
+	 * code may work with TransactionAwareDataSourceProxy, while the transaction
+	 * manager needs to work on the underlying target DataSource. If there's
+	 * nevertheless a TransactionAwareDataSourceProxy passed in, it will be
+	 * unwrapped to extract its target DataSource.
+	 * @see EntityManagerFactoryInfo#getDataSource()
+	 * @see #setJpaDialect
+	 * @see org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy
+	 * @see org.springframework.jdbc.datasource.DataSourceUtils
+	 * @see org.springframework.jdbc.core.JdbcTemplate
+	 */
+	public void setDataSource(@Nullable DataSource dataSource) {
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">		if (dataSource instanceof TransactionAwareDataSourceProxy) {</span>
+			// If we got a TransactionAwareDataSourceProxy, we need to perform transactions
+			// for its underlying target DataSource, else data access code won't see
+			// properly exposed transactions (i.e. transactions for the target DataSource).
+<span class="nc" id="L263">			this.dataSource = ((TransactionAwareDataSourceProxy) dataSource).getTargetDataSource();</span>
+		}
+		else {
+<span class="fc" id="L266">			this.dataSource = dataSource;</span>
+		}
+<span class="fc" id="L268">	}</span>
+
+	/**
+	 * Return the JDBC DataSource that this instance manages transactions for.
+	 */
+	@Nullable
+	public DataSource getDataSource() {
+<span class="fc" id="L275">		return this.dataSource;</span>
+	}
+
+	/**
+	 * Set the JPA dialect to use for this transaction manager.
+	 * Used for vendor-specific transaction management and JDBC connection exposure.
+	 * &lt;p&gt;If the EntityManagerFactory uses a known JpaDialect, it will be autodetected:
+	 * You can still explicitly specify the DataSource, but you don't need to in this case.
+	 * &lt;p&gt;The dialect object can be used to retrieve the underlying JDBC connection
+	 * and thus allows for exposing JPA transactions as JDBC transactions.
+	 * @see EntityManagerFactoryInfo#getJpaDialect()
+	 * @see JpaDialect#beginTransaction
+	 * @see JpaDialect#getJdbcConnection
+	 */
+	public void setJpaDialect(@Nullable JpaDialect jpaDialect) {
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">		this.jpaDialect = (jpaDialect != null ? jpaDialect : new DefaultJpaDialect());</span>
+<span class="fc" id="L291">	}</span>
+
+	/**
+	 * Return the JPA dialect to use for this transaction manager.
+	 */
+	public JpaDialect getJpaDialect() {
+<span class="fc" id="L297">		return this.jpaDialect;</span>
+	}
+
+	/**
+	 * Retrieves an EntityManagerFactory by persistence unit name, if none set explicitly.
+	 * Falls back to a default EntityManagerFactory bean if no persistence unit specified.
+	 * @see #setPersistenceUnitName
+	 */
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">		if (getEntityManagerFactory() == null) {</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">			if (!(beanFactory instanceof ListableBeanFactory)) {</span>
+<span class="nc" id="L309">				throw new IllegalStateException(&quot;Cannot retrieve EntityManagerFactory by persistence unit name &quot; +</span>
+						&quot;in a non-listable BeanFactory: &quot; + beanFactory);
+			}
+<span class="nc" id="L312">			ListableBeanFactory lbf = (ListableBeanFactory) beanFactory;</span>
+<span class="nc" id="L313">			setEntityManagerFactory(EntityManagerFactoryUtils.findEntityManagerFactory(lbf, getPersistenceUnitName()));</span>
+		}
+<span class="fc" id="L315">	}</span>
+
+	/**
+	 * Eagerly initialize the JPA dialect, creating a default one
+	 * for the specified EntityManagerFactory if none set.
+	 * Auto-detect the EntityManagerFactory's DataSource, if any.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">		if (getEntityManagerFactory() == null) {</span>
+<span class="nc" id="L325">			throw new IllegalArgumentException(&quot;'entityManagerFactory' or 'persistenceUnitName' is required&quot;);</span>
+		}
+<span class="fc bfc" id="L327" title="All 2 branches covered.">		if (getEntityManagerFactory() instanceof EntityManagerFactoryInfo) {</span>
+<span class="fc" id="L328">			EntityManagerFactoryInfo emfInfo = (EntityManagerFactoryInfo) getEntityManagerFactory();</span>
+<span class="fc" id="L329">			DataSource dataSource = emfInfo.getDataSource();</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">			if (dataSource != null) {</span>
+<span class="fc" id="L331">				setDataSource(dataSource);</span>
+			}
+<span class="fc" id="L333">			JpaDialect jpaDialect = emfInfo.getJpaDialect();</span>
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">			if (jpaDialect != null) {</span>
+<span class="fc" id="L335">				setJpaDialect(jpaDialect);</span>
+			}
+		}
+<span class="fc" id="L338">	}</span>
+
+
+	@Override
+	public Object getResourceFactory() {
+<span class="nc" id="L343">		return obtainEntityManagerFactory();</span>
+	}
+
+	@Override
+	protected Object doGetTransaction() {
+<span class="fc" id="L348">		JpaTransactionObject txObject = new JpaTransactionObject();</span>
+<span class="fc" id="L349">		txObject.setSavepointAllowed(isNestedTransactionAllowed());</span>
+
+<span class="fc" id="L351">		EntityManagerHolder emHolder = (EntityManagerHolder)</span>
+<span class="fc" id="L352">				TransactionSynchronizationManager.getResource(obtainEntityManagerFactory());</span>
+<span class="fc bfc" id="L353" title="All 2 branches covered.">		if (emHolder != null) {</span>
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L355">				logger.debug(&quot;Found thread-bound EntityManager [&quot; + emHolder.getEntityManager() +</span>
+						&quot;] for JPA transaction&quot;);
+			}
+<span class="fc" id="L358">			txObject.setEntityManagerHolder(emHolder, false);</span>
+		}
+
+<span class="fc bfc" id="L361" title="All 2 branches covered.">		if (getDataSource() != null) {</span>
+<span class="fc" id="L362">			ConnectionHolder conHolder = (ConnectionHolder)</span>
+<span class="fc" id="L363">					TransactionSynchronizationManager.getResource(getDataSource());</span>
+<span class="fc" id="L364">			txObject.setConnectionHolder(conHolder);</span>
+		}
+
+<span class="fc" id="L367">		return txObject;</span>
+	}
+
+	@Override
+	protected boolean isExistingTransaction(Object transaction) {
+<span class="fc" id="L372">		return ((JpaTransactionObject) transaction).hasTransaction();</span>
+	}
+
+	@Override
+	protected void doBegin(Object transaction, TransactionDefinition definition) {
+<span class="fc" id="L377">		JpaTransactionObject txObject = (JpaTransactionObject) transaction;</span>
+
+<span class="pc bpc" id="L379" title="3 of 4 branches missed.">		if (txObject.hasConnectionHolder() &amp;&amp; !txObject.getConnectionHolder().isSynchronizedWithTransaction()) {</span>
+<span class="nc" id="L380">			throw new IllegalTransactionStateException(</span>
+					&quot;Pre-bound JDBC Connection found! JpaTransactionManager does not support &quot; +
+					&quot;running within DataSourceTransactionManager if told to manage the DataSource itself. &quot; +
+					&quot;It is recommended to use a single JpaTransactionManager for all transactions &quot; +
+					&quot;on a single DataSource, no matter whether JPA or JDBC access.&quot;);
+		}
+
+		try {
+<span class="fc bfc" id="L388" title="All 2 branches covered.">			if (!txObject.hasEntityManagerHolder() ||</span>
+<span class="fc bfc" id="L389" title="All 2 branches covered.">					txObject.getEntityManagerHolder().isSynchronizedWithTransaction()) {</span>
+<span class="fc" id="L390">				EntityManager newEm = createEntityManagerForTransaction();</span>
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L392">					logger.debug(&quot;Opened new EntityManager [&quot; + newEm + &quot;] for JPA transaction&quot;);</span>
+				}
+<span class="fc" id="L394">				txObject.setEntityManagerHolder(new EntityManagerHolder(newEm), true);</span>
+			}
+
+<span class="fc" id="L397">			EntityManager em = txObject.getEntityManagerHolder().getEntityManager();</span>
+
+			// Delegate to JpaDialect for actual transaction begin.
+<span class="fc" id="L400">			final int timeoutToUse = determineTimeout(definition);</span>
+<span class="fc" id="L401">			Object transactionData = getJpaDialect().beginTransaction(em,</span>
+<span class="fc" id="L402">					new JpaTransactionDefinition(definition, timeoutToUse, txObject.isNewEntityManagerHolder()));</span>
+<span class="fc" id="L403">			txObject.setTransactionData(transactionData);</span>
+
+			// Register transaction timeout.
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">			if (timeoutToUse != TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L407">				txObject.getEntityManagerHolder().setTimeoutInSeconds(timeoutToUse);</span>
+			}
+
+			// Register the JPA EntityManager's JDBC Connection for the DataSource, if set.
+<span class="fc bfc" id="L411" title="All 2 branches covered.">			if (getDataSource() != null) {</span>
+<span class="fc" id="L412">				ConnectionHandle conHandle = getJpaDialect().getJdbcConnection(em, definition.isReadOnly());</span>
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">				if (conHandle != null) {</span>
+<span class="fc" id="L414">					ConnectionHolder conHolder = new ConnectionHolder(conHandle);</span>
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">					if (timeoutToUse != TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L416">						conHolder.setTimeoutInSeconds(timeoutToUse);</span>
+					}
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L419">						logger.debug(&quot;Exposing JPA transaction as JDBC [&quot; + conHandle + &quot;]&quot;);</span>
+					}
+<span class="fc" id="L421">					TransactionSynchronizationManager.bindResource(getDataSource(), conHolder);</span>
+<span class="fc" id="L422">					txObject.setConnectionHolder(conHolder);</span>
+<span class="fc" id="L423">				}</span>
+				else {
+<span class="nc bnc" id="L425" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L426">						logger.debug(&quot;Not exposing JPA transaction [&quot; + em + &quot;] as JDBC transaction because &quot; +</span>
+<span class="nc" id="L427">								&quot;JpaDialect [&quot; + getJpaDialect() + &quot;] does not support JDBC Connection retrieval&quot;);</span>
+					}
+				}
+			}
+
+			// Bind the entity manager holder to the thread.
+<span class="fc bfc" id="L433" title="All 2 branches covered.">			if (txObject.isNewEntityManagerHolder()) {</span>
+<span class="fc" id="L434">				TransactionSynchronizationManager.bindResource(</span>
+<span class="fc" id="L435">						obtainEntityManagerFactory(), txObject.getEntityManagerHolder());</span>
+			}
+<span class="fc" id="L437">			txObject.getEntityManagerHolder().setSynchronizedWithTransaction(true);</span>
+		}
+
+<span class="fc" id="L440">		catch (TransactionException ex) {</span>
+<span class="fc" id="L441">			closeEntityManagerAfterFailedBegin(txObject);</span>
+<span class="fc" id="L442">			throw ex;</span>
+		}
+<span class="nc" id="L444">		catch (Throwable ex) {</span>
+<span class="nc" id="L445">			closeEntityManagerAfterFailedBegin(txObject);</span>
+<span class="nc" id="L446">			throw new CannotCreateTransactionException(&quot;Could not open JPA EntityManager for transaction&quot;, ex);</span>
+<span class="fc" id="L447">		}</span>
+<span class="fc" id="L448">	}</span>
+
+	/**
+	 * Create a JPA EntityManager to be used for a transaction.
+	 * &lt;p&gt;The default implementation checks whether the EntityManagerFactory
+	 * is a Spring proxy and unwraps it first.
+	 * @see javax.persistence.EntityManagerFactory#createEntityManager()
+	 * @see EntityManagerFactoryInfo#getNativeEntityManagerFactory()
+	 */
+	protected EntityManager createEntityManagerForTransaction() {
+<span class="fc" id="L458">		EntityManagerFactory emf = obtainEntityManagerFactory();</span>
+<span class="fc bfc" id="L459" title="All 2 branches covered.">		if (emf instanceof EntityManagerFactoryInfo) {</span>
+<span class="fc" id="L460">			emf = ((EntityManagerFactoryInfo) emf).getNativeEntityManagerFactory();</span>
+		}
+<span class="fc" id="L462">		Map&lt;String, Object&gt; properties = getJpaPropertyMap();</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">		return (!CollectionUtils.isEmpty(properties) ?</span>
+<span class="pc" id="L464">				emf.createEntityManager(properties) : emf.createEntityManager());</span>
+	}
+
+	/**
+	 * Close the current transaction's EntityManager.
+	 * Called after a transaction begin attempt failed.
+	 * @param txObject the current transaction
+	 */
+	protected void closeEntityManagerAfterFailedBegin(JpaTransactionObject txObject) {
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">		if (txObject.isNewEntityManagerHolder()) {</span>
+<span class="fc" id="L474">			EntityManager em = txObject.getEntityManagerHolder().getEntityManager();</span>
+			try {
+<span class="pc bpc" id="L476" title="1 of 2 branches missed.">				if (em.getTransaction().isActive()) {</span>
+<span class="nc" id="L477">					em.getTransaction().rollback();</span>
+				}
+			}
+<span class="nc" id="L480">			catch (Throwable ex) {</span>
+<span class="nc" id="L481">				logger.debug(&quot;Could not rollback EntityManager after failed transaction begin&quot;, ex);</span>
+			}
+			finally {
+<span class="fc" id="L484">				EntityManagerFactoryUtils.closeEntityManager(em);</span>
+			}
+<span class="fc" id="L486">			txObject.setEntityManagerHolder(null, false);</span>
+		}
+<span class="fc" id="L488">	}</span>
+
+	@Override
+	protected Object doSuspend(Object transaction) {
+<span class="fc" id="L492">		JpaTransactionObject txObject = (JpaTransactionObject) transaction;</span>
+<span class="fc" id="L493">		txObject.setEntityManagerHolder(null, false);</span>
+<span class="fc" id="L494">		EntityManagerHolder entityManagerHolder = (EntityManagerHolder)</span>
+<span class="fc" id="L495">				TransactionSynchronizationManager.unbindResource(obtainEntityManagerFactory());</span>
+<span class="fc" id="L496">		txObject.setConnectionHolder(null);</span>
+<span class="fc" id="L497">		ConnectionHolder connectionHolder = null;</span>
+<span class="pc bpc" id="L498" title="3 of 4 branches missed.">		if (getDataSource() != null &amp;&amp; TransactionSynchronizationManager.hasResource(getDataSource())) {</span>
+<span class="nc" id="L499">			connectionHolder = (ConnectionHolder) TransactionSynchronizationManager.unbindResource(getDataSource());</span>
+		}
+<span class="fc" id="L501">		return new SuspendedResourcesHolder(entityManagerHolder, connectionHolder);</span>
+	}
+
+	@Override
+	protected void doResume(@Nullable Object transaction, Object suspendedResources) {
+<span class="fc" id="L506">		SuspendedResourcesHolder resourcesHolder = (SuspendedResourcesHolder) suspendedResources;</span>
+<span class="fc" id="L507">		TransactionSynchronizationManager.bindResource(</span>
+<span class="fc" id="L508">				obtainEntityManagerFactory(), resourcesHolder.getEntityManagerHolder());</span>
+<span class="pc bpc" id="L509" title="3 of 4 branches missed.">		if (getDataSource() != null &amp;&amp; resourcesHolder.getConnectionHolder() != null) {</span>
+<span class="nc" id="L510">			TransactionSynchronizationManager.bindResource(getDataSource(), resourcesHolder.getConnectionHolder());</span>
+		}
+<span class="fc" id="L512">	}</span>
+
+	/**
+	 * This implementation returns &quot;true&quot;: a JPA commit will properly handle
+	 * transactions that have been marked rollback-only at a global level.
+	 */
+	@Override
+	protected boolean shouldCommitOnGlobalRollbackOnly() {
+<span class="fc" id="L520">		return true;</span>
+	}
+
+	@Override
+	protected void doCommit(DefaultTransactionStatus status) {
+<span class="fc" id="L525">		JpaTransactionObject txObject = (JpaTransactionObject) status.getTransaction();</span>
+<span class="pc bpc" id="L526" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L527">			logger.debug(&quot;Committing JPA transaction on EntityManager [&quot; +</span>
+<span class="nc" id="L528">					txObject.getEntityManagerHolder().getEntityManager() + &quot;]&quot;);</span>
+		}
+		try {
+<span class="fc" id="L531">			EntityTransaction tx = txObject.getEntityManagerHolder().getEntityManager().getTransaction();</span>
+<span class="fc" id="L532">			tx.commit();</span>
+		}
+<span class="fc" id="L534">		catch (RollbackException ex) {</span>
+<span class="pc bpc" id="L535" title="1 of 2 branches missed.">			if (ex.getCause() instanceof RuntimeException) {</span>
+<span class="nc" id="L536">				DataAccessException dae = getJpaDialect().translateExceptionIfPossible((RuntimeException) ex.getCause());</span>
+<span class="nc bnc" id="L537" title="All 2 branches missed.">				if (dae != null) {</span>
+<span class="nc" id="L538">					throw dae;</span>
+				}
+			}
+<span class="fc" id="L541">			throw new TransactionSystemException(&quot;Could not commit JPA transaction&quot;, ex);</span>
+		}
+<span class="nc" id="L543">		catch (RuntimeException ex) {</span>
+			// Assumably failed to flush changes to database.
+<span class="nc" id="L545">			throw DataAccessUtils.translateIfNecessary(ex, getJpaDialect());</span>
+<span class="fc" id="L546">		}</span>
+<span class="fc" id="L547">	}</span>
+
+	@Override
+	protected void doRollback(DefaultTransactionStatus status) {
+<span class="fc" id="L551">		JpaTransactionObject txObject = (JpaTransactionObject) status.getTransaction();</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L553">			logger.debug(&quot;Rolling back JPA transaction on EntityManager [&quot; +</span>
+<span class="nc" id="L554">					txObject.getEntityManagerHolder().getEntityManager() + &quot;]&quot;);</span>
+		}
+		try {
+<span class="fc" id="L557">			EntityTransaction tx = txObject.getEntityManagerHolder().getEntityManager().getTransaction();</span>
+<span class="fc bfc" id="L558" title="All 2 branches covered.">			if (tx.isActive()) {</span>
+<span class="fc" id="L559">				tx.rollback();</span>
+			}
+		}
+<span class="nc" id="L562">		catch (PersistenceException ex) {</span>
+<span class="nc" id="L563">			throw new TransactionSystemException(&quot;Could not roll back JPA transaction&quot;, ex);</span>
+		}
+		finally {
+<span class="fc bfc" id="L566" title="All 2 branches covered.">			if (!txObject.isNewEntityManagerHolder()) {</span>
+				// Clear all pending inserts/updates/deletes in the EntityManager.
+				// Necessary for pre-bound EntityManagers, to avoid inconsistent state.
+<span class="fc" id="L569">				txObject.getEntityManagerHolder().getEntityManager().clear();</span>
+			}
+		}
+<span class="fc" id="L572">	}</span>
+
+	@Override
+	protected void doSetRollbackOnly(DefaultTransactionStatus status) {
+<span class="fc" id="L576">		JpaTransactionObject txObject = (JpaTransactionObject) status.getTransaction();</span>
+<span class="pc bpc" id="L577" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L578">			logger.debug(&quot;Setting JPA transaction on EntityManager [&quot; +</span>
+<span class="nc" id="L579">					txObject.getEntityManagerHolder().getEntityManager() + &quot;] rollback-only&quot;);</span>
+		}
+<span class="fc" id="L581">		txObject.setRollbackOnly();</span>
+<span class="fc" id="L582">	}</span>
+
+	@Override
+	protected void doCleanupAfterCompletion(Object transaction) {
+<span class="fc" id="L586">		JpaTransactionObject txObject = (JpaTransactionObject) transaction;</span>
+
+		// Remove the entity manager holder from the thread, if still there.
+		// (Could have been removed by EntityManagerFactoryUtils in order
+		// to replace it with an unsynchronized EntityManager).
+<span class="fc bfc" id="L591" title="All 2 branches covered.">		if (txObject.isNewEntityManagerHolder()) {</span>
+<span class="fc" id="L592">			TransactionSynchronizationManager.unbindResourceIfPossible(obtainEntityManagerFactory());</span>
+		}
+<span class="fc" id="L594">		txObject.getEntityManagerHolder().clear();</span>
+
+		// Remove the JDBC connection holder from the thread, if exposed.
+<span class="pc bpc" id="L597" title="1 of 4 branches missed.">		if (getDataSource() != null &amp;&amp; txObject.hasConnectionHolder()) {</span>
+<span class="fc" id="L598">			TransactionSynchronizationManager.unbindResource(getDataSource());</span>
+<span class="fc" id="L599">			ConnectionHandle conHandle = txObject.getConnectionHolder().getConnectionHandle();</span>
+<span class="pc bpc" id="L600" title="1 of 2 branches missed.">			if (conHandle != null) {</span>
+				try {
+<span class="fc" id="L602">					getJpaDialect().releaseJdbcConnection(conHandle,</span>
+<span class="fc" id="L603">							txObject.getEntityManagerHolder().getEntityManager());</span>
+				}
+<span class="nc" id="L605">				catch (Exception ex) {</span>
+					// Just log it, to keep a transaction-related exception.
+<span class="nc" id="L607">					logger.error(&quot;Could not close JDBC connection after transaction&quot;, ex);</span>
+<span class="fc" id="L608">				}</span>
+			}
+		}
+
+<span class="fc" id="L612">		getJpaDialect().cleanupTransaction(txObject.getTransactionData());</span>
+
+		// Remove the entity manager holder from the thread.
+<span class="fc bfc" id="L615" title="All 2 branches covered.">		if (txObject.isNewEntityManagerHolder()) {</span>
+<span class="fc" id="L616">			EntityManager em = txObject.getEntityManagerHolder().getEntityManager();</span>
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L618">				logger.debug(&quot;Closing JPA EntityManager [&quot; + em + &quot;] after transaction&quot;);</span>
+			}
+<span class="fc" id="L620">			EntityManagerFactoryUtils.closeEntityManager(em);</span>
+<span class="fc" id="L621">		}</span>
+		else {
+<span class="fc" id="L623">			logger.debug(&quot;Not closing pre-bound JPA EntityManager after transaction&quot;);</span>
+		}
+<span class="fc" id="L625">	}</span>
+
+
+	/**
+	 * JPA transaction object, representing a EntityManagerHolder.
+	 * Used as transaction object by JpaTransactionManager.
+	 */
+<span class="fc" id="L632">	private class JpaTransactionObject extends JdbcTransactionObjectSupport {</span>
+
+		@Nullable
+		private EntityManagerHolder entityManagerHolder;
+
+		private boolean newEntityManagerHolder;
+
+		@Nullable
+		private Object transactionData;
+
+		public void setEntityManagerHolder(
+				@Nullable EntityManagerHolder entityManagerHolder, boolean newEntityManagerHolder) {
+
+<span class="fc" id="L645">			this.entityManagerHolder = entityManagerHolder;</span>
+<span class="fc" id="L646">			this.newEntityManagerHolder = newEntityManagerHolder;</span>
+<span class="fc" id="L647">		}</span>
+
+		public EntityManagerHolder getEntityManagerHolder() {
+<span class="pc bpc" id="L650" title="1 of 2 branches missed.">			Assert.state(this.entityManagerHolder != null, &quot;No EntityManagerHolder available&quot;);</span>
+<span class="fc" id="L651">			return this.entityManagerHolder;</span>
+		}
+
+		public boolean hasEntityManagerHolder() {
+<span class="fc bfc" id="L655" title="All 2 branches covered.">			return (this.entityManagerHolder != null);</span>
+		}
+
+		public boolean isNewEntityManagerHolder() {
+<span class="fc" id="L659">			return this.newEntityManagerHolder;</span>
+		}
+
+		public boolean hasTransaction() {
+<span class="fc bfc" id="L663" title="All 4 branches covered.">			return (this.entityManagerHolder != null &amp;&amp; this.entityManagerHolder.isTransactionActive());</span>
+		}
+
+		public void setTransactionData(@Nullable Object transactionData) {
+<span class="fc" id="L667">			this.transactionData = transactionData;</span>
+<span class="fc" id="L668">			getEntityManagerHolder().setTransactionActive(true);</span>
+<span class="pc bpc" id="L669" title="1 of 2 branches missed.">			if (transactionData instanceof SavepointManager) {</span>
+<span class="nc" id="L670">				getEntityManagerHolder().setSavepointManager((SavepointManager) transactionData);</span>
+			}
+<span class="fc" id="L672">		}</span>
+
+		@Nullable
+		public Object getTransactionData() {
+<span class="fc" id="L676">			return this.transactionData;</span>
+		}
+
+		public void setRollbackOnly() {
+<span class="fc" id="L680">			EntityTransaction tx = getEntityManagerHolder().getEntityManager().getTransaction();</span>
+<span class="pc bpc" id="L681" title="1 of 2 branches missed.">			if (tx.isActive()) {</span>
+<span class="fc" id="L682">				tx.setRollbackOnly();</span>
+			}
+<span class="pc bpc" id="L684" title="1 of 2 branches missed.">			if (hasConnectionHolder()) {</span>
+<span class="nc" id="L685">				getConnectionHolder().setRollbackOnly();</span>
+			}
+<span class="fc" id="L687">		}</span>
+
+		@Override
+		public boolean isRollbackOnly() {
+<span class="fc" id="L691">			EntityTransaction tx = getEntityManagerHolder().getEntityManager().getTransaction();</span>
+<span class="fc" id="L692">			return tx.getRollbackOnly();</span>
+		}
+
+		@Override
+		public void flush() {
+			try {
+<span class="fc" id="L698">				getEntityManagerHolder().getEntityManager().flush();</span>
+			}
+<span class="nc" id="L700">			catch (RuntimeException ex) {</span>
+<span class="nc" id="L701">				throw DataAccessUtils.translateIfNecessary(ex, getJpaDialect());</span>
+<span class="fc" id="L702">			}</span>
+<span class="fc" id="L703">		}</span>
+
+		@Override
+		public Object createSavepoint() throws TransactionException {
+<span class="nc bnc" id="L707" title="All 2 branches missed.">			if (getEntityManagerHolder().isRollbackOnly()) {</span>
+<span class="nc" id="L708">				throw new CannotCreateTransactionException(</span>
+						&quot;Cannot create savepoint for transaction which is already marked as rollback-only&quot;);
+			}
+<span class="nc" id="L711">			return getSavepointManager().createSavepoint();</span>
+		}
+
+		@Override
+		public void rollbackToSavepoint(Object savepoint) throws TransactionException {
+<span class="nc" id="L716">			getSavepointManager().rollbackToSavepoint(savepoint);</span>
+<span class="nc" id="L717">			getEntityManagerHolder().resetRollbackOnly();</span>
+<span class="nc" id="L718">		}</span>
+
+		@Override
+		public void releaseSavepoint(Object savepoint) throws TransactionException {
+<span class="nc" id="L722">			getSavepointManager().releaseSavepoint(savepoint);</span>
+<span class="nc" id="L723">		}</span>
+
+		private SavepointManager getSavepointManager() {
+<span class="nc bnc" id="L726" title="All 2 branches missed.">			if (!isSavepointAllowed()) {</span>
+<span class="nc" id="L727">				throw new NestedTransactionNotSupportedException(</span>
+						&quot;Transaction manager does not allow nested transactions&quot;);
+			}
+<span class="nc" id="L730">			SavepointManager savepointManager = getEntityManagerHolder().getSavepointManager();</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">			if (savepointManager == null) {</span>
+<span class="nc" id="L732">				throw new NestedTransactionNotSupportedException(</span>
+						&quot;JpaDialect does not support savepoints - check your JPA provider's capabilities&quot;);
+			}
+<span class="nc" id="L735">			return savepointManager;</span>
+		}
+	}
+
+
+	/**
+	 * JPA-specific transaction definition to be passed to {@link JpaDialect#beginTransaction}.
+	 * @since 5.1
+	 */
+	private static class JpaTransactionDefinition extends DelegatingTransactionDefinition
+			implements ResourceTransactionDefinition {
+
+		private final int timeout;
+
+		private final boolean localResource;
+
+		public JpaTransactionDefinition(TransactionDefinition targetDefinition, int timeout, boolean localResource) {
+<span class="fc" id="L752">			super(targetDefinition);</span>
+<span class="fc" id="L753">			this.timeout = timeout;</span>
+<span class="fc" id="L754">			this.localResource = localResource;</span>
+<span class="fc" id="L755">		}</span>
+
+		@Override
+		public int getTimeout() {
+<span class="fc" id="L759">			return this.timeout;</span>
+		}
+
+		@Override
+		public boolean isLocalResource() {
+<span class="fc" id="L764">			return this.localResource;</span>
+		}
+	}
+
+
+	/**
+	 * Holder for suspended resources.
+	 * Used internally by {@code doSuspend} and {@code doResume}.
+	 */
+	private static final class SuspendedResourcesHolder {
+
+		private final EntityManagerHolder entityManagerHolder;
+
+		@Nullable
+		private final ConnectionHolder connectionHolder;
+
+<span class="fc" id="L780">		private SuspendedResourcesHolder(EntityManagerHolder emHolder, @Nullable ConnectionHolder conHolder) {</span>
+<span class="fc" id="L781">			this.entityManagerHolder = emHolder;</span>
+<span class="fc" id="L782">			this.connectionHolder = conHolder;</span>
+<span class="fc" id="L783">		}</span>
+
+		private EntityManagerHolder getEntityManagerHolder() {
+<span class="fc" id="L786">			return this.entityManagerHolder;</span>
+		}
+
+		@Nullable
+		private ConnectionHolder getConnectionHolder() {
+<span class="nc" id="L791">			return this.connectionHolder;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

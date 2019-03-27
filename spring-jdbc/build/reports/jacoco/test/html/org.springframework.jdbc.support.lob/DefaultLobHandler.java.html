@@ -1,0 +1,405 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultLobHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.support.lob</a> &gt; <span class="el_source">DefaultLobHandler.java</span></div><h1>DefaultLobHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2017 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.support.lob;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
+import java.sql.Blob;
+import java.sql.Clob;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.lang.Nullable;
+
+/**
+ * Default implementation of the {@link LobHandler} interface.
+ * Invokes the direct accessor methods that {@code java.sql.ResultSet}
+ * and {@code java.sql.PreparedStatement} offer.
+ *
+ * &lt;p&gt;By default, incoming streams are going to be passed to the appropriate
+ * {@code setBinary/Ascii/CharacterStream} method on the JDBC driver's
+ * {@link PreparedStatement}. If the specified content length is negative,
+ * this handler will use the JDBC 4.0 variants of the set-stream methods
+ * without a length parameter; otherwise, it will pass the specified length
+ * on to the driver.
+ *
+ * &lt;p&gt;This LobHandler should work for any JDBC driver that is JDBC compliant
+ * in terms of the spec's suggestions regarding simple BLOB and CLOB handling.
+ * This does not apply to Oracle 9i's drivers at all; as of Oracle 10g,
+ * it does work but may still come with LOB size limitations. Consider using
+ * recent Oracle drivers even when working against an older database server.
+ * See the {@link LobHandler} javadoc for the full set of recommendations.
+ *
+ * &lt;p&gt;Some JDBC drivers require values with a BLOB/CLOB target column to be
+ * explicitly set through the JDBC {@code setBlob} / {@code setClob} API:
+ * for example, PostgreSQL's driver. Switch the {@link #setWrapAsLob &quot;wrapAsLob&quot;}
+ * property to &quot;true&quot; when operating against such a driver.
+ *
+ * &lt;p&gt;On JDBC 4.0, this LobHandler also supports streaming the BLOB/CLOB content
+ * via the {@code setBlob} / {@code setClob} variants that take a stream
+ * argument directly. Consider switching the {@link #setStreamAsLob &quot;streamAsLob&quot;}
+ * property to &quot;true&quot; when operating against a fully compliant JDBC 4.0 driver.
+ *
+ * &lt;p&gt;Finally, this LobHandler also supports the creation of temporary BLOB/CLOB
+ * objects. Consider switching the {@link #setCreateTemporaryLob &quot;createTemporaryLob&quot;}
+ * property to &quot;true&quot; when &quot;streamAsLob&quot; happens to run into LOB size limitations.
+ *
+ * &lt;p&gt;See the {@link LobHandler} interface javadoc for a summary of recommendations.
+ *
+ * @author Juergen Hoeller
+ * @since 04.12.2003
+ * @see java.sql.ResultSet#getBytes
+ * @see java.sql.ResultSet#getBinaryStream
+ * @see java.sql.ResultSet#getString
+ * @see java.sql.ResultSet#getAsciiStream
+ * @see java.sql.ResultSet#getCharacterStream
+ * @see java.sql.PreparedStatement#setBytes
+ * @see java.sql.PreparedStatement#setBinaryStream
+ * @see java.sql.PreparedStatement#setString
+ * @see java.sql.PreparedStatement#setAsciiStream
+ * @see java.sql.PreparedStatement#setCharacterStream
+ */
+<span class="fc" id="L84">public class DefaultLobHandler extends AbstractLobHandler {</span>
+
+<span class="fc" id="L86">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L88">	private boolean wrapAsLob = false;</span>
+
+<span class="fc" id="L90">	private boolean streamAsLob = false;</span>
+
+<span class="fc" id="L92">	private boolean createTemporaryLob = false;</span>
+
+
+	/**
+	 * Specify whether to submit a byte array / String to the JDBC driver
+	 * wrapped in a JDBC Blob / Clob object, using the JDBC {@code setBlob} /
+	 * {@code setClob} method with a Blob / Clob argument.
+	 * &lt;p&gt;Default is &quot;false&quot;, using the common JDBC 2.0 {@code setBinaryStream}
+	 * / {@code setCharacterStream} method for setting the content. Switch this
+	 * to &quot;true&quot; for explicit Blob / Clob wrapping against JDBC drivers that
+	 * are known to require such wrapping (e.g. PostgreSQL's for access to OID
+	 * columns, whereas BYTEA columns need to be accessed the standard way).
+	 * &lt;p&gt;This setting affects byte array / String arguments as well as stream
+	 * arguments, unless {@link #setStreamAsLob &quot;streamAsLob&quot;} overrides this
+	 * handling to use JDBC 4.0's new explicit streaming support (if available).
+	 * @see java.sql.PreparedStatement#setBlob(int, java.sql.Blob)
+	 * @see java.sql.PreparedStatement#setClob(int, java.sql.Clob)
+	 */
+	public void setWrapAsLob(boolean wrapAsLob) {
+<span class="nc" id="L111">		this.wrapAsLob = wrapAsLob;</span>
+<span class="nc" id="L112">	}</span>
+
+	/**
+	 * Specify whether to submit a binary stream / character stream to the JDBC
+	 * driver as explicit LOB content, using the JDBC 4.0 {@code setBlob} /
+	 * {@code setClob} method with a stream argument.
+	 * &lt;p&gt;Default is &quot;false&quot;, using the common JDBC 2.0 {@code setBinaryStream}
+	 * / {@code setCharacterStream} method for setting the content.
+	 * Switch this to &quot;true&quot; for explicit JDBC 4.0 streaming, provided that your
+	 * JDBC driver actually supports those JDBC 4.0 operations (e.g. Derby's).
+	 * &lt;p&gt;This setting affects stream arguments as well as byte array / String
+	 * arguments, requiring JDBC 4.0 support. For supporting LOB content against
+	 * JDBC 3.0, check out the {@link #setWrapAsLob &quot;wrapAsLob&quot;} setting.
+	 * @see java.sql.PreparedStatement#setBlob(int, java.io.InputStream, long)
+	 * @see java.sql.PreparedStatement#setClob(int, java.io.Reader, long)
+	 */
+	public void setStreamAsLob(boolean streamAsLob) {
+<span class="nc" id="L129">		this.streamAsLob = streamAsLob;</span>
+<span class="nc" id="L130">	}</span>
+
+	/**
+	 * Specify whether to copy a byte array / String into a temporary JDBC
+	 * Blob / Clob object created through the JDBC 4.0 {@code createBlob} /
+	 * {@code createClob} methods.
+	 * &lt;p&gt;Default is &quot;false&quot;, using the common JDBC 2.0 {@code setBinaryStream}
+	 * / {@code setCharacterStream} method for setting the content. Switch this
+	 * to &quot;true&quot; for explicit Blob / Clob creation using JDBC 4.0.
+	 * &lt;p&gt;This setting affects stream arguments as well as byte array / String
+	 * arguments, requiring JDBC 4.0 support. For supporting LOB content against
+	 * JDBC 3.0, check out the {@link #setWrapAsLob &quot;wrapAsLob&quot;} setting.
+	 * @see java.sql.Connection#createBlob()
+	 * @see java.sql.Connection#createClob()
+	 */
+	public void setCreateTemporaryLob(boolean createTemporaryLob) {
+<span class="nc" id="L146">		this.createTemporaryLob = createTemporaryLob;</span>
+<span class="nc" id="L147">	}</span>
+
+
+	@Override
+	@Nullable
+	public byte[] getBlobAsBytes(ResultSet rs, int columnIndex) throws SQLException {
+<span class="fc" id="L153">		logger.debug(&quot;Returning BLOB as bytes&quot;);</span>
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">		if (this.wrapAsLob) {</span>
+<span class="nc" id="L155">			Blob blob = rs.getBlob(columnIndex);</span>
+<span class="nc" id="L156">			return blob.getBytes(1, (int) blob.length());</span>
+		}
+		else {
+<span class="fc" id="L159">			return rs.getBytes(columnIndex);</span>
+		}
+	}
+
+	@Override
+	@Nullable
+	public InputStream getBlobAsBinaryStream(ResultSet rs, int columnIndex) throws SQLException {
+<span class="fc" id="L166">		logger.debug(&quot;Returning BLOB as binary stream&quot;);</span>
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">		if (this.wrapAsLob) {</span>
+<span class="nc" id="L168">			Blob blob = rs.getBlob(columnIndex);</span>
+<span class="nc" id="L169">			return blob.getBinaryStream();</span>
+		}
+		else {
+<span class="fc" id="L172">			return rs.getBinaryStream(columnIndex);</span>
+		}
+	}
+
+	@Override
+	@Nullable
+	public String getClobAsString(ResultSet rs, int columnIndex) throws SQLException {
+<span class="fc" id="L179">		logger.debug(&quot;Returning CLOB as string&quot;);</span>
+<span class="pc bpc" id="L180" title="1 of 2 branches missed.">		if (this.wrapAsLob) {</span>
+<span class="nc" id="L181">			Clob clob = rs.getClob(columnIndex);</span>
+<span class="nc" id="L182">			return clob.getSubString(1, (int) clob.length());</span>
+		}
+		else {
+<span class="fc" id="L185">			return rs.getString(columnIndex);</span>
+		}
+	}
+
+	@Override
+	public InputStream getClobAsAsciiStream(ResultSet rs, int columnIndex) throws SQLException {
+<span class="fc" id="L191">		logger.debug(&quot;Returning CLOB as ASCII stream&quot;);</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">		if (this.wrapAsLob) {</span>
+<span class="nc" id="L193">			Clob clob = rs.getClob(columnIndex);</span>
+<span class="nc" id="L194">			return clob.getAsciiStream();</span>
+		}
+		else {
+<span class="fc" id="L197">			return rs.getAsciiStream(columnIndex);</span>
+		}
+	}
+
+	@Override
+	public Reader getClobAsCharacterStream(ResultSet rs, int columnIndex) throws SQLException {
+<span class="fc" id="L203">		logger.debug(&quot;Returning CLOB as character stream&quot;);</span>
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">		if (this.wrapAsLob) {</span>
+<span class="nc" id="L205">			Clob clob = rs.getClob(columnIndex);</span>
+<span class="nc" id="L206">			return clob.getCharacterStream();</span>
+		}
+		else {
+<span class="fc" id="L209">			return rs.getCharacterStream(columnIndex);</span>
+		}
+	}
+
+	@Override
+	public LobCreator getLobCreator() {
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">		return (this.createTemporaryLob ? new TemporaryLobCreator() : new DefaultLobCreator());</span>
+	}
+
+
+	/**
+	 * Default LobCreator implementation as an inner class.
+	 * Can be subclassed in DefaultLobHandler extensions.
+	 */
+<span class="fc" id="L223">	protected class DefaultLobCreator implements LobCreator {</span>
+
+		@Override
+		public void setBlobAsBytes(PreparedStatement ps, int paramIndex, @Nullable byte[] content)
+				throws SQLException {
+
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">			if (streamAsLob) {</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">				if (content != null) {</span>
+<span class="nc" id="L231">					ps.setBlob(paramIndex, new ByteArrayInputStream(content), content.length);</span>
+				}
+				else {
+<span class="nc" id="L234">					ps.setBlob(paramIndex, (Blob) null);</span>
+				}
+			}
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">			else if (wrapAsLob) {</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">				if (content != null) {</span>
+<span class="nc" id="L239">					ps.setBlob(paramIndex, new PassThroughBlob(content));</span>
+				}
+				else {
+<span class="nc" id="L242">					ps.setBlob(paramIndex, (Blob) null);</span>
+				}
+			}
+			else {
+<span class="fc" id="L246">				ps.setBytes(paramIndex, content);</span>
+			}
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">				logger.debug(content != null ? &quot;Set bytes for BLOB with length &quot; + content.length :</span>
+						&quot;Set BLOB to null&quot;);
+			}
+<span class="fc" id="L252">		}</span>
+
+		@Override
+		public void setBlobAsBinaryStream(
+				PreparedStatement ps, int paramIndex, @Nullable InputStream binaryStream, int contentLength)
+				throws SQLException {
+
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">			if (streamAsLob) {</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">				if (binaryStream != null) {</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">					if (contentLength &gt;= 0) {</span>
+<span class="nc" id="L262">						ps.setBlob(paramIndex, binaryStream, contentLength);</span>
+					}
+					else {
+<span class="nc" id="L265">						ps.setBlob(paramIndex, binaryStream);</span>
+					}
+				}
+				else {
+<span class="nc" id="L269">					ps.setBlob(paramIndex, (Blob) null);</span>
+				}
+			}
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">			else if (wrapAsLob) {</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">				if (binaryStream != null) {</span>
+<span class="nc" id="L274">					ps.setBlob(paramIndex, new PassThroughBlob(binaryStream, contentLength));</span>
+				}
+				else {
+<span class="nc" id="L277">					ps.setBlob(paramIndex, (Blob) null);</span>
+				}
+			}
+<span class="fc bfc" id="L280" title="All 2 branches covered.">			else if (contentLength &gt;= 0) {</span>
+<span class="fc" id="L281">				ps.setBinaryStream(paramIndex, binaryStream, contentLength);</span>
+			}
+			else {
+<span class="fc" id="L284">				ps.setBinaryStream(paramIndex, binaryStream);</span>
+			}
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">				logger.debug(binaryStream != null ? &quot;Set binary stream for BLOB with length &quot; + contentLength :</span>
+						&quot;Set BLOB to null&quot;);
+			}
+<span class="fc" id="L290">		}</span>
+
+		@Override
+		public void setClobAsString(PreparedStatement ps, int paramIndex, @Nullable String content)
+				throws SQLException {
+
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">			if (streamAsLob) {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">				if (content != null) {</span>
+<span class="nc" id="L298">					ps.setClob(paramIndex, new StringReader(content), content.length());</span>
+				}
+				else {
+<span class="nc" id="L301">					ps.setClob(paramIndex, (Clob) null);</span>
+				}
+			}
+<span class="pc bpc" id="L304" title="1 of 2 branches missed.">			else if (wrapAsLob) {</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">				if (content != null) {</span>
+<span class="nc" id="L306">					ps.setClob(paramIndex, new PassThroughClob(content));</span>
+				}
+				else {
+<span class="nc" id="L309">					ps.setClob(paramIndex, (Clob) null);</span>
+				}
+			}
+			else {
+<span class="fc" id="L313">				ps.setString(paramIndex, content);</span>
+			}
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">				logger.debug(content != null ? &quot;Set string for CLOB with length &quot; + content.length() :</span>
+						&quot;Set CLOB to null&quot;);
+			}
+<span class="fc" id="L319">		}</span>
+
+		@Override
+		public void setClobAsAsciiStream(
+				PreparedStatement ps, int paramIndex, @Nullable InputStream asciiStream, int contentLength)
+				throws SQLException {
+
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">			if (streamAsLob) {</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">				if (asciiStream != null) {</span>
+<span class="nc" id="L328">					Reader reader = new InputStreamReader(asciiStream, StandardCharsets.US_ASCII);</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">					if (contentLength &gt;= 0) {</span>
+<span class="nc" id="L330">						ps.setClob(paramIndex, reader, contentLength);</span>
+					}
+					else {
+<span class="nc" id="L333">						ps.setClob(paramIndex, reader);</span>
+					}
+<span class="nc" id="L335">				}</span>
+				else {
+<span class="nc" id="L337">					ps.setClob(paramIndex, (Clob) null);</span>
+				}
+			}
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">			else if (wrapAsLob) {</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">				if (asciiStream != null) {</span>
+<span class="nc" id="L342">					ps.setClob(paramIndex, new PassThroughClob(asciiStream, contentLength));</span>
+				}
+				else {
+<span class="nc" id="L345">					ps.setClob(paramIndex, (Clob) null);</span>
+				}
+			}
+<span class="fc bfc" id="L348" title="All 2 branches covered.">			else if (contentLength &gt;= 0) {</span>
+<span class="fc" id="L349">				ps.setAsciiStream(paramIndex, asciiStream, contentLength);</span>
+			}
+			else {
+<span class="fc" id="L352">				ps.setAsciiStream(paramIndex, asciiStream);</span>
+			}
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">				logger.debug(asciiStream != null ? &quot;Set ASCII stream for CLOB with length &quot; + contentLength :</span>
+						&quot;Set CLOB to null&quot;);
+			}
+<span class="fc" id="L358">		}</span>
+
+		@Override
+		public void setClobAsCharacterStream(
+				PreparedStatement ps, int paramIndex, @Nullable Reader characterStream, int contentLength)
+				throws SQLException {
+
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">			if (streamAsLob) {</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">				if (characterStream != null) {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">					if (contentLength &gt;= 0) {</span>
+<span class="nc" id="L368">						ps.setClob(paramIndex, characterStream, contentLength);</span>
+					}
+					else {
+<span class="nc" id="L371">						ps.setClob(paramIndex, characterStream);</span>
+					}
+				}
+				else {
+<span class="nc" id="L375">					ps.setClob(paramIndex, (Clob) null);</span>
+				}
+			}
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">			else if (wrapAsLob) {</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">				if (characterStream != null) {</span>
+<span class="nc" id="L380">					ps.setClob(paramIndex, new PassThroughClob(characterStream, contentLength));</span>
+				}
+				else {
+<span class="nc" id="L383">					ps.setClob(paramIndex, (Clob) null);</span>
+				}
+			}
+<span class="fc bfc" id="L386" title="All 2 branches covered.">			else if (contentLength &gt;= 0) {</span>
+<span class="fc" id="L387">				ps.setCharacterStream(paramIndex, characterStream, contentLength);</span>
+			}
+			else {
+<span class="fc" id="L390">				ps.setCharacterStream(paramIndex, characterStream);</span>
+			}
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">				logger.debug(characterStream != null ? &quot;Set character stream for CLOB with length &quot; + contentLength :</span>
+						&quot;Set CLOB to null&quot;);
+			}
+<span class="fc" id="L396">		}</span>
+
+		@Override
+		public void close() {
+			// nothing to do when not creating temporary LOBs
+<span class="nc" id="L401">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

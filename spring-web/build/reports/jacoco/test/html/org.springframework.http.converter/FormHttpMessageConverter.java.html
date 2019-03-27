@@ -1,0 +1,560 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FormHttpMessageConverter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.converter</a> &gt; <span class="el_source">FormHttpMessageConverter.java</span></div><h1>FormHttpMessageConverter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.converter;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import javax.mail.internet.MimeUtility;
+
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpInputMessage;
+import org.springframework.http.HttpOutputMessage;
+import org.springframework.http.MediaType;
+import org.springframework.http.StreamingHttpOutputMessage;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StreamUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Implementation of {@link HttpMessageConverter} to read and write 'normal' HTML
+ * forms and also to write (but not read) multipart data (e.g. file uploads).
+ *
+ * &lt;p&gt;In other words, this converter can read and write the
+ * {@code &quot;application/x-www-form-urlencoded&quot;} media type as
+ * {@link MultiValueMap MultiValueMap&amp;lt;String, String&amp;gt;} and it can also
+ * write (but not read) the {@code &quot;multipart/form-data&quot;} media type as
+ * {@link MultiValueMap MultiValueMap&amp;lt;String, Object&amp;gt;}.
+ *
+ * &lt;p&gt;When writing multipart data, this converter uses other
+ * {@link HttpMessageConverter HttpMessageConverters} to write the respective
+ * MIME parts. By default, basic converters are registered (for {@code Strings}
+ * and {@code Resources}). These can be overridden through the
+ * {@link #setPartConverters partConverters} property.
+ *
+ * &lt;p&gt;For example, the following snippet shows how to submit an HTML form:
+ * &lt;pre class=&quot;code&quot;&gt;
+ * RestTemplate template = new RestTemplate();
+ * // AllEncompassingFormHttpMessageConverter is configured by default
+ *
+ * MultiValueMap&amp;lt;String, Object&amp;gt; form = new LinkedMultiValueMap&amp;lt;&amp;gt;();
+ * form.add(&quot;field 1&quot;, &quot;value 1&quot;);
+ * form.add(&quot;field 2&quot;, &quot;value 2&quot;);
+ * form.add(&quot;field 2&quot;, &quot;value 3&quot;);
+ * form.add(&quot;field 3&quot;, 4);  // non-String form values supported as of 5.1.4
+ * template.postForLocation(&quot;https://example.com/myForm&quot;, form);
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;The following snippet shows how to do a file upload:
+ * &lt;pre class=&quot;code&quot;&gt;
+ * MultiValueMap&amp;lt;String, Object&amp;gt; parts = new LinkedMultiValueMap&amp;lt;&amp;gt;();
+ * parts.add(&quot;field 1&quot;, &quot;value 1&quot;);
+ * parts.add(&quot;file&quot;, new ClassPathResource(&quot;myFile.jpg&quot;));
+ * template.postForLocation(&quot;https://example.com/myFileUpload&quot;, parts);
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;Some methods in this class were inspired by
+ * {@code org.apache.commons.httpclient.methods.multipart.MultipartRequestEntity}.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 3.0
+ * @see org.springframework.http.converter.support.AllEncompassingFormHttpMessageConverter
+ * @see org.springframework.util.MultiValueMap
+ */
+public class FormHttpMessageConverter implements HttpMessageConverter&lt;MultiValueMap&lt;String, ?&gt;&gt; {
+
+	/**
+	 * The default charset used by the converter.
+	 */
+<span class="fc" id="L100">	public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;</span>
+
+<span class="fc" id="L102">	private static final MediaType DEFAULT_FORM_DATA_MEDIA_TYPE =</span>
+			new MediaType(MediaType.APPLICATION_FORM_URLENCODED, DEFAULT_CHARSET);
+
+
+<span class="fc" id="L106">	private List&lt;MediaType&gt; supportedMediaTypes = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L108">	private List&lt;HttpMessageConverter&lt;?&gt;&gt; partConverters = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L110">	private Charset charset = DEFAULT_CHARSET;</span>
+
+	@Nullable
+	private Charset multipartCharset;
+
+
+<span class="fc" id="L116">	public FormHttpMessageConverter() {</span>
+<span class="fc" id="L117">		this.supportedMediaTypes.add(MediaType.APPLICATION_FORM_URLENCODED);</span>
+<span class="fc" id="L118">		this.supportedMediaTypes.add(MediaType.MULTIPART_FORM_DATA);</span>
+
+<span class="fc" id="L120">		StringHttpMessageConverter stringHttpMessageConverter = new StringHttpMessageConverter();</span>
+<span class="fc" id="L121">		stringHttpMessageConverter.setWriteAcceptCharset(false);  // see SPR-7316</span>
+
+<span class="fc" id="L123">		this.partConverters.add(new ByteArrayHttpMessageConverter());</span>
+<span class="fc" id="L124">		this.partConverters.add(stringHttpMessageConverter);</span>
+<span class="fc" id="L125">		this.partConverters.add(new ResourceHttpMessageConverter());</span>
+
+<span class="fc" id="L127">		applyDefaultCharset();</span>
+<span class="fc" id="L128">	}</span>
+
+
+	/**
+	 * Set the list of {@link MediaType} objects supported by this converter.
+	 */
+	public void setSupportedMediaTypes(List&lt;MediaType&gt; supportedMediaTypes) {
+<span class="nc" id="L135">		this.supportedMediaTypes = supportedMediaTypes;</span>
+<span class="nc" id="L136">	}</span>
+
+	@Override
+	public List&lt;MediaType&gt; getSupportedMediaTypes() {
+<span class="fc" id="L140">		return Collections.unmodifiableList(this.supportedMediaTypes);</span>
+	}
+
+	/**
+	 * Set the message body converters to use. These converters are used to
+	 * convert objects to MIME parts.
+	 */
+	public void setPartConverters(List&lt;HttpMessageConverter&lt;?&gt;&gt; partConverters) {
+<span class="nc" id="L148">		Assert.notEmpty(partConverters, &quot;'partConverters' must not be empty&quot;);</span>
+<span class="nc" id="L149">		this.partConverters = partConverters;</span>
+<span class="nc" id="L150">	}</span>
+
+	/**
+	 * Add a message body converter. Such a converter is used to convert objects
+	 * to MIME parts.
+	 */
+	public void addPartConverter(HttpMessageConverter&lt;?&gt; partConverter) {
+<span class="fc" id="L157">		Assert.notNull(partConverter, &quot;'partConverter' must not be null&quot;);</span>
+<span class="fc" id="L158">		this.partConverters.add(partConverter);</span>
+<span class="fc" id="L159">	}</span>
+
+	/**
+	 * Set the default character set to use for reading and writing form data when
+	 * the request or response Content-Type header does not explicitly specify it.
+	 * &lt;p&gt;As of 4.3, this is also used as the default charset for the conversion
+	 * of text bodies in a multipart request.
+	 * &lt;p&gt;As of 5.0 this is also used for part headers including
+	 * &quot;Content-Disposition&quot; (and its filename parameter) unless (the mutually
+	 * exclusive) {@link #setMultipartCharset} is also set, in which case part
+	 * headers are encoded as ASCII and &lt;i&gt;filename&lt;/i&gt; is encoded with the
+	 * &quot;encoded-word&quot; syntax from RFC 2047.
+	 * &lt;p&gt;By default this is set to &quot;UTF-8&quot;.
+	 */
+	public void setCharset(@Nullable Charset charset) {
+<span class="nc bnc" id="L174" title="All 2 branches missed.">		if (charset != this.charset) {</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">			this.charset = (charset != null ? charset : DEFAULT_CHARSET);</span>
+<span class="nc" id="L176">			applyDefaultCharset();</span>
+		}
+<span class="nc" id="L178">	}</span>
+
+	/**
+	 * Apply the configured charset as a default to registered part converters.
+	 */
+	private void applyDefaultCharset() {
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		for (HttpMessageConverter&lt;?&gt; candidate : this.partConverters) {</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">			if (candidate instanceof AbstractHttpMessageConverter) {</span>
+<span class="fc" id="L186">				AbstractHttpMessageConverter&lt;?&gt; converter = (AbstractHttpMessageConverter&lt;?&gt;) candidate;</span>
+				// Only override default charset if the converter operates with a charset to begin with...
+<span class="fc bfc" id="L188" title="All 2 branches covered.">				if (converter.getDefaultCharset() != null) {</span>
+<span class="fc" id="L189">					converter.setDefaultCharset(this.charset);</span>
+				}
+			}
+<span class="fc" id="L192">		}</span>
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * Set the character set to use when writing multipart data to encode file
+	 * names. Encoding is based on the &quot;encoded-word&quot; syntax defined in RFC 2047
+	 * and relies on {@code MimeUtility} from &quot;javax.mail&quot;.
+	 * &lt;p&gt;As of 5.0 by default part headers, including Content-Disposition (and
+	 * its filename parameter) will be encoded based on the setting of
+	 * {@link #setCharset(Charset)} or {@code UTF-8} by default.
+	 * @since 4.1.1
+	 * @see &lt;a href=&quot;https://en.wikipedia.org/wiki/MIME#Encoded-Word&quot;&gt;Encoded-Word&lt;/a&gt;
+	 */
+	public void setMultipartCharset(Charset charset) {
+<span class="fc" id="L206">		this.multipartCharset = charset;</span>
+<span class="fc" id="L207">	}</span>
+
+
+	@Override
+	public boolean canRead(Class&lt;?&gt; clazz, @Nullable MediaType mediaType) {
+<span class="fc bfc" id="L212" title="All 2 branches covered.">		if (!MultiValueMap.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L213">			return false;</span>
+		}
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">		if (mediaType == null) {</span>
+<span class="nc" id="L216">			return true;</span>
+		}
+<span class="fc bfc" id="L218" title="All 2 branches covered.">		for (MediaType supportedMediaType : getSupportedMediaTypes()) {</span>
+			// We can't read multipart....
+<span class="fc bfc" id="L220" title="All 4 branches covered.">			if (!supportedMediaType.equals(MediaType.MULTIPART_FORM_DATA) &amp;&amp; supportedMediaType.includes(mediaType)) {</span>
+<span class="fc" id="L221">				return true;</span>
+			}
+<span class="fc" id="L223">		}</span>
+<span class="fc" id="L224">		return false;</span>
+	}
+
+	@Override
+	public boolean canWrite(Class&lt;?&gt; clazz, @Nullable MediaType mediaType) {
+<span class="fc bfc" id="L229" title="All 2 branches covered.">		if (!MultiValueMap.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L230">			return false;</span>
+		}
+<span class="fc bfc" id="L232" title="All 4 branches covered.">		if (mediaType == null || MediaType.ALL.equals(mediaType)) {</span>
+<span class="fc" id="L233">			return true;</span>
+		}
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		for (MediaType supportedMediaType : getSupportedMediaTypes()) {</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">			if (supportedMediaType.isCompatibleWith(mediaType)) {</span>
+<span class="fc" id="L237">				return true;</span>
+			}
+<span class="fc" id="L239">		}</span>
+<span class="nc" id="L240">		return false;</span>
+	}
+
+	@Override
+	public MultiValueMap&lt;String, String&gt; read(@Nullable Class&lt;? extends MultiValueMap&lt;String, ?&gt;&gt; clazz,
+			HttpInputMessage inputMessage) throws IOException, HttpMessageNotReadableException {
+
+<span class="fc" id="L247">		MediaType contentType = inputMessage.getHeaders().getContentType();</span>
+<span class="pc bpc" id="L248" title="2 of 4 branches missed.">		Charset charset = (contentType != null &amp;&amp; contentType.getCharset() != null ?</span>
+<span class="pc" id="L249">				contentType.getCharset() : this.charset);</span>
+<span class="fc" id="L250">		String body = StreamUtils.copyToString(inputMessage.getBody(), charset);</span>
+
+<span class="fc" id="L252">		String[] pairs = StringUtils.tokenizeToStringArray(body, &quot;&amp;&quot;);</span>
+<span class="fc" id="L253">		MultiValueMap&lt;String, String&gt; result = new LinkedMultiValueMap&lt;&gt;(pairs.length);</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		for (String pair : pairs) {</span>
+<span class="fc" id="L255">			int idx = pair.indexOf('=');</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">			if (idx == -1) {</span>
+<span class="fc" id="L257">				result.add(URLDecoder.decode(pair, charset.name()), null);</span>
+			}
+			else {
+<span class="fc" id="L260">				String name = URLDecoder.decode(pair.substring(0, idx), charset.name());</span>
+<span class="fc" id="L261">				String value = URLDecoder.decode(pair.substring(idx + 1), charset.name());</span>
+<span class="fc" id="L262">				result.add(name, value);</span>
+			}
+		}
+<span class="fc" id="L265">		return result;</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public void write(MultiValueMap&lt;String, ?&gt; map, @Nullable MediaType contentType, HttpOutputMessage outputMessage)
+			throws IOException, HttpMessageNotWritableException {
+
+<span class="fc bfc" id="L273" title="All 2 branches covered.">		if (!isMultipart(map, contentType)) {</span>
+<span class="fc" id="L274">			writeForm((MultiValueMap&lt;String, Object&gt;) map, contentType, outputMessage);</span>
+		}
+		else {
+<span class="fc" id="L277">			writeMultipart((MultiValueMap&lt;String, Object&gt;) map, outputMessage);</span>
+		}
+<span class="fc" id="L279">	}</span>
+
+
+	private boolean isMultipart(MultiValueMap&lt;String, ?&gt; map, @Nullable MediaType contentType) {
+<span class="fc bfc" id="L283" title="All 2 branches covered.">		if (contentType != null) {</span>
+<span class="fc" id="L284">			return MediaType.MULTIPART_FORM_DATA.includes(contentType);</span>
+		}
+<span class="fc bfc" id="L286" title="All 2 branches covered.">		for (String name : map.keySet()) {</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">			for (Object value : map.get(name)) {</span>
+<span class="pc bpc" id="L288" title="1 of 4 branches missed.">				if (value != null &amp;&amp; !(value instanceof String)) {</span>
+<span class="fc" id="L289">					return true;</span>
+				}
+<span class="fc" id="L291">			}</span>
+<span class="fc" id="L292">		}</span>
+<span class="fc" id="L293">		return false;</span>
+	}
+
+	private void writeForm(MultiValueMap&lt;String, Object&gt; formData, @Nullable MediaType contentType,
+			HttpOutputMessage outputMessage) throws IOException {
+
+<span class="fc" id="L299">		contentType = getMediaType(contentType);</span>
+<span class="fc" id="L300">		outputMessage.getHeaders().setContentType(contentType);</span>
+
+<span class="fc" id="L302">		Charset charset = contentType.getCharset();</span>
+<span class="fc" id="L303">		Assert.notNull(charset, &quot;No charset&quot;); // should never occur</span>
+
+<span class="fc" id="L305">		final byte[] bytes = serializeForm(formData, charset).getBytes(charset);</span>
+<span class="fc" id="L306">		outputMessage.getHeaders().setContentLength(bytes.length);</span>
+
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">		if (outputMessage instanceof StreamingHttpOutputMessage) {</span>
+<span class="nc" id="L309">			StreamingHttpOutputMessage streamingOutputMessage = (StreamingHttpOutputMessage) outputMessage;</span>
+<span class="nc" id="L310">			streamingOutputMessage.setBody(outputStream -&gt; StreamUtils.copy(bytes, outputStream));</span>
+<span class="nc" id="L311">		}</span>
+		else {
+<span class="fc" id="L313">			StreamUtils.copy(bytes, outputMessage.getBody());</span>
+		}
+<span class="fc" id="L315">	}</span>
+
+	private MediaType getMediaType(@Nullable MediaType mediaType) {
+<span class="fc bfc" id="L318" title="All 2 branches covered.">		if (mediaType == null) {</span>
+<span class="fc" id="L319">			return DEFAULT_FORM_DATA_MEDIA_TYPE;</span>
+		}
+<span class="pc bpc" id="L321" title="1 of 2 branches missed.">		else if (mediaType.getCharset() == null) {</span>
+<span class="fc" id="L322">			return new MediaType(mediaType, this.charset);</span>
+		}
+		else {
+<span class="nc" id="L325">			return mediaType;</span>
+		}
+	}
+
+	protected String serializeForm(MultiValueMap&lt;String, Object&gt; formData, Charset charset) {
+<span class="fc" id="L330">		StringBuilder builder = new StringBuilder();</span>
+<span class="fc" id="L331">		formData.forEach((name, values) -&gt;</span>
+<span class="fc" id="L332">				values.forEach(value -&gt; {</span>
+					try {
+<span class="fc bfc" id="L334" title="All 2 branches covered.">						if (builder.length() != 0) {</span>
+<span class="fc" id="L335">							builder.append('&amp;');</span>
+						}
+<span class="fc" id="L337">						builder.append(URLEncoder.encode(name, charset.name()));</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">						if (value != null) {</span>
+<span class="fc" id="L339">							builder.append('=');</span>
+<span class="fc" id="L340">							builder.append(URLEncoder.encode(String.valueOf(value), charset.name()));</span>
+						}
+					}
+<span class="nc" id="L343">					catch (UnsupportedEncodingException ex) {</span>
+<span class="nc" id="L344">						throw new IllegalStateException(ex);</span>
+<span class="fc" id="L345">					}</span>
+<span class="fc" id="L346">				}));</span>
+
+<span class="fc" id="L348">		return builder.toString();</span>
+	}
+
+	private void writeMultipart(final MultiValueMap&lt;String, Object&gt; parts, HttpOutputMessage outputMessage)
+			throws IOException {
+
+<span class="fc" id="L354">		final byte[] boundary = generateMultipartBoundary();</span>
+<span class="fc" id="L355">		Map&lt;String, String&gt; parameters = new LinkedHashMap&lt;&gt;(2);</span>
+<span class="fc bfc" id="L356" title="All 2 branches covered.">		if (!isFilenameCharsetSet()) {</span>
+<span class="fc" id="L357">			parameters.put(&quot;charset&quot;, this.charset.name());</span>
+		}
+<span class="fc" id="L359">		parameters.put(&quot;boundary&quot;, new String(boundary, StandardCharsets.US_ASCII));</span>
+
+<span class="fc" id="L361">		MediaType contentType = new MediaType(MediaType.MULTIPART_FORM_DATA, parameters);</span>
+<span class="fc" id="L362">		HttpHeaders headers = outputMessage.getHeaders();</span>
+<span class="fc" id="L363">		headers.setContentType(contentType);</span>
+
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">		if (outputMessage instanceof StreamingHttpOutputMessage) {</span>
+<span class="nc" id="L366">			StreamingHttpOutputMessage streamingOutputMessage = (StreamingHttpOutputMessage) outputMessage;</span>
+<span class="nc" id="L367">			streamingOutputMessage.setBody(outputStream -&gt; {</span>
+<span class="nc" id="L368">				writeParts(outputStream, parts, boundary);</span>
+<span class="nc" id="L369">				writeEnd(outputStream, boundary);</span>
+<span class="nc" id="L370">			});</span>
+<span class="nc" id="L371">		}</span>
+		else {
+<span class="fc" id="L373">			writeParts(outputMessage.getBody(), parts, boundary);</span>
+<span class="fc" id="L374">			writeEnd(outputMessage.getBody(), boundary);</span>
+		}
+<span class="fc" id="L376">	}</span>
+
+	/**
+	 * When {@link #setMultipartCharset(Charset)} is configured (i.e. RFC 2047,
+	 * &quot;encoded-word&quot; syntax) we need to use ASCII for part headers or otherwise
+	 * we encode directly using the configured {@link #setCharset(Charset)}.
+	 */
+	private boolean isFilenameCharsetSet() {
+<span class="fc bfc" id="L384" title="All 2 branches covered.">		return (this.multipartCharset != null);</span>
+	}
+
+	private void writeParts(OutputStream os, MultiValueMap&lt;String, Object&gt; parts, byte[] boundary) throws IOException {
+<span class="fc bfc" id="L388" title="All 2 branches covered.">		for (Map.Entry&lt;String, List&lt;Object&gt;&gt; entry : parts.entrySet()) {</span>
+<span class="fc" id="L389">			String name = entry.getKey();</span>
+<span class="fc bfc" id="L390" title="All 2 branches covered.">			for (Object part : entry.getValue()) {</span>
+<span class="fc bfc" id="L391" title="All 2 branches covered.">				if (part != null) {</span>
+<span class="fc" id="L392">					writeBoundary(os, boundary);</span>
+<span class="fc" id="L393">					writePart(name, getHttpEntity(part), os);</span>
+<span class="fc" id="L394">					writeNewLine(os);</span>
+				}
+<span class="fc" id="L396">			}</span>
+<span class="fc" id="L397">		}</span>
+<span class="fc" id="L398">	}</span>
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private void writePart(String name, HttpEntity&lt;?&gt; partEntity, OutputStream os) throws IOException {
+<span class="fc" id="L402">		Object partBody = partEntity.getBody();</span>
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">		if (partBody == null) {</span>
+<span class="nc" id="L404">			throw new IllegalStateException(&quot;Empty body for part '&quot; + name + &quot;': &quot; + partEntity);</span>
+		}
+<span class="fc" id="L406">		Class&lt;?&gt; partType = partBody.getClass();</span>
+<span class="fc" id="L407">		HttpHeaders partHeaders = partEntity.getHeaders();</span>
+<span class="fc" id="L408">		MediaType partContentType = partHeaders.getContentType();</span>
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">		for (HttpMessageConverter&lt;?&gt; messageConverter : this.partConverters) {</span>
+<span class="fc bfc" id="L410" title="All 2 branches covered.">			if (messageConverter.canWrite(partType, partContentType)) {</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">				Charset charset = isFilenameCharsetSet() ? StandardCharsets.US_ASCII : this.charset;</span>
+<span class="fc" id="L412">				HttpOutputMessage multipartMessage = new MultipartHttpOutputMessage(os, charset);</span>
+<span class="fc" id="L413">				multipartMessage.getHeaders().setContentDispositionFormData(name, getFilename(partBody));</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">				if (!partHeaders.isEmpty()) {</span>
+<span class="fc" id="L415">					multipartMessage.getHeaders().putAll(partHeaders);</span>
+				}
+<span class="fc" id="L417">				((HttpMessageConverter&lt;Object&gt;) messageConverter).write(partBody, partContentType, multipartMessage);</span>
+<span class="fc" id="L418">				return;</span>
+			}
+<span class="fc" id="L420">		}</span>
+<span class="nc" id="L421">		throw new HttpMessageNotWritableException(&quot;Could not write request: no suitable HttpMessageConverter &quot; +</span>
+<span class="nc" id="L422">				&quot;found for request type [&quot; + partType.getName() + &quot;]&quot;);</span>
+	}
+
+	/**
+	 * Generate a multipart boundary.
+	 * &lt;p&gt;This implementation delegates to
+	 * {@link MimeTypeUtils#generateMultipartBoundary()}.
+	 */
+	protected byte[] generateMultipartBoundary() {
+<span class="fc" id="L431">		return MimeTypeUtils.generateMultipartBoundary();</span>
+	}
+
+	/**
+	 * Return an {@link HttpEntity} for the given part Object.
+	 * @param part the part to return an {@link HttpEntity} for
+	 * @return the part Object itself it is an {@link HttpEntity},
+	 * or a newly built {@link HttpEntity} wrapper for that part
+	 */
+	protected HttpEntity&lt;?&gt; getHttpEntity(Object part) {
+<span class="fc bfc" id="L441" title="All 2 branches covered.">		return (part instanceof HttpEntity ? (HttpEntity&lt;?&gt;) part : new HttpEntity&lt;&gt;(part));</span>
+	}
+
+	/**
+	 * Return the filename of the given multipart part. This value will be used for the
+	 * {@code Content-Disposition} header.
+	 * &lt;p&gt;The default implementation returns {@link Resource#getFilename()} if the part is a
+	 * {@code Resource}, and {@code null} in other cases. Can be overridden in subclasses.
+	 * @param part the part to determine the file name for
+	 * @return the filename, or {@code null} if not known
+	 */
+	@Nullable
+	protected String getFilename(Object part) {
+<span class="fc bfc" id="L454" title="All 2 branches covered.">		if (part instanceof Resource) {</span>
+<span class="fc" id="L455">			Resource resource = (Resource) part;</span>
+<span class="fc" id="L456">			String filename = resource.getFilename();</span>
+<span class="pc bpc" id="L457" title="2 of 4 branches missed.">			if (filename != null &amp;&amp; this.multipartCharset != null) {</span>
+<span class="nc" id="L458">				filename = MimeDelegate.encode(filename, this.multipartCharset.name());</span>
+			}
+<span class="fc" id="L460">			return filename;</span>
+		}
+		else {
+<span class="fc" id="L463">			return null;</span>
+		}
+	}
+
+
+	private void writeBoundary(OutputStream os, byte[] boundary) throws IOException {
+<span class="fc" id="L469">		os.write('-');</span>
+<span class="fc" id="L470">		os.write('-');</span>
+<span class="fc" id="L471">		os.write(boundary);</span>
+<span class="fc" id="L472">		writeNewLine(os);</span>
+<span class="fc" id="L473">	}</span>
+
+	private static void writeEnd(OutputStream os, byte[] boundary) throws IOException {
+<span class="fc" id="L476">		os.write('-');</span>
+<span class="fc" id="L477">		os.write('-');</span>
+<span class="fc" id="L478">		os.write(boundary);</span>
+<span class="fc" id="L479">		os.write('-');</span>
+<span class="fc" id="L480">		os.write('-');</span>
+<span class="fc" id="L481">		writeNewLine(os);</span>
+<span class="fc" id="L482">	}</span>
+
+	private static void writeNewLine(OutputStream os) throws IOException {
+<span class="fc" id="L485">		os.write('\r');</span>
+<span class="fc" id="L486">		os.write('\n');</span>
+<span class="fc" id="L487">	}</span>
+
+
+	/**
+	 * Implementation of {@link org.springframework.http.HttpOutputMessage} used
+	 * to write a MIME multipart.
+	 */
+	private static class MultipartHttpOutputMessage implements HttpOutputMessage {
+
+		private final OutputStream outputStream;
+
+		private final Charset charset;
+
+<span class="fc" id="L500">		private final HttpHeaders headers = new HttpHeaders();</span>
+
+<span class="fc" id="L502">		private boolean headersWritten = false;</span>
+
+<span class="fc" id="L504">		public MultipartHttpOutputMessage(OutputStream outputStream, Charset charset) {</span>
+<span class="fc" id="L505">			this.outputStream = outputStream;</span>
+<span class="fc" id="L506">			this.charset = charset;</span>
+<span class="fc" id="L507">		}</span>
+
+		@Override
+		public HttpHeaders getHeaders() {
+<span class="pc bpc" id="L511" title="1 of 2 branches missed.">			return (this.headersWritten ? HttpHeaders.readOnlyHttpHeaders(this.headers) : this.headers);</span>
+		}
+
+		@Override
+		public OutputStream getBody() throws IOException {
+<span class="fc" id="L516">			writeHeaders();</span>
+<span class="fc" id="L517">			return this.outputStream;</span>
+		}
+
+		private void writeHeaders() throws IOException {
+<span class="fc bfc" id="L521" title="All 2 branches covered.">			if (!this.headersWritten) {</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">				for (Map.Entry&lt;String, List&lt;String&gt;&gt; entry : this.headers.entrySet()) {</span>
+<span class="fc" id="L523">					byte[] headerName = getBytes(entry.getKey());</span>
+<span class="fc bfc" id="L524" title="All 2 branches covered.">					for (String headerValueString : entry.getValue()) {</span>
+<span class="fc" id="L525">						byte[] headerValue = getBytes(headerValueString);</span>
+<span class="fc" id="L526">						this.outputStream.write(headerName);</span>
+<span class="fc" id="L527">						this.outputStream.write(':');</span>
+<span class="fc" id="L528">						this.outputStream.write(' ');</span>
+<span class="fc" id="L529">						this.outputStream.write(headerValue);</span>
+<span class="fc" id="L530">						writeNewLine(this.outputStream);</span>
+<span class="fc" id="L531">					}</span>
+<span class="fc" id="L532">				}</span>
+<span class="fc" id="L533">				writeNewLine(this.outputStream);</span>
+<span class="fc" id="L534">				this.headersWritten = true;</span>
+			}
+<span class="fc" id="L536">		}</span>
+
+		private byte[] getBytes(String name) {
+<span class="fc" id="L539">			return name.getBytes(this.charset);</span>
+		}
+	}
+
+
+	/**
+	 * Inner class to avoid a hard dependency on the JavaMail API.
+	 */
+	private static class MimeDelegate {
+
+		public static String encode(String value, String charset) {
+			try {
+<span class="nc" id="L551">				return MimeUtility.encodeText(value, charset, null);</span>
+			}
+<span class="nc" id="L553">			catch (UnsupportedEncodingException ex) {</span>
+<span class="nc" id="L554">				throw new IllegalStateException(ex);</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

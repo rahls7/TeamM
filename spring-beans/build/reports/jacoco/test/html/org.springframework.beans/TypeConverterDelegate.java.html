@@ -1,0 +1,645 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TypeConverterDelegate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans</a> &gt; <span class="el_source">TypeConverterDelegate.java</span></div><h1>TypeConverterDelegate.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2019 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans;
+
+import java.beans.PropertyEditor;
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Optional;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.CollectionFactory;
+import org.springframework.core.convert.ConversionFailedException;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.NumberUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Internal helper class for converting property values to target types.
+ *
+ * &lt;p&gt;Works on a given {@link PropertyEditorRegistrySupport} instance.
+ * Used as a delegate by {@link BeanWrapperImpl} and {@link SimpleTypeConverter}.
+ *
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Dave Syer
+ * @since 2.0
+ * @see BeanWrapperImpl
+ * @see SimpleTypeConverter
+ */
+class TypeConverterDelegate {
+
+<span class="fc" id="L57">	private static final Log logger = LogFactory.getLog(TypeConverterDelegate.class);</span>
+
+	private final PropertyEditorRegistrySupport propertyEditorRegistry;
+
+	@Nullable
+	private final Object targetObject;
+
+
+	/**
+	 * Create a new TypeConverterDelegate for the given editor registry.
+	 * @param propertyEditorRegistry the editor registry to use
+	 */
+	public TypeConverterDelegate(PropertyEditorRegistrySupport propertyEditorRegistry) {
+<span class="fc" id="L70">		this(propertyEditorRegistry, null);</span>
+<span class="fc" id="L71">	}</span>
+
+	/**
+	 * Create a new TypeConverterDelegate for the given editor registry and bean instance.
+	 * @param propertyEditorRegistry the editor registry to use
+	 * @param targetObject the target object to work on (as context that can be passed to editors)
+	 */
+<span class="fc" id="L78">	public TypeConverterDelegate(PropertyEditorRegistrySupport propertyEditorRegistry, @Nullable Object targetObject) {</span>
+<span class="fc" id="L79">		this.propertyEditorRegistry = propertyEditorRegistry;</span>
+<span class="fc" id="L80">		this.targetObject = targetObject;</span>
+<span class="fc" id="L81">	}</span>
+
+
+	/**
+	 * Convert the value to the required type for the specified property.
+	 * @param propertyName name of the property
+	 * @param oldValue the previous value, if available (may be {@code null})
+	 * @param newValue the proposed new value
+	 * @param requiredType the type we must convert to
+	 * (or {@code null} if not known, for example in case of a collection element)
+	 * @return the new value, possibly the result of type conversion
+	 * @throws IllegalArgumentException if type conversion failed
+	 */
+	@Nullable
+	public &lt;T&gt; T convertIfNecessary(@Nullable String propertyName, @Nullable Object oldValue,
+			Object newValue, @Nullable Class&lt;T&gt; requiredType) throws IllegalArgumentException {
+
+<span class="fc" id="L98">		return convertIfNecessary(propertyName, oldValue, newValue, requiredType, TypeDescriptor.valueOf(requiredType));</span>
+	}
+
+	/**
+	 * Convert the value to the required type (if necessary from a String),
+	 * for the specified property.
+	 * @param propertyName name of the property
+	 * @param oldValue the previous value, if available (may be {@code null})
+	 * @param newValue the proposed new value
+	 * @param requiredType the type we must convert to
+	 * (or {@code null} if not known, for example in case of a collection element)
+	 * @param typeDescriptor the descriptor for the target property or field
+	 * @return the new value, possibly the result of type conversion
+	 * @throws IllegalArgumentException if type conversion failed
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Nullable
+	public &lt;T&gt; T convertIfNecessary(@Nullable String propertyName, @Nullable Object oldValue, @Nullable Object newValue,
+			@Nullable Class&lt;T&gt; requiredType, @Nullable TypeDescriptor typeDescriptor) throws IllegalArgumentException {
+
+		// Custom editor for this type?
+<span class="fc" id="L119">		PropertyEditor editor = this.propertyEditorRegistry.findCustomEditor(requiredType, propertyName);</span>
+
+<span class="fc" id="L121">		ConversionFailedException conversionAttemptEx = null;</span>
+
+		// No custom editor but custom ConversionService specified?
+<span class="fc" id="L124">		ConversionService conversionService = this.propertyEditorRegistry.getConversionService();</span>
+<span class="pc bpc" id="L125" title="1 of 8 branches missed.">		if (editor == null &amp;&amp; conversionService != null &amp;&amp; newValue != null &amp;&amp; typeDescriptor != null) {</span>
+<span class="fc" id="L126">			TypeDescriptor sourceTypeDesc = TypeDescriptor.forObject(newValue);</span>
+<span class="pc bpc" id="L127" title="1 of 2 branches missed.">			if (conversionService.canConvert(sourceTypeDesc, typeDescriptor)) {</span>
+				try {
+<span class="fc" id="L129">					return (T) conversionService.convert(newValue, sourceTypeDesc, typeDescriptor);</span>
+				}
+<span class="fc" id="L131">				catch (ConversionFailedException ex) {</span>
+					// fallback to default conversion logic below
+<span class="fc" id="L133">					conversionAttemptEx = ex;</span>
+				}
+			}
+		}
+
+<span class="fc" id="L138">		Object convertedValue = newValue;</span>
+
+		// Value not of required type?
+<span class="fc bfc" id="L141" title="All 6 branches covered.">		if (editor != null || (requiredType != null &amp;&amp; !ClassUtils.isAssignableValue(requiredType, convertedValue))) {</span>
+<span class="pc bpc" id="L142" title="1 of 8 branches missed.">			if (typeDescriptor != null &amp;&amp; requiredType != null &amp;&amp; Collection.class.isAssignableFrom(requiredType) &amp;&amp;</span>
+					convertedValue instanceof String) {
+<span class="fc" id="L144">				TypeDescriptor elementTypeDesc = typeDescriptor.getElementTypeDescriptor();</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">				if (elementTypeDesc != null) {</span>
+<span class="fc" id="L146">					Class&lt;?&gt; elementType = elementTypeDesc.getType();</span>
+<span class="fc bfc" id="L147" title="All 4 branches covered.">					if (Class.class == elementType || Enum.class.isAssignableFrom(elementType)) {</span>
+<span class="fc" id="L148">						convertedValue = StringUtils.commaDelimitedListToStringArray((String) convertedValue);</span>
+					}
+				}
+			}
+<span class="fc bfc" id="L152" title="All 2 branches covered.">			if (editor == null) {</span>
+<span class="fc" id="L153">				editor = findDefaultEditor(requiredType);</span>
+			}
+<span class="fc" id="L155">			convertedValue = doConvertValue(oldValue, convertedValue, requiredType, editor);</span>
+		}
+
+<span class="fc" id="L158">		boolean standardConversion = false;</span>
+
+<span class="fc bfc" id="L160" title="All 2 branches covered.">		if (requiredType != null) {</span>
+			// Try to apply some standard type conversion rules if appropriate.
+
+<span class="fc bfc" id="L163" title="All 2 branches covered.">			if (convertedValue != null) {</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">				if (Object.class == requiredType) {</span>
+<span class="fc" id="L165">					return (T) convertedValue;</span>
+				}
+<span class="fc bfc" id="L167" title="All 2 branches covered.">				else if (requiredType.isArray()) {</span>
+					// Array required -&gt; apply appropriate conversion of elements.
+<span class="fc bfc" id="L169" title="All 4 branches covered.">					if (convertedValue instanceof String &amp;&amp; Enum.class.isAssignableFrom(requiredType.getComponentType())) {</span>
+<span class="fc" id="L170">						convertedValue = StringUtils.commaDelimitedListToStringArray((String) convertedValue);</span>
+					}
+<span class="fc" id="L172">					return (T) convertToTypedArray(convertedValue, propertyName, requiredType.getComponentType());</span>
+				}
+<span class="fc bfc" id="L174" title="All 2 branches covered.">				else if (convertedValue instanceof Collection) {</span>
+					// Convert elements to target type, if determined.
+<span class="fc" id="L176">					convertedValue = convertToTypedCollection(</span>
+							(Collection&lt;?&gt;) convertedValue, propertyName, requiredType, typeDescriptor);
+<span class="fc" id="L178">					standardConversion = true;</span>
+				}
+<span class="fc bfc" id="L180" title="All 2 branches covered.">				else if (convertedValue instanceof Map) {</span>
+					// Convert keys and values to respective target type, if determined.
+<span class="fc" id="L182">					convertedValue = convertToTypedMap(</span>
+							(Map&lt;?, ?&gt;) convertedValue, propertyName, requiredType, typeDescriptor);
+<span class="fc" id="L184">					standardConversion = true;</span>
+				}
+<span class="pc bpc" id="L186" title="3 of 4 branches missed.">				if (convertedValue.getClass().isArray() &amp;&amp; Array.getLength(convertedValue) == 1) {</span>
+<span class="nc" id="L187">					convertedValue = Array.get(convertedValue, 0);</span>
+<span class="nc" id="L188">					standardConversion = true;</span>
+				}
+<span class="fc bfc" id="L190" title="All 4 branches covered.">				if (String.class == requiredType &amp;&amp; ClassUtils.isPrimitiveOrWrapper(convertedValue.getClass())) {</span>
+					// We can stringify any primitive value...
+<span class="fc" id="L192">					return (T) convertedValue.toString();</span>
+				}
+<span class="fc bfc" id="L194" title="All 4 branches covered.">				else if (convertedValue instanceof String &amp;&amp; !requiredType.isInstance(convertedValue)) {</span>
+<span class="pc bpc" id="L195" title="1 of 6 branches missed.">					if (conversionAttemptEx == null &amp;&amp; !requiredType.isInterface() &amp;&amp; !requiredType.isEnum()) {</span>
+						try {
+<span class="fc" id="L197">							Constructor&lt;T&gt; strCtor = requiredType.getConstructor(String.class);</span>
+<span class="fc" id="L198">							return BeanUtils.instantiateClass(strCtor, convertedValue);</span>
+						}
+<span class="fc" id="L200">						catch (NoSuchMethodException ex) {</span>
+							// proceed with field lookup
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">							if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L203">								logger.trace(&quot;No String constructor found on type [&quot; + requiredType.getName() + &quot;]&quot;, ex);</span>
+							}
+						}
+<span class="nc" id="L206">						catch (Exception ex) {</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">							if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L208">								logger.debug(&quot;Construction via String failed for type [&quot; + requiredType.getName() + &quot;]&quot;, ex);</span>
+							}
+<span class="fc" id="L210">						}</span>
+					}
+<span class="fc" id="L212">					String trimmedValue = ((String) convertedValue).trim();</span>
+<span class="fc bfc" id="L213" title="All 4 branches covered.">					if (requiredType.isEnum() &amp;&amp; trimmedValue.isEmpty()) {</span>
+						// It's an empty enum identifier: reset the enum value to null.
+<span class="fc" id="L215">						return null;</span>
+					}
+<span class="fc" id="L217">					convertedValue = attemptToConvertStringToEnum(requiredType, trimmedValue, convertedValue);</span>
+<span class="fc" id="L218">					standardConversion = true;</span>
+<span class="fc" id="L219">				}</span>
+<span class="fc bfc" id="L220" title="All 4 branches covered.">				else if (convertedValue instanceof Number &amp;&amp; Number.class.isAssignableFrom(requiredType)) {</span>
+<span class="fc" id="L221">					convertedValue = NumberUtils.convertNumberToTargetClass(</span>
+							(Number) convertedValue, (Class&lt;Number&gt;) requiredType);
+<span class="fc" id="L223">					standardConversion = true;</span>
+				}
+			}
+			else {
+				// convertedValue == null
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">				if (requiredType == Optional.class) {</span>
+<span class="nc" id="L229">					convertedValue = Optional.empty();</span>
+				}
+			}
+
+<span class="fc bfc" id="L233" title="All 2 branches covered.">			if (!ClassUtils.isAssignableValue(requiredType, convertedValue)) {</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">				if (conversionAttemptEx != null) {</span>
+					// Original exception from former ConversionService call above...
+<span class="nc" id="L236">					throw conversionAttemptEx;</span>
+				}
+<span class="pc bpc" id="L238" title="3 of 4 branches missed.">				else if (conversionService != null &amp;&amp; typeDescriptor != null) {</span>
+					// ConversionService not tried before, probably custom editor found
+					// but editor couldn't produce the required type...
+<span class="nc" id="L241">					TypeDescriptor sourceTypeDesc = TypeDescriptor.forObject(newValue);</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">					if (conversionService.canConvert(sourceTypeDesc, typeDescriptor)) {</span>
+<span class="nc" id="L243">						return (T) conversionService.convert(newValue, sourceTypeDesc, typeDescriptor);</span>
+					}
+				}
+
+				// Definitely doesn't match: throw IllegalArgumentException/IllegalStateException
+<span class="fc" id="L248">				StringBuilder msg = new StringBuilder();</span>
+<span class="fc" id="L249">				msg.append(&quot;Cannot convert value of type '&quot;).append(ClassUtils.getDescriptiveType(newValue));</span>
+<span class="fc" id="L250">				msg.append(&quot;' to required type '&quot;).append(ClassUtils.getQualifiedName(requiredType)).append(&quot;'&quot;);</span>
+<span class="fc bfc" id="L251" title="All 2 branches covered.">				if (propertyName != null) {</span>
+<span class="fc" id="L252">					msg.append(&quot; for property '&quot;).append(propertyName).append(&quot;'&quot;);</span>
+				}
+<span class="fc bfc" id="L254" title="All 2 branches covered.">				if (editor != null) {</span>
+<span class="fc" id="L255">					msg.append(&quot;: PropertyEditor [&quot;).append(editor.getClass().getName()).append(</span>
+<span class="fc" id="L256">							&quot;] returned inappropriate value of type '&quot;).append(</span>
+<span class="fc" id="L257">							ClassUtils.getDescriptiveType(convertedValue)).append(&quot;'&quot;);</span>
+<span class="fc" id="L258">					throw new IllegalArgumentException(msg.toString());</span>
+				}
+				else {
+<span class="fc" id="L261">					msg.append(&quot;: no matching editors or conversion strategy found&quot;);</span>
+<span class="fc" id="L262">					throw new IllegalStateException(msg.toString());</span>
+				}
+			}
+		}
+
+<span class="fc bfc" id="L267" title="All 2 branches covered.">		if (conversionAttemptEx != null) {</span>
+<span class="pc bpc" id="L268" title="4 of 8 branches missed.">			if (editor == null &amp;&amp; !standardConversion &amp;&amp; requiredType != null &amp;&amp; Object.class != requiredType) {</span>
+<span class="nc" id="L269">				throw conversionAttemptEx;</span>
+			}
+<span class="fc" id="L271">			logger.debug(&quot;Original ConversionService attempt failed - ignored since &quot; +</span>
+					&quot;PropertyEditor based conversion eventually succeeded&quot;, conversionAttemptEx);
+		}
+
+<span class="fc" id="L275">		return (T) convertedValue;</span>
+	}
+
+	private Object attemptToConvertStringToEnum(Class&lt;?&gt; requiredType, String trimmedValue, Object currentConvertedValue) {
+<span class="fc" id="L279">		Object convertedValue = currentConvertedValue;</span>
+
+<span class="pc bpc" id="L281" title="1 of 4 branches missed.">		if (Enum.class == requiredType &amp;&amp; this.targetObject != null) {</span>
+			// target type is declared as raw enum, treat the trimmed value as &lt;enum.fqn&gt;.FIELD_NAME
+<span class="fc" id="L283">			int index = trimmedValue.lastIndexOf('.');</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">			if (index &gt; - 1) {</span>
+<span class="fc" id="L285">				String enumType = trimmedValue.substring(0, index);</span>
+<span class="fc" id="L286">				String fieldName = trimmedValue.substring(index + 1);</span>
+<span class="fc" id="L287">				ClassLoader cl = this.targetObject.getClass().getClassLoader();</span>
+				try {
+<span class="fc" id="L289">					Class&lt;?&gt; enumValueType = ClassUtils.forName(enumType, cl);</span>
+<span class="fc" id="L290">					Field enumField = enumValueType.getField(fieldName);</span>
+<span class="fc" id="L291">					convertedValue = enumField.get(null);</span>
+				}
+<span class="nc" id="L293">				catch (ClassNotFoundException ex) {</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L295">						logger.trace(&quot;Enum class [&quot; + enumType + &quot;] cannot be loaded&quot;, ex);</span>
+					}
+				}
+<span class="nc" id="L298">				catch (Throwable ex) {</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L300">						logger.trace(&quot;Field [&quot; + fieldName + &quot;] isn't an enum value for type [&quot; + enumType + &quot;]&quot;, ex);</span>
+					}
+<span class="pc" id="L302">				}</span>
+			}
+		}
+
+<span class="fc bfc" id="L306" title="All 2 branches covered.">		if (convertedValue == currentConvertedValue) {</span>
+			// Try field lookup as fallback: for JDK 1.5 enum or custom enum
+			// with values defined as static fields. Resulting value still needs
+			// to be checked, hence we don't return it right away.
+			try {
+<span class="fc" id="L311">				Field enumField = requiredType.getField(trimmedValue);</span>
+<span class="fc" id="L312">				ReflectionUtils.makeAccessible(enumField);</span>
+<span class="fc" id="L313">				convertedValue = enumField.get(null);</span>
+			}
+<span class="fc" id="L315">			catch (Throwable ex) {</span>
+<span class="pc bpc" id="L316" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L317">					logger.trace(&quot;Field [&quot; + convertedValue + &quot;] isn't an enum value&quot;, ex);</span>
+				}
+<span class="fc" id="L319">			}</span>
+		}
+
+<span class="fc" id="L322">		return convertedValue;</span>
+	}
+	/**
+	 * Find a default editor for the given type.
+	 * @param requiredType the type to find an editor for
+	 * @return the corresponding editor, or {@code null} if none
+	 */
+	@Nullable
+	private PropertyEditor findDefaultEditor(@Nullable Class&lt;?&gt; requiredType) {
+<span class="fc" id="L331">		PropertyEditor editor = null;</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">		if (requiredType != null) {</span>
+			// No custom editor -&gt; check BeanWrapperImpl's default editors.
+<span class="fc" id="L334">			editor = this.propertyEditorRegistry.getDefaultEditor(requiredType);</span>
+<span class="fc bfc" id="L335" title="All 4 branches covered.">			if (editor == null &amp;&amp; String.class != requiredType) {</span>
+				// No BeanWrapper default editor -&gt; check standard JavaBean editor.
+<span class="fc" id="L337">				editor = BeanUtils.findEditorByConvention(requiredType);</span>
+			}
+		}
+<span class="fc" id="L340">		return editor;</span>
+	}
+
+	/**
+	 * Convert the value to the required type (if necessary from a String),
+	 * using the given property editor.
+	 * @param oldValue the previous value, if available (may be {@code null})
+	 * @param newValue the proposed new value
+	 * @param requiredType the type we must convert to
+	 * (or {@code null} if not known, for example in case of a collection element)
+	 * @param editor the PropertyEditor to use
+	 * @return the new value, possibly the result of type conversion
+	 * @throws IllegalArgumentException if type conversion failed
+	 */
+	@Nullable
+	private Object doConvertValue(@Nullable Object oldValue, @Nullable Object newValue,
+			@Nullable Class&lt;?&gt; requiredType, @Nullable PropertyEditor editor) {
+
+<span class="fc" id="L358">		Object convertedValue = newValue;</span>
+
+<span class="fc bfc" id="L360" title="All 4 branches covered.">		if (editor != null &amp;&amp; !(convertedValue instanceof String)) {</span>
+			// Not a String -&gt; use PropertyEditor's setValue.
+			// With standard PropertyEditors, this will return the very same object;
+			// we just want to allow special PropertyEditors to override setValue
+			// for type conversion from non-String values to the required type.
+			try {
+<span class="fc" id="L366">				editor.setValue(convertedValue);</span>
+<span class="fc" id="L367">				Object newConvertedValue = editor.getValue();</span>
+<span class="fc bfc" id="L368" title="All 2 branches covered.">				if (newConvertedValue != convertedValue) {</span>
+<span class="fc" id="L369">					convertedValue = newConvertedValue;</span>
+					// Reset PropertyEditor: It already did a proper conversion.
+					// Don't use it again for a setAsText call.
+<span class="fc" id="L372">					editor = null;</span>
+				}
+			}
+<span class="nc" id="L375">			catch (Exception ex) {</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L377">					logger.debug(&quot;PropertyEditor [&quot; + editor.getClass().getName() + &quot;] does not support setValue call&quot;, ex);</span>
+				}
+				// Swallow and proceed.
+<span class="fc" id="L380">			}</span>
+		}
+
+<span class="fc" id="L383">		Object returnValue = convertedValue;</span>
+
+<span class="fc bfc" id="L385" title="All 6 branches covered.">		if (requiredType != null &amp;&amp; !requiredType.isArray() &amp;&amp; convertedValue instanceof String[]) {</span>
+			// Convert String array to a comma-separated String.
+			// Only applies if no PropertyEditor converted the String array before.
+			// The CSV String will be passed into a PropertyEditor's setAsText method, if any.
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L390">				logger.trace(&quot;Converting String array to comma-delimited String [&quot; + convertedValue + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L392">			convertedValue = StringUtils.arrayToCommaDelimitedString((String[]) convertedValue);</span>
+		}
+
+<span class="fc bfc" id="L395" title="All 2 branches covered.">		if (convertedValue instanceof String) {</span>
+<span class="fc bfc" id="L396" title="All 2 branches covered.">			if (editor != null) {</span>
+				// Use PropertyEditor's setAsText in case of a String value.
+<span class="pc bpc" id="L398" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L399">					logger.trace(&quot;Converting String to [&quot; + requiredType + &quot;] using property editor [&quot; + editor + &quot;]&quot;);</span>
+				}
+<span class="fc" id="L401">				String newTextValue = (String) convertedValue;</span>
+<span class="fc" id="L402">				return doConvertTextValue(oldValue, newTextValue, editor);</span>
+			}
+<span class="fc bfc" id="L404" title="All 2 branches covered.">			else if (String.class == requiredType) {</span>
+<span class="fc" id="L405">				returnValue = convertedValue;</span>
+			}
+		}
+
+<span class="fc" id="L409">		return returnValue;</span>
+	}
+
+	/**
+	 * Convert the given text value using the given property editor.
+	 * @param oldValue the previous value, if available (may be {@code null})
+	 * @param newTextValue the proposed text value
+	 * @param editor the PropertyEditor to use
+	 * @return the converted value
+	 */
+	private Object doConvertTextValue(@Nullable Object oldValue, String newTextValue, PropertyEditor editor) {
+		try {
+<span class="fc" id="L421">			editor.setValue(oldValue);</span>
+		}
+<span class="nc" id="L423">		catch (Exception ex) {</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L425">				logger.debug(&quot;PropertyEditor [&quot; + editor.getClass().getName() + &quot;] does not support setValue call&quot;, ex);</span>
+			}
+			// Swallow and proceed.
+<span class="fc" id="L428">		}</span>
+<span class="fc" id="L429">		editor.setAsText(newTextValue);</span>
+<span class="fc" id="L430">		return editor.getValue();</span>
+	}
+
+	private Object convertToTypedArray(Object input, @Nullable String propertyName, Class&lt;?&gt; componentType) {
+<span class="fc bfc" id="L434" title="All 2 branches covered.">		if (input instanceof Collection) {</span>
+			// Convert Collection elements to array elements.
+<span class="fc" id="L436">			Collection&lt;?&gt; coll = (Collection&lt;?&gt;) input;</span>
+<span class="fc" id="L437">			Object result = Array.newInstance(componentType, coll.size());</span>
+<span class="fc" id="L438">			int i = 0;</span>
+<span class="fc bfc" id="L439" title="All 2 branches covered.">			for (Iterator&lt;?&gt; it = coll.iterator(); it.hasNext(); i++) {</span>
+<span class="fc" id="L440">				Object value = convertIfNecessary(</span>
+<span class="fc" id="L441">						buildIndexedPropertyName(propertyName, i), null, it.next(), componentType);</span>
+<span class="fc" id="L442">				Array.set(result, i, value);</span>
+			}
+<span class="fc" id="L444">			return result;</span>
+		}
+<span class="fc bfc" id="L446" title="All 2 branches covered.">		else if (input.getClass().isArray()) {</span>
+			// Convert array elements, if necessary.
+<span class="fc bfc" id="L448" title="All 2 branches covered.">			if (componentType.equals(input.getClass().getComponentType()) &amp;&amp;</span>
+<span class="fc bfc" id="L449" title="All 2 branches covered.">					!this.propertyEditorRegistry.hasCustomEditorForElement(componentType, propertyName)) {</span>
+<span class="fc" id="L450">				return input;</span>
+			}
+<span class="fc" id="L452">			int arrayLength = Array.getLength(input);</span>
+<span class="fc" id="L453">			Object result = Array.newInstance(componentType, arrayLength);</span>
+<span class="fc bfc" id="L454" title="All 2 branches covered.">			for (int i = 0; i &lt; arrayLength; i++) {</span>
+<span class="fc" id="L455">				Object value = convertIfNecessary(</span>
+<span class="fc" id="L456">						buildIndexedPropertyName(propertyName, i), null, Array.get(input, i), componentType);</span>
+<span class="fc" id="L457">				Array.set(result, i, value);</span>
+			}
+<span class="fc" id="L459">			return result;</span>
+		}
+		else {
+			// A plain value: convert it to an array with a single component.
+<span class="fc" id="L463">			Object result = Array.newInstance(componentType, 1);</span>
+<span class="fc" id="L464">			Object value = convertIfNecessary(</span>
+<span class="fc" id="L465">					buildIndexedPropertyName(propertyName, 0), null, input, componentType);</span>
+<span class="fc" id="L466">			Array.set(result, 0, value);</span>
+<span class="fc" id="L467">			return result;</span>
+		}
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private Collection&lt;?&gt; convertToTypedCollection(Collection&lt;?&gt; original, @Nullable String propertyName,
+			Class&lt;?&gt; requiredType, @Nullable TypeDescriptor typeDescriptor) {
+
+<span class="fc bfc" id="L475" title="All 2 branches covered.">		if (!Collection.class.isAssignableFrom(requiredType)) {</span>
+<span class="fc" id="L476">			return original;</span>
+		}
+
+<span class="fc" id="L479">		boolean approximable = CollectionFactory.isApproximableCollectionType(requiredType);</span>
+<span class="fc bfc" id="L480" title="All 4 branches covered.">		if (!approximable &amp;&amp; !canCreateCopy(requiredType)) {</span>
+<span class="pc bpc" id="L481" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L482">				logger.debug(&quot;Custom Collection type [&quot; + original.getClass().getName() +</span>
+						&quot;] does not allow for creating a copy - injecting original Collection as-is&quot;);
+			}
+<span class="fc" id="L485">			return original;</span>
+		}
+
+<span class="fc" id="L488">		boolean originalAllowed = requiredType.isInstance(original);</span>
+<span class="pc bpc" id="L489" title="1 of 2 branches missed.">		TypeDescriptor elementType = (typeDescriptor != null ? typeDescriptor.getElementTypeDescriptor() : null);</span>
+<span class="fc bfc" id="L490" title="All 4 branches covered.">		if (elementType == null &amp;&amp; originalAllowed &amp;&amp;</span>
+<span class="fc bfc" id="L491" title="All 2 branches covered.">				!this.propertyEditorRegistry.hasCustomEditorForElement(null, propertyName)) {</span>
+<span class="fc" id="L492">			return original;</span>
+		}
+
+		Iterator&lt;?&gt; it;
+		try {
+<span class="fc" id="L497">			it = original.iterator();</span>
+		}
+<span class="nc" id="L499">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L501">				logger.debug(&quot;Cannot access Collection of type [&quot; + original.getClass().getName() +</span>
+						&quot;] - injecting original Collection as-is: &quot; + ex);
+			}
+<span class="nc" id="L504">			return original;</span>
+<span class="fc" id="L505">		}</span>
+
+		Collection&lt;Object&gt; convertedCopy;
+		try {
+<span class="fc bfc" id="L509" title="All 2 branches covered.">			if (approximable) {</span>
+<span class="fc" id="L510">				convertedCopy = CollectionFactory.createApproximateCollection(original, original.size());</span>
+			}
+			else {
+<span class="fc" id="L513">				convertedCopy = (Collection&lt;Object&gt;)</span>
+<span class="fc" id="L514">						ReflectionUtils.accessibleConstructor(requiredType).newInstance();</span>
+			}
+		}
+<span class="nc" id="L517">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L519">				logger.debug(&quot;Cannot create copy of Collection type [&quot; + original.getClass().getName() +</span>
+						&quot;] - injecting original Collection as-is: &quot; + ex);
+			}
+<span class="nc" id="L522">			return original;</span>
+<span class="fc" id="L523">		}</span>
+
+<span class="fc" id="L525">		int i = 0;</span>
+<span class="fc bfc" id="L526" title="All 2 branches covered.">		for (; it.hasNext(); i++) {</span>
+<span class="fc" id="L527">			Object element = it.next();</span>
+<span class="fc" id="L528">			String indexedPropertyName = buildIndexedPropertyName(propertyName, i);</span>
+<span class="fc bfc" id="L529" title="All 2 branches covered.">			Object convertedElement = convertIfNecessary(indexedPropertyName, null, element,</span>
+<span class="fc" id="L530">					(elementType != null ? elementType.getType() : null) , elementType);</span>
+			try {
+<span class="fc" id="L532">				convertedCopy.add(convertedElement);</span>
+			}
+<span class="nc" id="L534">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L536">					logger.debug(&quot;Collection type [&quot; + original.getClass().getName() +</span>
+							&quot;] seems to be read-only - injecting original Collection as-is: &quot; + ex);
+				}
+<span class="nc" id="L539">				return original;</span>
+<span class="fc" id="L540">			}</span>
+<span class="fc bfc" id="L541" title="All 4 branches covered.">			originalAllowed = originalAllowed &amp;&amp; (element == convertedElement);</span>
+		}
+<span class="fc bfc" id="L543" title="All 2 branches covered.">		return (originalAllowed ? original : convertedCopy);</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private Map&lt;?, ?&gt; convertToTypedMap(Map&lt;?, ?&gt; original, @Nullable String propertyName,
+			Class&lt;?&gt; requiredType, @Nullable TypeDescriptor typeDescriptor) {
+
+<span class="fc bfc" id="L550" title="All 2 branches covered.">		if (!Map.class.isAssignableFrom(requiredType)) {</span>
+<span class="fc" id="L551">			return original;</span>
+		}
+
+<span class="fc" id="L554">		boolean approximable = CollectionFactory.isApproximableMapType(requiredType);</span>
+<span class="fc bfc" id="L555" title="All 4 branches covered.">		if (!approximable &amp;&amp; !canCreateCopy(requiredType)) {</span>
+<span class="pc bpc" id="L556" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L557">				logger.debug(&quot;Custom Map type [&quot; + original.getClass().getName() +</span>
+						&quot;] does not allow for creating a copy - injecting original Map as-is&quot;);
+			}
+<span class="fc" id="L560">			return original;</span>
+		}
+
+<span class="fc" id="L563">		boolean originalAllowed = requiredType.isInstance(original);</span>
+<span class="pc bpc" id="L564" title="1 of 2 branches missed.">		TypeDescriptor keyType = (typeDescriptor != null ? typeDescriptor.getMapKeyTypeDescriptor() : null);</span>
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">		TypeDescriptor valueType = (typeDescriptor != null ? typeDescriptor.getMapValueTypeDescriptor() : null);</span>
+<span class="pc bpc" id="L566" title="1 of 6 branches missed.">		if (keyType == null &amp;&amp; valueType == null &amp;&amp; originalAllowed &amp;&amp;</span>
+<span class="fc bfc" id="L567" title="All 2 branches covered.">				!this.propertyEditorRegistry.hasCustomEditorForElement(null, propertyName)) {</span>
+<span class="fc" id="L568">			return original;</span>
+		}
+
+		Iterator&lt;?&gt; it;
+		try {
+<span class="fc" id="L573">			it = original.entrySet().iterator();</span>
+		}
+<span class="nc" id="L575">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L577">				logger.debug(&quot;Cannot access Map of type [&quot; + original.getClass().getName() +</span>
+						&quot;] - injecting original Map as-is: &quot; + ex);
+			}
+<span class="nc" id="L580">			return original;</span>
+<span class="fc" id="L581">		}</span>
+
+		Map&lt;Object, Object&gt; convertedCopy;
+		try {
+<span class="fc bfc" id="L585" title="All 2 branches covered.">			if (approximable) {</span>
+<span class="fc" id="L586">				convertedCopy = CollectionFactory.createApproximateMap(original, original.size());</span>
+			}
+			else {
+<span class="fc" id="L589">				convertedCopy = (Map&lt;Object, Object&gt;)</span>
+<span class="fc" id="L590">						ReflectionUtils.accessibleConstructor(requiredType).newInstance();</span>
+			}
+		}
+<span class="nc" id="L593">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L595">				logger.debug(&quot;Cannot create copy of Map type [&quot; + original.getClass().getName() +</span>
+						&quot;] - injecting original Map as-is: &quot; + ex);
+			}
+<span class="nc" id="L598">			return original;</span>
+<span class="fc" id="L599">		}</span>
+
+<span class="fc bfc" id="L601" title="All 2 branches covered.">		while (it.hasNext()) {</span>
+<span class="fc" id="L602">			Map.Entry&lt;?, ?&gt; entry = (Map.Entry&lt;?, ?&gt;) it.next();</span>
+<span class="fc" id="L603">			Object key = entry.getKey();</span>
+<span class="fc" id="L604">			Object value = entry.getValue();</span>
+<span class="fc" id="L605">			String keyedPropertyName = buildKeyedPropertyName(propertyName, key);</span>
+<span class="fc bfc" id="L606" title="All 2 branches covered.">			Object convertedKey = convertIfNecessary(keyedPropertyName, null, key,</span>
+<span class="fc" id="L607">					(keyType != null ? keyType.getType() : null), keyType);</span>
+<span class="fc bfc" id="L608" title="All 2 branches covered.">			Object convertedValue = convertIfNecessary(keyedPropertyName, null, value,</span>
+<span class="fc" id="L609">					(valueType!= null ? valueType.getType() : null), valueType);</span>
+			try {
+<span class="fc" id="L611">				convertedCopy.put(convertedKey, convertedValue);</span>
+			}
+<span class="fc" id="L613">			catch (Throwable ex) {</span>
+<span class="pc bpc" id="L614" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L615">					logger.debug(&quot;Map type [&quot; + original.getClass().getName() +</span>
+							&quot;] seems to be read-only - injecting original Map as-is: &quot; + ex);
+				}
+<span class="fc" id="L618">				return original;</span>
+<span class="fc" id="L619">			}</span>
+<span class="fc bfc" id="L620" title="All 6 branches covered.">			originalAllowed = originalAllowed &amp;&amp; (key == convertedKey) &amp;&amp; (value == convertedValue);</span>
+<span class="fc" id="L621">		}</span>
+<span class="fc bfc" id="L622" title="All 2 branches covered.">		return (originalAllowed ? original : convertedCopy);</span>
+	}
+
+	@Nullable
+	private String buildIndexedPropertyName(@Nullable String propertyName, int index) {
+<span class="fc bfc" id="L627" title="All 2 branches covered.">		return (propertyName != null ?</span>
+				propertyName + PropertyAccessor.PROPERTY_KEY_PREFIX + index + PropertyAccessor.PROPERTY_KEY_SUFFIX :
+				null);
+	}
+
+	@Nullable
+	private String buildKeyedPropertyName(@Nullable String propertyName, Object key) {
+<span class="fc bfc" id="L634" title="All 2 branches covered.">		return (propertyName != null ?</span>
+				propertyName + PropertyAccessor.PROPERTY_KEY_PREFIX + key + PropertyAccessor.PROPERTY_KEY_SUFFIX :
+				null);
+	}
+
+	private boolean canCreateCopy(Class&lt;?&gt; requiredType) {
+<span class="pc bpc" id="L640" title="1 of 4 branches missed.">		return (!requiredType.isInterface() &amp;&amp; !Modifier.isAbstract(requiredType.getModifiers()) &amp;&amp;</span>
+<span class="pc bpc" id="L641" title="2 of 4 branches missed.">				Modifier.isPublic(requiredType.getModifiers()) &amp;&amp; ClassUtils.hasConstructor(requiredType));</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

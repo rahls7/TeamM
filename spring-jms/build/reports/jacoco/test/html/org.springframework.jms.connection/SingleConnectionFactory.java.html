@@ -1,0 +1,726 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleConnectionFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jms</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.connection</a> &gt; <span class="el_source">SingleConnectionFactory.java</span></div><h1>SingleConnectionFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.connection;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import javax.jms.Connection;
+import javax.jms.ConnectionFactory;
+import javax.jms.ExceptionListener;
+import javax.jms.JMSContext;
+import javax.jms.JMSException;
+import javax.jms.QueueConnection;
+import javax.jms.QueueConnectionFactory;
+import javax.jms.Session;
+import javax.jms.TopicConnection;
+import javax.jms.TopicConnectionFactory;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * A JMS ConnectionFactory adapter that returns the same Connection
+ * from all {@link #createConnection()} calls, and ignores calls to
+ * {@link javax.jms.Connection#close()}. According to the JMS Connection
+ * model, this is perfectly thread-safe (in contrast to e.g. JDBC). The
+ * shared Connection can be automatically recovered in case of an Exception.
+ *
+ * &lt;p&gt;You can either pass in a specific JMS Connection directly or let this
+ * factory lazily create a Connection via a given target ConnectionFactory.
+ * This factory generally works with JMS 1.1 as well as the JMS 1.0.2 API.
+ *
+ * &lt;p&gt;Note that when using the JMS 1.0.2 API, this ConnectionFactory will switch
+ * into queue/topic mode according to the JMS API methods used at runtime:
+ * {@code createQueueConnection} and {@code createTopicConnection} will
+ * lead to queue/topic mode, respectively; generic {@code createConnection}
+ * calls will lead to a JMS 1.1 connection which is able to serve both modes.
+ *
+ * &lt;p&gt;As of Spring Framework 5, this class supports JMS 2.0 {@code JMSContext}
+ * calls and therefore requires the JMS 2.0 API to be present at runtime.
+ * It may nevertheless run against a JMS 1.1 driver (bound to the JMS 2.0 API)
+ * as long as no actual JMS 2.0 calls are triggered by the application's setup.
+ *
+ * &lt;p&gt;Useful for testing and standalone environments in order to keep using the
+ * same Connection for multiple {@link org.springframework.jms.core.JmsTemplate}
+ * calls, without having a pooling ConnectionFactory underneath. This may span
+ * any number of transactions, even concurrently executing transactions.
+ *
+ * &lt;p&gt;Note that Spring's message listener containers support the use of
+ * a shared Connection within each listener container instance. Using
+ * SingleConnectionFactory in combination only really makes sense for
+ * sharing a single JMS Connection &lt;i&gt;across multiple listener containers&lt;/i&gt;.
+ *
+ * @author Juergen Hoeller
+ * @author Mark Pollack
+ * @since 1.1
+ * @see org.springframework.jms.core.JmsTemplate
+ * @see org.springframework.jms.listener.SimpleMessageListenerContainer
+ * @see org.springframework.jms.listener.DefaultMessageListenerContainer#setCacheLevel
+ */
+public class SingleConnectionFactory implements ConnectionFactory, QueueConnectionFactory,
+		TopicConnectionFactory, ExceptionListener, InitializingBean, DisposableBean {
+
+<span class="pc" id="L89">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	@Nullable
+	private ConnectionFactory targetConnectionFactory;
+
+	@Nullable
+	private String clientId;
+
+	@Nullable
+	private ExceptionListener exceptionListener;
+
+<span class="pc" id="L100">	private boolean reconnectOnException = false;</span>
+
+	/** The target Connection. */
+	@Nullable
+	private Connection connection;
+
+	/** A hint whether to create a queue or topic connection. */
+	@Nullable
+	private Boolean pubSubMode;
+
+	/** An internal aggregator allowing for per-connection ExceptionListeners. */
+	@Nullable
+	private AggregatedExceptionListener aggregatedExceptionListener;
+
+	/** Whether the shared Connection has been started. */
+<span class="pc" id="L115">	private int startedCount = 0;</span>
+
+	/** Synchronization monitor for the shared Connection. */
+<span class="pc" id="L118">	private final Object connectionMonitor = new Object();</span>
+
+
+	/**
+	 * Create a new SingleConnectionFactory for bean-style usage.
+	 * @see #setTargetConnectionFactory
+	 */
+<span class="nc" id="L125">	public SingleConnectionFactory() {</span>
+<span class="nc" id="L126">	}</span>
+
+	/**
+	 * Create a new SingleConnectionFactory that always returns the given Connection.
+	 * @param targetConnection the single Connection
+	 */
+<span class="fc" id="L132">	public SingleConnectionFactory(Connection targetConnection) {</span>
+<span class="fc" id="L133">		Assert.notNull(targetConnection, &quot;Target Connection must not be null&quot;);</span>
+<span class="fc" id="L134">		this.connection = targetConnection;</span>
+<span class="fc" id="L135">	}</span>
+
+	/**
+	 * Create a new SingleConnectionFactory that always returns a single Connection
+	 * that it will lazily create via the given target ConnectionFactory.
+	 * @param targetConnectionFactory the target ConnectionFactory
+	 */
+<span class="fc" id="L142">	public SingleConnectionFactory(ConnectionFactory targetConnectionFactory) {</span>
+<span class="fc" id="L143">		Assert.notNull(targetConnectionFactory, &quot;Target ConnectionFactory must not be null&quot;);</span>
+<span class="fc" id="L144">		this.targetConnectionFactory = targetConnectionFactory;</span>
+<span class="fc" id="L145">	}</span>
+
+
+	/**
+	 * Set the target ConnectionFactory which will be used to lazily
+	 * create a single Connection.
+	 */
+	public void setTargetConnectionFactory(@Nullable ConnectionFactory targetConnectionFactory) {
+<span class="nc" id="L153">		this.targetConnectionFactory = targetConnectionFactory;</span>
+<span class="nc" id="L154">	}</span>
+
+	/**
+	 * Return the target ConnectionFactory which will be used to lazily
+	 * create a single Connection, if any.
+	 */
+	@Nullable
+	public ConnectionFactory getTargetConnectionFactory() {
+<span class="fc" id="L162">		return this.targetConnectionFactory;</span>
+	}
+
+	/**
+	 * Specify a JMS client ID for the single Connection created and exposed
+	 * by this ConnectionFactory.
+	 * &lt;p&gt;Note that client IDs need to be unique among all active Connections
+	 * of the underlying JMS provider. Furthermore, a client ID can only be
+	 * assigned if the original ConnectionFactory hasn't already assigned one.
+	 * @see javax.jms.Connection#setClientID
+	 * @see #setTargetConnectionFactory
+	 */
+	public void setClientId(@Nullable String clientId) {
+<span class="fc" id="L175">		this.clientId = clientId;</span>
+<span class="fc" id="L176">	}</span>
+
+	/**
+	 * Return a JMS client ID for the single Connection created and exposed
+	 * by this ConnectionFactory, if any.
+	 */
+	@Nullable
+	protected String getClientId() {
+<span class="fc" id="L184">		return this.clientId;</span>
+	}
+
+	/**
+	 * Specify an JMS ExceptionListener implementation that should be
+	 * registered with the single Connection created by this factory.
+	 * @see #setReconnectOnException
+	 */
+	public void setExceptionListener(@Nullable ExceptionListener exceptionListener) {
+<span class="fc" id="L193">		this.exceptionListener = exceptionListener;</span>
+<span class="fc" id="L194">	}</span>
+
+	/**
+	 * Return the JMS ExceptionListener implementation that should be registered
+	 * with the single Connection created by this factory, if any.
+	 */
+	@Nullable
+	protected ExceptionListener getExceptionListener() {
+<span class="fc" id="L202">		return this.exceptionListener;</span>
+	}
+
+	/**
+	 * Specify whether the single Connection should be reset (to be subsequently renewed)
+	 * when a JMSException is reported by the underlying Connection.
+	 * &lt;p&gt;Default is &quot;false&quot;. Switch this to &quot;true&quot; to automatically trigger
+	 * recovery based on your JMS provider's exception notifications.
+	 * &lt;p&gt;Internally, this will lead to a special JMS ExceptionListener
+	 * (this SingleConnectionFactory itself) being registered with the
+	 * underlying Connection. This can also be combined with a
+	 * user-specified ExceptionListener, if desired.
+	 * @see #setExceptionListener
+	 */
+	public void setReconnectOnException(boolean reconnectOnException) {
+<span class="fc" id="L217">		this.reconnectOnException = reconnectOnException;</span>
+<span class="fc" id="L218">	}</span>
+
+	/**
+	 * Return whether the single Connection should be renewed when
+	 * a JMSException is reported by the underlying Connection.
+	 */
+	protected boolean isReconnectOnException() {
+<span class="fc" id="L225">		return this.reconnectOnException;</span>
+	}
+
+	/**
+	 * Make sure a Connection or ConnectionFactory has been set.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="nc bnc" id="L233" title="All 4 branches missed.">		if (this.connection == null &amp;&amp; getTargetConnectionFactory() == null) {</span>
+<span class="nc" id="L234">			throw new IllegalArgumentException(&quot;Target Connection or ConnectionFactory is required&quot;);</span>
+		}
+<span class="nc" id="L236">	}</span>
+
+
+	@Override
+	public Connection createConnection() throws JMSException {
+<span class="fc" id="L241">		return getSharedConnectionProxy(getConnection());</span>
+	}
+
+	@Override
+	public Connection createConnection(String username, String password) throws JMSException {
+<span class="nc" id="L246">		throw new javax.jms.IllegalStateException(</span>
+				&quot;SingleConnectionFactory does not support custom username and password&quot;);
+	}
+
+	@Override
+	public QueueConnection createQueueConnection() throws JMSException {
+		Connection con;
+<span class="fc" id="L253">		synchronized (this.connectionMonitor) {</span>
+<span class="fc" id="L254">			this.pubSubMode = Boolean.FALSE;</span>
+<span class="fc" id="L255">			con = createConnection();</span>
+<span class="fc" id="L256">		}</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">		if (!(con instanceof QueueConnection)) {</span>
+<span class="nc" id="L258">			throw new javax.jms.IllegalStateException(</span>
+					&quot;This SingleConnectionFactory does not hold a QueueConnection but rather: &quot; + con);
+		}
+<span class="fc" id="L261">		return ((QueueConnection) con);</span>
+	}
+
+	@Override
+	public QueueConnection createQueueConnection(String username, String password) throws JMSException {
+<span class="nc" id="L266">		throw new javax.jms.IllegalStateException(</span>
+				&quot;SingleConnectionFactory does not support custom username and password&quot;);
+	}
+
+	@Override
+	public TopicConnection createTopicConnection() throws JMSException {
+		Connection con;
+<span class="fc" id="L273">		synchronized (this.connectionMonitor) {</span>
+<span class="fc" id="L274">			this.pubSubMode = Boolean.TRUE;</span>
+<span class="fc" id="L275">			con = createConnection();</span>
+<span class="fc" id="L276">		}</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">		if (!(con instanceof TopicConnection)) {</span>
+<span class="nc" id="L278">			throw new javax.jms.IllegalStateException(</span>
+					&quot;This SingleConnectionFactory does not hold a TopicConnection but rather: &quot; + con);
+		}
+<span class="fc" id="L281">		return ((TopicConnection) con);</span>
+	}
+
+	@Override
+	public TopicConnection createTopicConnection(String username, String password) throws JMSException {
+<span class="nc" id="L286">		throw new javax.jms.IllegalStateException(</span>
+				&quot;SingleConnectionFactory does not support custom username and password&quot;);
+	}
+
+	@Override
+	public JMSContext createContext() {
+<span class="nc" id="L292">		return obtainTargetConnectionFactory().createContext();</span>
+	}
+
+	@Override
+	public JMSContext createContext(String userName, String password) {
+<span class="nc" id="L297">		return obtainTargetConnectionFactory().createContext(userName, password);</span>
+	}
+
+	@Override
+	public JMSContext createContext(String userName, String password, int sessionMode) {
+<span class="nc" id="L302">		return obtainTargetConnectionFactory().createContext(userName, password, sessionMode);</span>
+	}
+
+	@Override
+	public JMSContext createContext(int sessionMode) {
+<span class="nc" id="L307">		return obtainTargetConnectionFactory().createContext(sessionMode);</span>
+	}
+
+	private ConnectionFactory obtainTargetConnectionFactory() {
+<span class="fc" id="L311">		ConnectionFactory target = getTargetConnectionFactory();</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">		Assert.state(target != null, &quot;'targetConnectionFactory' is required&quot;);</span>
+<span class="fc" id="L313">		return target;</span>
+	}
+
+
+	/**
+	 * Obtain an initialized shared Connection.
+	 * @return the Connection (never {@code null})
+	 * @throws javax.jms.JMSException if thrown by JMS API methods
+	 * @see #initConnection()
+	 */
+	protected Connection getConnection() throws JMSException {
+<span class="fc" id="L324">		synchronized (this.connectionMonitor) {</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">			if (this.connection == null) {</span>
+<span class="fc" id="L326">				initConnection();</span>
+			}
+<span class="fc" id="L328">			return this.connection;</span>
+		}
+	}
+
+	/**
+	 * Initialize the underlying shared Connection.
+	 * &lt;p&gt;Closes and reinitializes the Connection if an underlying
+	 * Connection is present already.
+	 * @throws javax.jms.JMSException if thrown by JMS API methods
+	 * @see #prepareConnection
+	 */
+	public void initConnection() throws JMSException {
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">		if (getTargetConnectionFactory() == null) {</span>
+<span class="nc" id="L341">			throw new IllegalStateException(</span>
+					&quot;'targetConnectionFactory' is required for lazily initializing a Connection&quot;);
+		}
+<span class="fc" id="L344">		synchronized (this.connectionMonitor) {</span>
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">			if (this.connection != null) {</span>
+<span class="nc" id="L346">				closeConnection(this.connection);</span>
+			}
+<span class="fc" id="L348">			this.connection = doCreateConnection();</span>
+<span class="fc" id="L349">			prepareConnection(this.connection);</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">			if (this.startedCount &gt; 0) {</span>
+<span class="fc" id="L351">				this.connection.start();</span>
+			}
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L354">				logger.debug(&quot;Established shared JMS Connection: &quot; + this.connection);</span>
+			}
+<span class="fc" id="L356">		}</span>
+<span class="fc" id="L357">	}</span>
+
+	/**
+	 * Exception listener callback that renews the underlying single Connection.
+	 * @see #resetConnection()
+	 */
+	@Override
+	public void onException(JMSException ex) {
+<span class="fc" id="L365">		logger.info(&quot;Encountered a JMSException - resetting the underlying JMS Connection&quot;, ex);</span>
+<span class="fc" id="L366">		resetConnection();</span>
+<span class="fc" id="L367">	}</span>
+
+	/**
+	 * Close the underlying shared connection.
+	 * The provider of this ConnectionFactory needs to care for proper shutdown.
+	 * &lt;p&gt;As this bean implements DisposableBean, a bean factory will
+	 * automatically invoke this on destruction of its cached singletons.
+	 * @see #resetConnection()
+	 */
+	@Override
+	public void destroy() {
+<span class="fc" id="L378">		resetConnection();</span>
+<span class="fc" id="L379">	}</span>
+
+	/**
+	 * Reset the underlying shared Connection, to be reinitialized on next access.
+	 * @see #closeConnection
+	 */
+	public void resetConnection() {
+<span class="fc" id="L386">		synchronized (this.connectionMonitor) {</span>
+<span class="fc bfc" id="L387" title="All 2 branches covered.">			if (this.connection != null) {</span>
+<span class="fc" id="L388">				closeConnection(this.connection);</span>
+			}
+<span class="fc" id="L390">			this.connection = null;</span>
+<span class="fc" id="L391">		}</span>
+<span class="fc" id="L392">	}</span>
+
+	/**
+	 * Create a JMS Connection via this template's ConnectionFactory.
+	 * @return the new JMS Connection
+	 * @throws javax.jms.JMSException if thrown by JMS API methods
+	 */
+	protected Connection doCreateConnection() throws JMSException {
+<span class="fc" id="L400">		ConnectionFactory cf = getTargetConnectionFactory();</span>
+<span class="pc bpc" id="L401" title="1 of 4 branches missed.">		if (Boolean.FALSE.equals(this.pubSubMode) &amp;&amp; cf instanceof QueueConnectionFactory) {</span>
+<span class="fc" id="L402">			return ((QueueConnectionFactory) cf).createQueueConnection();</span>
+		}
+<span class="pc bpc" id="L404" title="1 of 4 branches missed.">		else if (Boolean.TRUE.equals(this.pubSubMode) &amp;&amp; cf instanceof TopicConnectionFactory) {</span>
+<span class="fc" id="L405">			return ((TopicConnectionFactory) cf).createTopicConnection();</span>
+		}
+		else {
+<span class="fc" id="L408">			return obtainTargetConnectionFactory().createConnection();</span>
+		}
+	}
+
+	/**
+	 * Prepare the given Connection before it is exposed.
+	 * &lt;p&gt;The default implementation applies ExceptionListener and client id.
+	 * Can be overridden in subclasses.
+	 * @param con the Connection to prepare
+	 * @throws JMSException if thrown by JMS API methods
+	 * @see #setExceptionListener
+	 * @see #setReconnectOnException
+	 */
+	protected void prepareConnection(Connection con) throws JMSException {
+<span class="fc bfc" id="L422" title="All 2 branches covered.">		if (getClientId() != null) {</span>
+<span class="fc" id="L423">			con.setClientID(getClientId());</span>
+		}
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		if (this.aggregatedExceptionListener != null) {</span>
+<span class="fc" id="L426">			con.setExceptionListener(this.aggregatedExceptionListener);</span>
+		}
+<span class="fc bfc" id="L428" title="All 4 branches covered.">		else if (getExceptionListener() != null || isReconnectOnException()) {</span>
+<span class="fc" id="L429">			ExceptionListener listenerToUse = getExceptionListener();</span>
+<span class="fc bfc" id="L430" title="All 2 branches covered.">			if (isReconnectOnException()) {</span>
+<span class="fc" id="L431">				this.aggregatedExceptionListener = new AggregatedExceptionListener();</span>
+<span class="fc" id="L432">				this.aggregatedExceptionListener.delegates.add(this);</span>
+<span class="fc bfc" id="L433" title="All 2 branches covered.">				if (listenerToUse != null) {</span>
+<span class="fc" id="L434">					this.aggregatedExceptionListener.delegates.add(listenerToUse);</span>
+				}
+<span class="fc" id="L436">				listenerToUse = this.aggregatedExceptionListener;</span>
+			}
+<span class="fc" id="L438">			con.setExceptionListener(listenerToUse);</span>
+		}
+<span class="fc" id="L440">	}</span>
+
+	/**
+	 * Template method for obtaining a (potentially cached) Session.
+	 * &lt;p&gt;The default implementation always returns {@code null}.
+	 * Subclasses may override this for exposing specific Session handles,
+	 * possibly delegating to {@link #createSession} for the creation of raw
+	 * Session objects that will then get wrapped and returned from here.
+	 * @param con the JMS Connection to operate on
+	 * @param mode the Session acknowledgement mode
+	 * ({@code Session.TRANSACTED} or one of the common modes)
+	 * @return the Session to use, or {@code null} to indicate
+	 * creation of a raw standard Session
+	 * @throws JMSException if thrown by the JMS API
+	 */
+	@Nullable
+	protected Session getSession(Connection con, Integer mode) throws JMSException {
+<span class="fc" id="L457">		return null;</span>
+	}
+
+	/**
+	 * Create a default Session for this ConnectionFactory,
+	 * adapting to JMS 1.0.2 style queue/topic mode if necessary.
+	 * @param con the JMS Connection to operate on
+	 * @param mode the Session acknowledgement mode
+	 * ({@code Session.TRANSACTED} or one of the common modes)
+	 * @return the newly created Session
+	 * @throws JMSException if thrown by the JMS API
+	 */
+	protected Session createSession(Connection con, Integer mode) throws JMSException {
+		// Determine JMS API arguments...
+<span class="fc bfc" id="L471" title="All 2 branches covered.">		boolean transacted = (mode == Session.SESSION_TRANSACTED);</span>
+<span class="fc bfc" id="L472" title="All 2 branches covered.">		int ackMode = (transacted ? Session.AUTO_ACKNOWLEDGE : mode);</span>
+		// Now actually call the appropriate JMS factory method...
+<span class="pc bpc" id="L474" title="1 of 4 branches missed.">		if (Boolean.FALSE.equals(this.pubSubMode) &amp;&amp; con instanceof QueueConnection) {</span>
+<span class="fc" id="L475">			return ((QueueConnection) con).createQueueSession(transacted, ackMode);</span>
+		}
+<span class="pc bpc" id="L477" title="1 of 4 branches missed.">		else if (Boolean.TRUE.equals(this.pubSubMode) &amp;&amp; con instanceof TopicConnection) {</span>
+<span class="fc" id="L478">			return ((TopicConnection) con).createTopicSession(transacted, ackMode);</span>
+		}
+		else {
+<span class="fc" id="L481">			return con.createSession(transacted, ackMode);</span>
+		}
+	}
+
+	/**
+	 * Close the given Connection.
+	 * @param con the Connection to close
+	 */
+	protected void closeConnection(Connection con) {
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L491">			logger.debug(&quot;Closing shared JMS Connection: &quot; + con);</span>
+		}
+		try {
+			try {
+<span class="fc bfc" id="L495" title="All 2 branches covered.">				if (this.startedCount &gt; 0) {</span>
+<span class="fc" id="L496">					con.stop();</span>
+				}
+			}
+			finally {
+<span class="fc" id="L500">				con.close();</span>
+			}
+		}
+<span class="nc" id="L503">		catch (javax.jms.IllegalStateException ex) {</span>
+<span class="nc" id="L504">			logger.debug(&quot;Ignoring Connection state exception - assuming already closed: &quot; + ex);</span>
+		}
+<span class="nc" id="L506">		catch (Throwable ex) {</span>
+<span class="nc" id="L507">			logger.debug(&quot;Could not close shared JMS Connection&quot;, ex);</span>
+<span class="pc" id="L508">		}</span>
+<span class="fc" id="L509">	}</span>
+
+	/**
+	 * Wrap the given Connection with a proxy that delegates every method call to it
+	 * but suppresses close calls. This is useful for allowing application code to
+	 * handle a special framework Connection just like an ordinary Connection from a
+	 * JMS ConnectionFactory.
+	 * @param target the original Connection to wrap
+	 * @return the wrapped Connection
+	 */
+	protected Connection getSharedConnectionProxy(Connection target) {
+<span class="fc" id="L520">		List&lt;Class&lt;?&gt;&gt; classes = new ArrayList&lt;&gt;(3);</span>
+<span class="fc" id="L521">		classes.add(Connection.class);</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">		if (target instanceof QueueConnection) {</span>
+<span class="fc" id="L523">			classes.add(QueueConnection.class);</span>
+		}
+<span class="fc bfc" id="L525" title="All 2 branches covered.">		if (target instanceof TopicConnection) {</span>
+<span class="fc" id="L526">			classes.add(TopicConnection.class);</span>
+		}
+<span class="fc" id="L528">		return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(),</span>
+<span class="fc" id="L529">				ClassUtils.toClassArray(classes), new SharedConnectionInvocationHandler());</span>
+	}
+
+
+	/**
+	 * Invocation handler for a cached JMS Connection proxy.
+	 */
+<span class="fc" id="L536">	private class SharedConnectionInvocationHandler implements InvocationHandler {</span>
+
+		@Nullable
+		private ExceptionListener localExceptionListener;
+
+<span class="fc" id="L541">		private boolean locallyStarted = false;</span>
+
+		@Override
+		@Nullable
+		public Object invoke(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+<span class="pc bpc" id="L546" title="1 of 4 branches missed.">			if (method.getName().equals(&quot;equals&quot;) &amp;&amp; args != null) {</span>
+<span class="fc" id="L547">				Object other = args[0];</span>
+<span class="pc bpc" id="L548" title="1 of 2 branches missed.">				if (proxy == other) {</span>
+<span class="nc" id="L549">					return true;</span>
+				}
+<span class="pc bpc" id="L551" title="2 of 4 branches missed.">				if (other == null || !Proxy.isProxyClass(other.getClass())) {</span>
+<span class="nc" id="L552">					return false;</span>
+				}
+<span class="fc" id="L554">				InvocationHandler otherHandler = Proxy.getInvocationHandler(other);</span>
+<span class="pc bpc" id="L555" title="1 of 2 branches missed.">				return (otherHandler instanceof SharedConnectionInvocationHandler &amp;&amp;</span>
+<span class="pc bpc" id="L556" title="1 of 2 branches missed.">						factory() == ((SharedConnectionInvocationHandler) otherHandler).factory());</span>
+			}
+<span class="fc bfc" id="L558" title="All 2 branches covered.">			else if (method.getName().equals(&quot;hashCode&quot;)) {</span>
+				// Use hashCode of containing SingleConnectionFactory.
+<span class="fc" id="L560">				return System.identityHashCode(factory());</span>
+			}
+<span class="pc bpc" id="L562" title="1 of 2 branches missed.">			else if (method.getName().equals(&quot;toString&quot;)) {</span>
+<span class="nc" id="L563">				return &quot;Shared JMS Connection: &quot; + getConnection();</span>
+			}
+<span class="pc bpc" id="L565" title="3 of 4 branches missed.">			else if (method.getName().equals(&quot;setClientID&quot;) &amp;&amp; args != null) {</span>
+				// Handle setClientID method: throw exception if not compatible.
+<span class="nc" id="L567">				String currentClientId = getConnection().getClientID();</span>
+<span class="nc bnc" id="L568" title="All 4 branches missed.">				if (currentClientId != null &amp;&amp; currentClientId.equals(args[0])) {</span>
+<span class="nc" id="L569">					return null;</span>
+				}
+				else {
+<span class="nc" id="L572">					throw new javax.jms.IllegalStateException(</span>
+							&quot;setClientID call not supported on proxy for shared Connection. &quot; +
+							&quot;Set the 'clientId' property on the SingleConnectionFactory instead.&quot;);
+				}
+			}
+<span class="pc bpc" id="L577" title="1 of 4 branches missed.">			else if (method.getName().equals(&quot;setExceptionListener&quot;) &amp;&amp; args != null) {</span>
+				// Handle setExceptionListener method: add to the chain.
+<span class="fc" id="L579">				synchronized (connectionMonitor) {</span>
+<span class="pc bpc" id="L580" title="1 of 2 branches missed.">					if (aggregatedExceptionListener != null) {</span>
+<span class="fc" id="L581">						ExceptionListener listener = (ExceptionListener) args[0];</span>
+<span class="pc bpc" id="L582" title="1 of 2 branches missed.">						if (listener != this.localExceptionListener) {</span>
+<span class="pc bpc" id="L583" title="1 of 2 branches missed.">							if (this.localExceptionListener != null) {</span>
+<span class="nc" id="L584">								aggregatedExceptionListener.delegates.remove(this.localExceptionListener);</span>
+							}
+<span class="pc bpc" id="L586" title="1 of 2 branches missed.">							if (listener != null) {</span>
+<span class="fc" id="L587">								aggregatedExceptionListener.delegates.add(listener);</span>
+							}
+<span class="fc" id="L589">							this.localExceptionListener = listener;</span>
+						}
+<span class="fc" id="L591">						return null;</span>
+					}
+					else {
+<span class="nc" id="L594">						throw new javax.jms.IllegalStateException(</span>
+								&quot;setExceptionListener call not supported on proxy for shared Connection. &quot; +
+								&quot;Set the 'exceptionListener' property on the SingleConnectionFactory instead. &quot; +
+								&quot;Alternatively, activate SingleConnectionFactory's 'reconnectOnException' feature, &quot; +
+								&quot;which will allow for registering further ExceptionListeners to the recovery chain.&quot;);
+					}
+				}
+			}
+<span class="fc bfc" id="L602" title="All 2 branches covered.">			else if (method.getName().equals(&quot;getExceptionListener&quot;)) {</span>
+<span class="fc" id="L603">				synchronized (connectionMonitor) {</span>
+<span class="fc bfc" id="L604" title="All 2 branches covered.">					if (this.localExceptionListener != null) {</span>
+<span class="fc" id="L605">						return this.localExceptionListener;</span>
+					}
+					else {
+<span class="fc" id="L608">						return getExceptionListener();</span>
+					}
+				}
+			}
+<span class="fc bfc" id="L612" title="All 2 branches covered.">			else if (method.getName().equals(&quot;start&quot;)) {</span>
+<span class="fc" id="L613">				localStart();</span>
+<span class="fc" id="L614">				return null;</span>
+			}
+<span class="fc bfc" id="L616" title="All 2 branches covered.">			else if (method.getName().equals(&quot;stop&quot;)) {</span>
+<span class="fc" id="L617">				localStop();</span>
+<span class="fc" id="L618">				return null;</span>
+			}
+<span class="fc bfc" id="L620" title="All 2 branches covered.">			else if (method.getName().equals(&quot;close&quot;)) {</span>
+<span class="fc" id="L621">				localStop();</span>
+<span class="fc" id="L622">				synchronized (connectionMonitor) {</span>
+<span class="fc bfc" id="L623" title="All 2 branches covered.">					if (this.localExceptionListener != null) {</span>
+<span class="pc bpc" id="L624" title="1 of 2 branches missed.">						if (aggregatedExceptionListener != null) {</span>
+<span class="fc" id="L625">							aggregatedExceptionListener.delegates.remove(this.localExceptionListener);</span>
+						}
+<span class="fc" id="L627">						this.localExceptionListener = null;</span>
+					}
+<span class="fc" id="L629">				}</span>
+<span class="fc" id="L630">				return null;</span>
+			}
+<span class="fc bfc" id="L632" title="All 4 branches covered.">			else if (method.getName().equals(&quot;createSession&quot;) || method.getName().equals(&quot;createQueueSession&quot;) ||</span>
+<span class="fc bfc" id="L633" title="All 2 branches covered.">					method.getName().equals(&quot;createTopicSession&quot;)) {</span>
+				// Default: JMS 2.0 createSession() method
+<span class="fc" id="L635">				Integer mode = Session.AUTO_ACKNOWLEDGE;</span>
+<span class="pc bpc" id="L636" title="1 of 2 branches missed.">				if (args != null) {</span>
+<span class="pc bpc" id="L637" title="1 of 2 branches missed.">					if (args.length == 1) {</span>
+						// JMS 2.0 createSession(int) method
+<span class="nc" id="L639">						mode = (Integer) args[0];</span>
+					}
+<span class="pc bpc" id="L641" title="1 of 2 branches missed.">					else if (args.length == 2) {</span>
+						// JMS 1.1 createSession(boolean, int) method
+<span class="fc" id="L643">						boolean transacted = (Boolean) args[0];</span>
+<span class="fc" id="L644">						Integer ackMode = (Integer) args[1];</span>
+<span class="fc bfc" id="L645" title="All 2 branches covered.">						mode = (transacted ? Session.SESSION_TRANSACTED : ackMode);</span>
+					}
+				}
+<span class="fc" id="L648">				Session session = getSession(getConnection(), mode);</span>
+<span class="fc bfc" id="L649" title="All 2 branches covered.">				if (session != null) {</span>
+<span class="pc bpc" id="L650" title="1 of 2 branches missed.">					if (!method.getReturnType().isInstance(session)) {</span>
+<span class="nc" id="L651">						String msg = &quot;JMS Session does not implement specific domain: &quot; + session;</span>
+						try {
+<span class="nc" id="L653">							session.close();</span>
+						}
+<span class="nc" id="L655">						catch (Throwable ex) {</span>
+<span class="nc" id="L656">							logger.trace(&quot;Failed to close newly obtained JMS Session&quot;, ex);</span>
+<span class="nc" id="L657">						}</span>
+<span class="nc" id="L658">						throw new javax.jms.IllegalStateException(msg);</span>
+					}
+<span class="fc" id="L660">					return session;</span>
+				}
+			}
+			try {
+<span class="fc" id="L664">				return method.invoke(getConnection(), args);</span>
+			}
+<span class="nc" id="L666">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L667">				throw ex.getTargetException();</span>
+			}
+		}
+
+		private void localStart() throws JMSException {
+<span class="fc" id="L672">			synchronized (connectionMonitor) {</span>
+<span class="pc bpc" id="L673" title="1 of 2 branches missed.">				if (!this.locallyStarted) {</span>
+<span class="fc" id="L674">					this.locallyStarted = true;</span>
+<span class="pc bpc" id="L675" title="1 of 4 branches missed.">					if (startedCount == 0 &amp;&amp; connection != null) {</span>
+<span class="fc" id="L676">						connection.start();</span>
+					}
+<span class="fc" id="L678">					startedCount++;</span>
+				}
+<span class="fc" id="L680">			}</span>
+<span class="fc" id="L681">		}</span>
+
+		private void localStop() throws JMSException {
+<span class="fc" id="L684">			synchronized (connectionMonitor) {</span>
+<span class="fc bfc" id="L685" title="All 2 branches covered.">				if (this.locallyStarted) {</span>
+<span class="fc" id="L686">					this.locallyStarted = false;</span>
+<span class="fc bfc" id="L687" title="All 4 branches covered.">					if (startedCount == 1 &amp;&amp; connection != null) {</span>
+<span class="fc" id="L688">						connection.stop();</span>
+					}
+<span class="pc bpc" id="L690" title="1 of 2 branches missed.">					if (startedCount &gt; 0) {</span>
+<span class="fc" id="L691">						startedCount--;</span>
+					}
+				}
+<span class="fc" id="L694">			}</span>
+<span class="fc" id="L695">		}</span>
+
+		private SingleConnectionFactory factory() {
+<span class="fc" id="L698">			return SingleConnectionFactory.this;</span>
+		}
+	}
+
+
+	/**
+	 * Internal aggregated ExceptionListener for handling the internal
+	 * recovery listener in combination with user-specified listeners.
+	 */
+<span class="fc" id="L707">	private class AggregatedExceptionListener implements ExceptionListener {</span>
+
+<span class="fc" id="L709">		final Set&lt;ExceptionListener&gt; delegates = new LinkedHashSet&lt;&gt;(2);</span>
+
+		@Override
+		public void onException(JMSException ex) {
+			// Iterate over temporary copy in order to avoid ConcurrentModificationException,
+			// since listener invocations may in turn trigger registration of listeners...
+			Set&lt;ExceptionListener&gt; copy;
+<span class="fc" id="L716">			synchronized (connectionMonitor) {</span>
+<span class="fc" id="L717">				copy = new LinkedHashSet&lt;&gt;(this.delegates);</span>
+<span class="fc" id="L718">			}</span>
+<span class="fc bfc" id="L719" title="All 2 branches covered.">			for (ExceptionListener listener : copy) {</span>
+<span class="fc" id="L720">				listener.onException(ex);</span>
+<span class="fc" id="L721">			}</span>
+<span class="fc" id="L722">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

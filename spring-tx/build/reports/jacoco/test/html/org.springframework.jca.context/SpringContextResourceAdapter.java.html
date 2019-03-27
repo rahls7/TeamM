@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SpringContextResourceAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-tx</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jca.context</a> &gt; <span class="el_source">SpringContextResourceAdapter.java</span></div><h1>SpringContextResourceAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jca.context;
+
+import javax.resource.NotSupportedException;
+import javax.resource.ResourceException;
+import javax.resource.spi.ActivationSpec;
+import javax.resource.spi.BootstrapContext;
+import javax.resource.spi.ResourceAdapter;
+import javax.resource.spi.ResourceAdapterInternalException;
+import javax.resource.spi.endpoint.MessageEndpointFactory;
+import javax.transaction.xa.XAResource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.xml.XmlBeanDefinitionReader;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.StandardEnvironment;
+import org.springframework.lang.Nullable;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * JCA 1.7 {@link javax.resource.spi.ResourceAdapter} implementation
+ * that loads a Spring {@link org.springframework.context.ApplicationContext},
+ * starting and stopping Spring-managed beans as part of the ResourceAdapter's
+ * lifecycle.
+ *
+ * &lt;p&gt;Ideal for application contexts that do not need any HTTP entry points
+ * but rather just consist of message endpoints and scheduled jobs etc.
+ * Beans in such a context may use application server resources such as the
+ * JTA transaction manager and JNDI-bound JDBC DataSources and JMS
+ * ConnectionFactory instances, and may also register with the platform's
+ * JMX server - all through Spring's standard transaction management and
+ * JNDI and JMX support facilities.
+ *
+ * &lt;p&gt;If the need for scheduling asynchronous work arises, consider using
+ * Spring's {@link org.springframework.jca.work.WorkManagerTaskExecutor}
+ * as a standard bean definition, to be injected into application beans
+ * through dependency injection. This WorkManagerTaskExecutor will automatically
+ * use the JCA WorkManager from the BootstrapContext that has been provided
+ * to this ResourceAdapter.
+ *
+ * &lt;p&gt;The JCA {@link javax.resource.spi.BootstrapContext} may also be
+ * accessed directly, through application components that implement the
+ * {@link BootstrapContextAware} interface. When deployed using this
+ * ResourceAdapter, the BootstrapContext is guaranteed to be passed on
+ * to such components.
+ *
+ * &lt;p&gt;This ResourceAdapter is to be defined in a &quot;META-INF/ra.xml&quot; file
+ * within a Java EE &quot;.rar&quot; deployment unit like as follows:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&amp;gt;
+ * &amp;lt;connector xmlns=&quot;http://java.sun.com/xml/ns/j2ee&quot;
+ *		 xmlns:xsi=&quot;http://www.w3.org/2001/XMLSchema-instance&quot;
+ *		 xsi:schemaLocation=&quot;http://java.sun.com/xml/ns/j2ee http://java.sun.com/xml/ns/j2ee/connector_1_5.xsd&quot;
+ *		 version=&quot;1.5&quot;&amp;gt;
+ *	 &amp;lt;vendor-name&amp;gt;Spring Framework&amp;lt;/vendor-name&amp;gt;
+ *	 &amp;lt;eis-type&amp;gt;Spring Connector&amp;lt;/eis-type&amp;gt;
+ *	 &amp;lt;resourceadapter-version&amp;gt;1.0&amp;lt;/resourceadapter-version&amp;gt;
+ *	 &amp;lt;resourceadapter&amp;gt;
+ *		 &amp;lt;resourceadapter-class&amp;gt;org.springframework.jca.context.SpringContextResourceAdapter&amp;lt;/resourceadapter-class&amp;gt;
+ *		 &amp;lt;config-property&amp;gt;
+ *			 &amp;lt;config-property-name&amp;gt;ContextConfigLocation&amp;lt;/config-property-name&amp;gt;
+ *			 &amp;lt;config-property-type&amp;gt;java.lang.String&amp;lt;/config-property-type&amp;gt;
+ *			 &amp;lt;config-property-value&amp;gt;META-INF/applicationContext.xml&amp;lt;/config-property-value&amp;gt;
+ *		 &amp;lt;/config-property&amp;gt;
+ *	 &amp;lt;/resourceadapter&amp;gt;
+ * &amp;lt;/connector&amp;gt;&lt;/pre&gt;
+ *
+ * Note that &quot;META-INF/applicationContext.xml&quot; is the default context config
+ * location, so it doesn't have to specified unless you intend to specify
+ * different/additional config files. So in the default case, you may remove
+ * the entire {@code config-property} section above.
+ *
+ * &lt;p&gt;&lt;b&gt;For simple deployment needs, all you need to do is the following:&lt;/b&gt;
+ * Package all application classes into a RAR file (which is just a standard
+ * JAR file with a different file extension), add all required library jars
+ * into the root of the RAR archive, add a &quot;META-INF/ra.xml&quot; deployment
+ * descriptor as shown above as well as the corresponding Spring XML bean
+ * definition file(s) (typically &quot;META-INF/applicationContext.xml&quot;),
+ * and drop the resulting RAR file into your application server's
+ * deployment directory!
+ *
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see #setContextConfigLocation
+ * @see #loadBeanDefinitions
+ * @see ResourceAdapterApplicationContext
+ */
+<span class="nc" id="L109">public class SpringContextResourceAdapter implements ResourceAdapter {</span>
+
+	/**
+	 * Any number of these characters are considered delimiters between
+	 * multiple context config paths in a single String value.
+	 * @see #setContextConfigLocation
+	 */
+	public static final String CONFIG_LOCATION_DELIMITERS = ConfigurableApplicationContext.CONFIG_LOCATION_DELIMITERS;
+
+	/**
+	 * The default {@code applicationContext.xml} location.
+	 */
+	public static final String DEFAULT_CONTEXT_CONFIG_LOCATION = &quot;META-INF/applicationContext.xml&quot;;
+
+
+<span class="nc" id="L124">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="nc" id="L126">	private String contextConfigLocation = DEFAULT_CONTEXT_CONFIG_LOCATION;</span>
+
+	@Nullable
+	private ConfigurableApplicationContext applicationContext;
+
+
+	/**
+	 * Set the location of the context configuration files, within the
+	 * resource adapter's deployment unit. This can be a delimited
+	 * String that consists of multiple resource location, separated
+	 * by commas, semicolons, whitespace, or line breaks.
+	 * &lt;p&gt;This can be specified as &quot;ContextConfigLocation&quot; config
+	 * property in the {@code ra.xml} deployment descriptor.
+	 * &lt;p&gt;The default is &quot;classpath:META-INF/applicationContext.xml&quot;.
+	 */
+	public void setContextConfigLocation(String contextConfigLocation) {
+<span class="nc" id="L142">		this.contextConfigLocation = contextConfigLocation;</span>
+<span class="nc" id="L143">	}</span>
+
+	/**
+	 * Return the specified context configuration files.
+	 */
+	protected String getContextConfigLocation() {
+<span class="nc" id="L149">		return this.contextConfigLocation;</span>
+	}
+
+	/**
+	 * Return a new {@link StandardEnvironment}.
+	 * &lt;p&gt;Subclasses may override this method in order to supply
+	 * a custom {@link ConfigurableEnvironment} implementation.
+	 */
+	protected ConfigurableEnvironment createEnvironment() {
+<span class="nc" id="L158">		return new StandardEnvironment();</span>
+	}
+
+	/**
+	 * This implementation loads a Spring ApplicationContext through the
+	 * {@link #createApplicationContext} template method.
+	 */
+	@Override
+	public void start(BootstrapContext bootstrapContext) throws ResourceAdapterInternalException {
+<span class="nc bnc" id="L167" title="All 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L168">			logger.debug(&quot;Starting SpringContextResourceAdapter with BootstrapContext: &quot; + bootstrapContext);</span>
+		}
+<span class="nc" id="L170">		this.applicationContext = createApplicationContext(bootstrapContext);</span>
+<span class="nc" id="L171">	}</span>
+
+	/**
+	 * Build a Spring ApplicationContext for the given JCA BootstrapContext.
+	 * &lt;p&gt;The default implementation builds a {@link ResourceAdapterApplicationContext}
+	 * and delegates to {@link #loadBeanDefinitions} for actually parsing the
+	 * specified configuration files.
+	 * @param bootstrapContext this ResourceAdapter's BootstrapContext
+	 * @return the Spring ApplicationContext instance
+	 */
+	protected ConfigurableApplicationContext createApplicationContext(BootstrapContext bootstrapContext) {
+<span class="nc" id="L182">		ResourceAdapterApplicationContext applicationContext =</span>
+				new ResourceAdapterApplicationContext(bootstrapContext);
+
+		// Set ResourceAdapter's ClassLoader as bean class loader.
+<span class="nc" id="L186">		applicationContext.setClassLoader(getClass().getClassLoader());</span>
+
+		// Extract individual config locations.
+<span class="nc" id="L189">		String[] configLocations =</span>
+<span class="nc" id="L190">				StringUtils.tokenizeToStringArray(getContextConfigLocation(), CONFIG_LOCATION_DELIMITERS);</span>
+
+<span class="nc" id="L192">		loadBeanDefinitions(applicationContext, configLocations);</span>
+<span class="nc" id="L193">		applicationContext.refresh();</span>
+
+<span class="nc" id="L195">		return applicationContext;</span>
+	}
+
+	/**
+	 * Load the bean definitions into the given registry,
+	 * based on the specified configuration files.
+	 * @param registry the registry to load into
+	 * @param configLocations the parsed config locations
+	 * @see #setContextConfigLocation
+	 */
+	protected void loadBeanDefinitions(BeanDefinitionRegistry registry, String[] configLocations) {
+<span class="nc" id="L206">		new XmlBeanDefinitionReader(registry).loadBeanDefinitions(configLocations);</span>
+<span class="nc" id="L207">	}</span>
+
+	/**
+	 * This implementation closes the Spring ApplicationContext.
+	 */
+	@Override
+	public void stop() {
+<span class="nc" id="L214">		logger.debug(&quot;Stopping SpringContextResourceAdapter&quot;);</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">		if (this.applicationContext != null) {</span>
+<span class="nc" id="L216">			this.applicationContext.close();</span>
+		}
+<span class="nc" id="L218">	}</span>
+
+
+	/**
+	 * This implementation always throws a NotSupportedException.
+	 */
+	@Override
+	public void endpointActivation(MessageEndpointFactory messageEndpointFactory, ActivationSpec activationSpec)
+			throws ResourceException {
+
+<span class="nc" id="L228">		throw new NotSupportedException(&quot;SpringContextResourceAdapter does not support message endpoints&quot;);</span>
+	}
+
+	/**
+	 * This implementation does nothing.
+	 */
+	@Override
+	public void endpointDeactivation(MessageEndpointFactory messageEndpointFactory, ActivationSpec activationSpec) {
+<span class="nc" id="L236">	}</span>
+
+	/**
+	 * This implementation always returns {@code null}.
+	 */
+	@Override
+	@Nullable
+	public XAResource[] getXAResources(ActivationSpec[] activationSpecs) throws ResourceException {
+<span class="nc" id="L244">		return null;</span>
+	}
+
+
+	@Override
+	public boolean equals(Object other) {
+<span class="nc bnc" id="L250" title="All 4 branches missed.">		return (this == other || (other instanceof SpringContextResourceAdapter &amp;&amp;</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">				ObjectUtils.nullSafeEquals(getContextConfigLocation(),</span>
+<span class="nc" id="L252">						((SpringContextResourceAdapter) other).getContextConfigLocation())));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="nc" id="L257">		return ObjectUtils.nullSafeHashCode(getContextConfigLocation());</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

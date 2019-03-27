@@ -1,0 +1,559 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StompHeaderAccessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.stomp</a> &gt; <span class="el_source">StompHeaderAccessor.java</span></div><h1>StompHeaderAccessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2017 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.stomp;
+
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.security.Principal;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+
+import org.springframework.lang.Nullable;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageType;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * A {@code MessageHeaderAccessor} to use when creating a {@code Message} from
+ * a decoded STOMP frame, or when encoding a {@code Message} to a STOMP frame.
+ *
+ * &lt;p&gt;When created from STOMP frame content, the actual STOMP headers are
+ * stored in the native header sub-map managed by the parent class
+ * {@link org.springframework.messaging.support.NativeMessageHeaderAccessor}
+ * while the parent class {@link SimpMessageHeaderAccessor} manages common
+ * processing headers some of which are based on STOMP headers
+ * (e.g. destination, content-type, etc).
+ *
+ * &lt;p&gt;An instance of this class can also be created by wrapping an existing
+ * {@code Message}. That message may have been created with the more generic
+ * {@link org.springframework.messaging.simp.SimpMessageHeaderAccessor} in
+ * which case STOMP headers are created from common processing headers.
+ * In this case it is also necessary to invoke either
+ * {@link #updateStompCommandAsClientMessage()} or
+ * {@link #updateStompCommandAsServerMessage()} if sending a message and
+ * depending on whether a message is sent to a client or the message broker.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.0
+ */
+public class StompHeaderAccessor extends SimpMessageHeaderAccessor {
+
+<span class="fc" id="L65">	private static final AtomicLong messageIdCounter = new AtomicLong();</span>
+
+<span class="fc" id="L67">	private static final long[] DEFAULT_HEARTBEAT = new long[] {0, 0};</span>
+
+
+	// STOMP header names
+
+	public static final String STOMP_ID_HEADER = &quot;id&quot;;
+
+	public static final String STOMP_HOST_HEADER = &quot;host&quot;;
+
+	public static final String STOMP_ACCEPT_VERSION_HEADER = &quot;accept-version&quot;;
+
+	public static final String STOMP_MESSAGE_ID_HEADER = &quot;message-id&quot;;
+
+	public static final String STOMP_RECEIPT_HEADER = &quot;receipt&quot;; // any client frame except CONNECT
+
+	public static final String STOMP_RECEIPT_ID_HEADER = &quot;receipt-id&quot;; // RECEIPT frame
+
+	public static final String STOMP_SUBSCRIPTION_HEADER = &quot;subscription&quot;;
+
+	public static final String STOMP_VERSION_HEADER = &quot;version&quot;;
+
+	public static final String STOMP_MESSAGE_HEADER = &quot;message&quot;;
+
+	public static final String STOMP_ACK_HEADER = &quot;ack&quot;;
+
+	public static final String STOMP_NACK_HEADER = &quot;nack&quot;;
+
+	public static final String STOMP_LOGIN_HEADER = &quot;login&quot;;
+
+	public static final String STOMP_PASSCODE_HEADER = &quot;passcode&quot;;
+
+	public static final String STOMP_DESTINATION_HEADER = &quot;destination&quot;;
+
+	public static final String STOMP_CONTENT_TYPE_HEADER = &quot;content-type&quot;;
+
+	public static final String STOMP_CONTENT_LENGTH_HEADER = &quot;content-length&quot;;
+
+	public static final String STOMP_HEARTBEAT_HEADER = &quot;heart-beat&quot;;
+
+	// Other header names
+
+	private static final String COMMAND_HEADER = &quot;stompCommand&quot;;
+
+	private static final String CREDENTIALS_HEADER = &quot;stompCredentials&quot;;
+
+
+	/**
+	 * A constructor for creating message headers from a parsed STOMP frame.
+	 */
+	StompHeaderAccessor(StompCommand command, @Nullable Map&lt;String, List&lt;String&gt;&gt; externalSourceHeaders) {
+<span class="fc" id="L117">		super(command.getMessageType(), externalSourceHeaders);</span>
+<span class="fc" id="L118">		setHeader(COMMAND_HEADER, command);</span>
+<span class="fc" id="L119">		updateSimpMessageHeadersFromStompHeaders();</span>
+<span class="fc" id="L120">	}</span>
+
+	/**
+	 * A constructor for accessing and modifying existing message headers.
+	 * Note that the message headers may not have been created from a STOMP frame
+	 * but may have rather originated from using the more generic
+	 * {@link org.springframework.messaging.simp.SimpMessageHeaderAccessor}.
+	 */
+	StompHeaderAccessor(Message&lt;?&gt; message) {
+<span class="fc" id="L129">		super(message);</span>
+<span class="fc" id="L130">		updateStompHeadersFromSimpMessageHeaders();</span>
+<span class="fc" id="L131">	}</span>
+
+	StompHeaderAccessor() {
+<span class="fc" id="L134">		super(SimpMessageType.HEARTBEAT, null);</span>
+<span class="fc" id="L135">	}</span>
+
+
+	void updateSimpMessageHeadersFromStompHeaders() {
+<span class="fc bfc" id="L139" title="All 2 branches covered.">		if (getNativeHeaders() == null) {</span>
+<span class="fc" id="L140">			return;</span>
+		}
+<span class="fc" id="L142">		String value = getFirstNativeHeader(STOMP_DESTINATION_HEADER);</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">		if (value != null) {</span>
+<span class="fc" id="L144">			super.setDestination(value);</span>
+		}
+<span class="fc" id="L146">		value = getFirstNativeHeader(STOMP_CONTENT_TYPE_HEADER);</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">		if (value != null) {</span>
+<span class="fc" id="L148">			super.setContentType(MimeTypeUtils.parseMimeType(value));</span>
+		}
+<span class="fc" id="L150">		StompCommand command = getCommand();</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">		if (StompCommand.MESSAGE.equals(command)) {</span>
+<span class="fc" id="L152">			value = getFirstNativeHeader(STOMP_SUBSCRIPTION_HEADER);</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">			if (value != null) {</span>
+<span class="fc" id="L154">				super.setSubscriptionId(value);</span>
+			}
+		}
+<span class="fc bfc" id="L157" title="All 4 branches covered.">		else if (StompCommand.SUBSCRIBE.equals(command) || StompCommand.UNSUBSCRIBE.equals(command)) {</span>
+<span class="fc" id="L158">			value = getFirstNativeHeader(STOMP_ID_HEADER);</span>
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">			if (value != null) {</span>
+<span class="fc" id="L160">				super.setSubscriptionId(value);</span>
+			}
+		}
+<span class="fc bfc" id="L163" title="All 2 branches covered.">		else if (StompCommand.CONNECT.equals(command)) {</span>
+<span class="fc" id="L164">			protectPasscode();</span>
+		}
+<span class="fc" id="L166">	}</span>
+
+	void updateStompHeadersFromSimpMessageHeaders() {
+<span class="fc" id="L169">		String destination = getDestination();</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">		if (destination != null) {</span>
+<span class="fc" id="L171">			setNativeHeader(STOMP_DESTINATION_HEADER, destination);</span>
+		}
+<span class="fc" id="L173">		MimeType contentType = getContentType();</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">		if (contentType != null) {</span>
+<span class="fc" id="L175">			setNativeHeader(STOMP_CONTENT_TYPE_HEADER, contentType.toString());</span>
+		}
+<span class="fc" id="L177">		trySetStompHeaderForSubscriptionId();</span>
+<span class="fc" id="L178">	}</span>
+
+
+	@Override
+	protected MessageHeaderAccessor createAccessor(Message&lt;?&gt; message) {
+<span class="fc" id="L183">		return wrap(message);</span>
+	}
+
+	// Redeclared for visibility within simp.stomp
+	@Override
+	@Nullable
+	protected Map&lt;String, List&lt;String&gt;&gt; getNativeHeaders() {
+<span class="fc" id="L190">		return super.getNativeHeaders();</span>
+	}
+
+	public StompCommand updateStompCommandAsClientMessage() {
+<span class="fc" id="L194">		SimpMessageType messageType = getMessageType();</span>
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">		if (messageType != SimpMessageType.MESSAGE) {</span>
+<span class="nc" id="L196">			throw new IllegalStateException(&quot;Unexpected message type &quot; + messageType);</span>
+		}
+<span class="fc" id="L198">		StompCommand command = getCommand();</span>
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">		if (command == null) {</span>
+<span class="fc" id="L200">			command = StompCommand.SEND;</span>
+<span class="fc" id="L201">			setHeader(COMMAND_HEADER, command);</span>
+		}
+<span class="nc bnc" id="L203" title="All 2 branches missed.">		else if (!command.equals(StompCommand.SEND)) {</span>
+<span class="nc" id="L204">			throw new IllegalStateException(&quot;Unexpected STOMP command &quot; + command);</span>
+		}
+<span class="fc" id="L206">		return command;</span>
+	}
+
+	public void updateStompCommandAsServerMessage() {
+<span class="fc" id="L210">		SimpMessageType messageType = getMessageType();</span>
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">		if (messageType != SimpMessageType.MESSAGE) {</span>
+<span class="nc" id="L212">			throw new IllegalStateException(&quot;Unexpected message type &quot; + messageType);</span>
+		}
+<span class="fc" id="L214">		StompCommand command = getCommand();</span>
+<span class="pc bpc" id="L215" title="2 of 4 branches missed.">		if ((command == null) || StompCommand.SEND.equals(command)) {</span>
+<span class="nc" id="L216">			setHeader(COMMAND_HEADER, StompCommand.MESSAGE);</span>
+		}
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">		else if (!StompCommand.MESSAGE.equals(command)) {</span>
+<span class="nc" id="L219">			throw new IllegalStateException(&quot;Unexpected STOMP command &quot; + command);</span>
+		}
+<span class="fc" id="L221">		trySetStompHeaderForSubscriptionId();</span>
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">		if (getMessageId() == null) {</span>
+<span class="fc" id="L223">			String messageId = getSessionId() + '-' + messageIdCounter.getAndIncrement();</span>
+<span class="fc" id="L224">			setNativeHeader(STOMP_MESSAGE_ID_HEADER, messageId);</span>
+		}
+<span class="fc" id="L226">	}</span>
+
+	/**
+	 * Return the STOMP command, or {@code null} if not yet set.
+	 */
+	@Nullable
+	public StompCommand getCommand() {
+<span class="fc" id="L233">		return (StompCommand) getHeader(COMMAND_HEADER);</span>
+	}
+
+	public boolean isHeartbeat() {
+<span class="fc bfc" id="L237" title="All 2 branches covered.">		return (SimpMessageType.HEARTBEAT == getMessageType());</span>
+	}
+
+	public long[] getHeartbeat() {
+<span class="fc" id="L241">		String rawValue = getFirstNativeHeader(STOMP_HEARTBEAT_HEADER);</span>
+<span class="fc" id="L242">		String[] rawValues = StringUtils.split(rawValue, &quot;,&quot;);</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">		if (rawValues == null) {</span>
+<span class="fc" id="L244">			return Arrays.copyOf(DEFAULT_HEARTBEAT, 2);</span>
+		}
+<span class="fc" id="L246">		return new long[] {Long.valueOf(rawValues[0]), Long.valueOf(rawValues[1])};</span>
+	}
+
+	public void setAcceptVersion(String acceptVersion) {
+<span class="fc" id="L250">		setNativeHeader(STOMP_ACCEPT_VERSION_HEADER, acceptVersion);</span>
+<span class="fc" id="L251">	}</span>
+
+	public Set&lt;String&gt; getAcceptVersion() {
+<span class="fc" id="L254">		String rawValue = getFirstNativeHeader(STOMP_ACCEPT_VERSION_HEADER);</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">		return (rawValue != null ? StringUtils.commaDelimitedListToSet(rawValue) : Collections.emptySet());</span>
+	}
+
+	public void setHost(@Nullable String host) {
+<span class="fc" id="L259">		setNativeHeader(STOMP_HOST_HEADER, host);</span>
+<span class="fc" id="L260">	}</span>
+
+	@Nullable
+	public String getHost() {
+<span class="fc" id="L264">		return getFirstNativeHeader(STOMP_HOST_HEADER);</span>
+	}
+
+	@Override
+	public void setDestination(@Nullable String destination) {
+<span class="fc" id="L269">		super.setDestination(destination);</span>
+<span class="fc" id="L270">		setNativeHeader(STOMP_DESTINATION_HEADER, destination);</span>
+<span class="fc" id="L271">	}</span>
+
+	@Override
+	public void setContentType(MimeType contentType) {
+<span class="fc" id="L275">		super.setContentType(contentType);</span>
+<span class="fc" id="L276">		setNativeHeader(STOMP_CONTENT_TYPE_HEADER, contentType.toString());</span>
+<span class="fc" id="L277">	}</span>
+
+	@Override
+	public void setSubscriptionId(@Nullable String subscriptionId) {
+<span class="fc" id="L281">		super.setSubscriptionId(subscriptionId);</span>
+<span class="fc" id="L282">		trySetStompHeaderForSubscriptionId();</span>
+<span class="fc" id="L283">	}</span>
+
+	private void trySetStompHeaderForSubscriptionId() {
+<span class="fc" id="L286">		String subscriptionId = getSubscriptionId();</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">		if (subscriptionId != null) {</span>
+<span class="fc" id="L288">			StompCommand command = getCommand();</span>
+<span class="fc bfc" id="L289" title="All 4 branches covered.">			if (command != null &amp;&amp; StompCommand.MESSAGE.equals(command)) {</span>
+<span class="fc" id="L290">				setNativeHeader(STOMP_SUBSCRIPTION_HEADER, subscriptionId);</span>
+			}
+			else {
+<span class="fc" id="L293">				SimpMessageType messageType = getMessageType();</span>
+<span class="fc bfc" id="L294" title="All 4 branches covered.">				if (SimpMessageType.SUBSCRIBE.equals(messageType) || SimpMessageType.UNSUBSCRIBE.equals(messageType)) {</span>
+<span class="fc" id="L295">					setNativeHeader(STOMP_ID_HEADER, subscriptionId);</span>
+				}
+			}
+		}
+<span class="fc" id="L299">	}</span>
+
+	@Nullable
+	public Integer getContentLength() {
+<span class="fc" id="L303">		String header = getFirstNativeHeader(STOMP_CONTENT_LENGTH_HEADER);</span>
+<span class="fc bfc" id="L304" title="All 2 branches covered.">		return (header != null ? Integer.valueOf(header) : null);</span>
+	}
+
+	public void setContentLength(int contentLength) {
+<span class="fc" id="L308">		setNativeHeader(STOMP_CONTENT_LENGTH_HEADER, String.valueOf(contentLength));</span>
+<span class="fc" id="L309">	}</span>
+
+	public void setHeartbeat(long cx, long cy) {
+<span class="fc" id="L312">		setNativeHeader(STOMP_HEARTBEAT_HEADER, cx + &quot;,&quot; + cy);</span>
+<span class="fc" id="L313">	}</span>
+
+	public void setAck(@Nullable String ack) {
+<span class="nc" id="L316">		setNativeHeader(STOMP_ACK_HEADER, ack);</span>
+<span class="nc" id="L317">	}</span>
+
+	@Nullable
+	public String getAck() {
+<span class="nc" id="L321">		return getFirstNativeHeader(STOMP_ACK_HEADER);</span>
+	}
+
+	public void setNack(@Nullable String nack) {
+<span class="nc" id="L325">		setNativeHeader(STOMP_NACK_HEADER, nack);</span>
+<span class="nc" id="L326">	}</span>
+
+	@Nullable
+	public String getNack() {
+<span class="nc" id="L330">		return getFirstNativeHeader(STOMP_NACK_HEADER);</span>
+	}
+
+	public void setLogin(@Nullable String login) {
+<span class="fc" id="L334">		setNativeHeader(STOMP_LOGIN_HEADER, login);</span>
+<span class="fc" id="L335">	}</span>
+
+	@Nullable
+	public String getLogin() {
+<span class="fc" id="L339">		return getFirstNativeHeader(STOMP_LOGIN_HEADER);</span>
+	}
+
+	public void setPasscode(@Nullable String passcode) {
+<span class="fc" id="L343">		setNativeHeader(STOMP_PASSCODE_HEADER, passcode);</span>
+<span class="fc" id="L344">		protectPasscode();</span>
+<span class="fc" id="L345">	}</span>
+
+	private void protectPasscode() {
+<span class="fc" id="L348">		String value = getFirstNativeHeader(STOMP_PASSCODE_HEADER);</span>
+<span class="pc bpc" id="L349" title="1 of 4 branches missed.">		if (value != null &amp;&amp; !&quot;PROTECTED&quot;.equals(value)) {</span>
+<span class="fc" id="L350">			setHeader(CREDENTIALS_HEADER, new StompPasscode(value));</span>
+<span class="fc" id="L351">			setNativeHeader(STOMP_PASSCODE_HEADER, &quot;PROTECTED&quot;);</span>
+		}
+<span class="fc" id="L353">	}</span>
+
+	/**
+	 * Return the passcode header value, or {@code null} if not set.
+	 */
+	@Nullable
+	public String getPasscode() {
+<span class="fc" id="L360">		StompPasscode credentials = (StompPasscode) getHeader(CREDENTIALS_HEADER);</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">		return (credentials != null ? credentials.passcode : null);</span>
+	}
+
+	public void setReceiptId(@Nullable String receiptId) {
+<span class="fc" id="L365">		setNativeHeader(STOMP_RECEIPT_ID_HEADER, receiptId);</span>
+<span class="fc" id="L366">	}</span>
+
+	@Nullable
+	public String getReceiptId() {
+<span class="fc" id="L370">		return getFirstNativeHeader(STOMP_RECEIPT_ID_HEADER);</span>
+	}
+
+	public void setReceipt(@Nullable String receiptId) {
+<span class="fc" id="L374">		setNativeHeader(STOMP_RECEIPT_HEADER, receiptId);</span>
+<span class="fc" id="L375">	}</span>
+
+	@Nullable
+	public String getReceipt() {
+<span class="fc" id="L379">		return getFirstNativeHeader(STOMP_RECEIPT_HEADER);</span>
+	}
+
+	@Nullable
+	public String getMessage() {
+<span class="fc" id="L384">		return getFirstNativeHeader(STOMP_MESSAGE_HEADER);</span>
+	}
+
+	public void setMessage(@Nullable String content) {
+<span class="fc" id="L388">		setNativeHeader(STOMP_MESSAGE_HEADER, content);</span>
+<span class="fc" id="L389">	}</span>
+
+	@Nullable
+	public String getMessageId() {
+<span class="fc" id="L393">		return getFirstNativeHeader(STOMP_MESSAGE_ID_HEADER);</span>
+	}
+
+	public void setMessageId(@Nullable String id) {
+<span class="fc" id="L397">		setNativeHeader(STOMP_MESSAGE_ID_HEADER, id);</span>
+<span class="fc" id="L398">	}</span>
+
+	@Nullable
+	public String getVersion() {
+<span class="nc" id="L402">		return getFirstNativeHeader(STOMP_VERSION_HEADER);</span>
+	}
+
+	public void setVersion(@Nullable String version) {
+<span class="fc" id="L406">		setNativeHeader(STOMP_VERSION_HEADER, version);</span>
+<span class="fc" id="L407">	}</span>
+
+
+	// Logging related
+
+	@Override
+	public String getShortLogMessage(Object payload) {
+<span class="fc" id="L414">		StompCommand command = getCommand();</span>
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">		if (StompCommand.SUBSCRIBE.equals(command)) {</span>
+<span class="nc" id="L416">			return &quot;SUBSCRIBE &quot; + getDestination() + &quot; id=&quot; + getSubscriptionId() + appendSession();</span>
+		}
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">		else if (StompCommand.UNSUBSCRIBE.equals(command)) {</span>
+<span class="nc" id="L419">			return &quot;UNSUBSCRIBE id=&quot; + getSubscriptionId() + appendSession();</span>
+		}
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">		else if (StompCommand.SEND.equals(command)) {</span>
+<span class="fc" id="L422">			return &quot;SEND &quot; + getDestination() + appendSession() + appendPayload(payload);</span>
+		}
+<span class="nc bnc" id="L424" title="All 2 branches missed.">		else if (StompCommand.CONNECT.equals(command)) {</span>
+<span class="nc" id="L425">			Principal user = getUser();</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">			return &quot;CONNECT&quot; + (user != null ? &quot; user=&quot; + user.getName() : &quot;&quot;) + appendSession();</span>
+		}
+<span class="nc bnc" id="L428" title="All 2 branches missed.">		else if (StompCommand.CONNECTED.equals(command)) {</span>
+<span class="nc" id="L429">			return &quot;CONNECTED heart-beat=&quot; + Arrays.toString(getHeartbeat()) + appendSession();</span>
+		}
+<span class="nc bnc" id="L431" title="All 2 branches missed.">		else if (StompCommand.DISCONNECT.equals(command)) {</span>
+<span class="nc" id="L432">			String receipt = getReceipt();</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">			return &quot;DISCONNECT&quot; + (receipt != null ? &quot; receipt=&quot; + receipt : &quot;&quot;) + appendSession();</span>
+		}
+		else {
+<span class="nc" id="L436">			return getDetailedLogMessage(payload);</span>
+		}
+	}
+
+	@Override
+	public String getDetailedLogMessage(@Nullable Object payload) {
+<span class="nc bnc" id="L442" title="All 2 branches missed.">		if (isHeartbeat()) {</span>
+<span class="nc" id="L443">			String sessionId = getSessionId();</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">			return &quot;heart-beat&quot; + (sessionId != null ? &quot; in session &quot; + sessionId : &quot;&quot;);</span>
+		}
+<span class="nc" id="L446">		StompCommand command = getCommand();</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">		if (command == null) {</span>
+<span class="nc" id="L448">			return super.getDetailedLogMessage(payload);</span>
+		}
+<span class="nc" id="L450">		StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L451">		sb.append(command.name()).append(&quot; &quot;);</span>
+<span class="nc" id="L452">		Map&lt;String, List&lt;String&gt;&gt; nativeHeaders = getNativeHeaders();</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">		if (nativeHeaders != null) {</span>
+<span class="nc" id="L454">			sb.append(nativeHeaders);</span>
+		}
+<span class="nc" id="L456">		sb.append(appendSession());</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">		if (getUser() != null) {</span>
+<span class="nc" id="L458">			sb.append(&quot;, user=&quot;).append(getUser().getName());</span>
+		}
+<span class="nc bnc" id="L460" title="All 4 branches missed.">		if (payload != null &amp;&amp; command.isBodyAllowed()) {</span>
+<span class="nc" id="L461">			sb.append(appendPayload(payload));</span>
+		}
+<span class="nc" id="L463">		return sb.toString();</span>
+	}
+
+	private String appendSession() {
+<span class="fc" id="L467">		return &quot; session=&quot; + getSessionId();</span>
+	}
+
+	private String appendPayload(Object payload) {
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">		if (payload.getClass() != byte[].class) {</span>
+<span class="nc" id="L472">			throw new IllegalStateException(</span>
+<span class="nc" id="L473">					&quot;Expected byte array payload but got: &quot; + ClassUtils.getQualifiedName(payload.getClass()));</span>
+		}
+<span class="fc" id="L475">		byte[] bytes = (byte[]) payload;</span>
+<span class="fc" id="L476">		MimeType mimeType = getContentType();</span>
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">		String contentType = (mimeType != null ? &quot; &quot; + mimeType.toString() : &quot;&quot;);</span>
+<span class="pc bpc" id="L478" title="3 of 6 branches missed.">		if (bytes.length == 0 || mimeType == null || !isReadableContentType()) {</span>
+<span class="nc" id="L479">			return contentType;</span>
+		}
+<span class="fc" id="L481">		Charset charset = mimeType.getCharset();</span>
+<span class="pc bpc" id="L482" title="1 of 2 branches missed.">		charset = (charset != null ? charset : StandardCharsets.UTF_8);</span>
+<span class="fc bfc" id="L483" title="All 2 branches covered.">		return (bytes.length &lt; 80) ?</span>
+				contentType + &quot; payload=&quot; + new String(bytes, charset) :
+<span class="fc" id="L485">				contentType + &quot; payload=&quot; + new String(Arrays.copyOf(bytes, 80), charset) + &quot;...(truncated)&quot;;</span>
+	}
+
+
+	// Static factory methods and accessors
+
+	/**
+	 * Create an instance for the given STOMP command.
+	 */
+	public static StompHeaderAccessor create(StompCommand command) {
+<span class="fc" id="L495">		return new StompHeaderAccessor(command, null);</span>
+	}
+
+	/**
+	 * Create an instance for the given STOMP command and headers.
+	 */
+	public static StompHeaderAccessor create(StompCommand command, Map&lt;String, List&lt;String&gt;&gt; headers) {
+<span class="fc" id="L502">		return new StompHeaderAccessor(command, headers);</span>
+	}
+
+	/**
+	 * Create headers for a heartbeat. While a STOMP heartbeat frame does not
+	 * have headers, a session id is needed for processing purposes at a minimum.
+	 */
+	public static StompHeaderAccessor createForHeartbeat() {
+<span class="fc" id="L510">		return new StompHeaderAccessor();</span>
+	}
+
+	/**
+	 * Create an instance from the payload and headers of the given Message.
+	 */
+	public static StompHeaderAccessor wrap(Message&lt;?&gt; message) {
+<span class="fc" id="L517">		return new StompHeaderAccessor(message);</span>
+	}
+
+	/**
+	 * Return the STOMP command from the given headers, or {@code null} if not set.
+	 */
+	@Nullable
+	public static StompCommand getCommand(Map&lt;String, Object&gt; headers) {
+<span class="fc" id="L525">		return (StompCommand) headers.get(COMMAND_HEADER);</span>
+	}
+
+	/**
+	 * Return the passcode header value, or {@code null} if not set.
+	 */
+	@Nullable
+	public static String getPasscode(Map&lt;String, Object&gt; headers) {
+<span class="fc" id="L533">		StompPasscode credentials = (StompPasscode) headers.get(CREDENTIALS_HEADER);</span>
+<span class="pc bpc" id="L534" title="1 of 2 branches missed.">		return (credentials != null ? credentials.passcode : null);</span>
+	}
+
+	@Nullable
+	public static Integer getContentLength(Map&lt;String, List&lt;String&gt;&gt; nativeHeaders) {
+<span class="fc" id="L539">		List&lt;String&gt; values = nativeHeaders.get(STOMP_CONTENT_LENGTH_HEADER);</span>
+<span class="fc bfc" id="L540" title="All 2 branches covered.">		return (!CollectionUtils.isEmpty(values) ? Integer.valueOf(values.get(0)) : null);</span>
+	}
+
+
+	private static class StompPasscode {
+
+		private final String passcode;
+
+<span class="fc" id="L548">		public StompPasscode(String passcode) {</span>
+<span class="fc" id="L549">			this.passcode = passcode;</span>
+<span class="fc" id="L550">		}</span>
+
+		@Override
+		public String toString() {
+<span class="fc" id="L554">			return &quot;[PROTECTED]&quot;;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

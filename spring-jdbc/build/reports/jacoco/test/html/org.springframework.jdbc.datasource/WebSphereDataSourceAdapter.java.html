@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WebSphereDataSourceAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.datasource</a> &gt; <span class="el_source">WebSphereDataSourceAdapter.java</span></div><h1>WebSphereDataSourceAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.datasource;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.sql.Connection;
+import java.sql.SQLException;
+import javax.sql.DataSource;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link DataSource} implementation that delegates all calls to a WebSphere
+ * target {@link DataSource}, typically obtained from JNDI, applying a current
+ * isolation level and/or current user credentials to every Connection obtained
+ * from it.
+ *
+ * &lt;p&gt;Uses IBM-specific API to get a JDBC Connection with a specific isolation
+ * level (and read-only flag) from a WebSphere DataSource
+ * (&lt;a href=&quot;https://publib.boulder.ibm.com/infocenter/wasinfo/v5r1//topic/com.ibm.websphere.base.doc/info/aes/ae/rdat_extiapi.html&quot;&gt;IBM code example&lt;/a&gt;).
+ * Supports the transaction-specific isolation level exposed by
+ * {@link org.springframework.transaction.support.TransactionSynchronizationManager#getCurrentTransactionIsolationLevel()}.
+ * It's also possible to specify a default isolation level, to be applied when the
+ * current Spring-managed transaction does not define a specific isolation level.
+ *
+ * &lt;p&gt;Usage example, defining the target DataSource as an inner-bean JNDI lookup
+ * (of course, you can link to any WebSphere DataSource through a bean reference):
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean id=&quot;myDataSource&quot; class=&quot;org.springframework.jdbc.datasource.WebSphereDataSourceAdapter&quot;&amp;gt;
+ *   &amp;lt;property name=&quot;targetDataSource&quot;&amp;gt;
+ *     &amp;lt;bean class=&quot;org.springframework.jndi.JndiObjectFactoryBean&quot;&amp;gt;
+ *       &amp;lt;property name=&quot;jndiName&quot; value=&quot;jdbc/myds&quot;/&amp;gt;
+ *     &amp;lt;/bean&amp;gt;
+ *   &amp;lt;/property&amp;gt;
+ * &amp;lt;/bean&amp;gt;&lt;/pre&gt;
+ *
+ * Thanks to Ricardo Olivieri for submitting the original implementation
+ * of this approach!
+ *
+ * @author Juergen Hoeller
+ * @author &lt;a href=&quot;mailto:lari.hotari@sagire.fi&quot;&gt;Lari Hotari&lt;/a&gt;
+ * @author &lt;a href=&quot;mailto:roliv@us.ibm.com&quot;&gt;Ricardo N. Olivieri&lt;/a&gt;
+ * @since 2.0.3
+ * @see com.ibm.websphere.rsadapter.JDBCConnectionSpec
+ * @see com.ibm.websphere.rsadapter.WSDataSource#getConnection(com.ibm.websphere.rsadapter.JDBCConnectionSpec)
+ * @see org.springframework.transaction.support.TransactionSynchronizationManager#getCurrentTransactionIsolationLevel()
+ * @see org.springframework.transaction.support.TransactionSynchronizationManager#isCurrentTransactionReadOnly()
+ */
+public class WebSphereDataSourceAdapter extends IsolationLevelDataSourceAdapter {
+
+<span class="nc" id="L73">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	private Class&lt;?&gt; wsDataSourceClass;
+
+	private Method newJdbcConnSpecMethod;
+
+	private Method wsDataSourceGetConnectionMethod;
+
+	private Method setTransactionIsolationMethod;
+
+	private Method setReadOnlyMethod;
+
+	private Method setUserNameMethod;
+
+	private Method setPasswordMethod;
+
+
+	/**
+	 * This constructor retrieves the WebSphere JDBC connection spec API,
+	 * so we can get obtain specific WebSphere Connections using reflection.
+	 */
+<span class="nc" id="L94">	public WebSphereDataSourceAdapter() {</span>
+		try {
+<span class="nc" id="L96">			this.wsDataSourceClass = getClass().getClassLoader().loadClass(&quot;com.ibm.websphere.rsadapter.WSDataSource&quot;);</span>
+<span class="nc" id="L97">			Class&lt;?&gt; jdbcConnSpecClass = getClass().getClassLoader().loadClass(&quot;com.ibm.websphere.rsadapter.JDBCConnectionSpec&quot;);</span>
+<span class="nc" id="L98">			Class&lt;?&gt; wsrraFactoryClass = getClass().getClassLoader().loadClass(&quot;com.ibm.websphere.rsadapter.WSRRAFactory&quot;);</span>
+<span class="nc" id="L99">			this.newJdbcConnSpecMethod = wsrraFactoryClass.getMethod(&quot;createJDBCConnectionSpec&quot;);</span>
+<span class="nc" id="L100">			this.wsDataSourceGetConnectionMethod =</span>
+<span class="nc" id="L101">					this.wsDataSourceClass.getMethod(&quot;getConnection&quot;, jdbcConnSpecClass);</span>
+<span class="nc" id="L102">			this.setTransactionIsolationMethod =</span>
+<span class="nc" id="L103">					jdbcConnSpecClass.getMethod(&quot;setTransactionIsolation&quot;, int.class);</span>
+<span class="nc" id="L104">			this.setReadOnlyMethod = jdbcConnSpecClass.getMethod(&quot;setReadOnly&quot;, Boolean.class);</span>
+<span class="nc" id="L105">			this.setUserNameMethod = jdbcConnSpecClass.getMethod(&quot;setUserName&quot;, String.class);</span>
+<span class="nc" id="L106">			this.setPasswordMethod = jdbcConnSpecClass.getMethod(&quot;setPassword&quot;, String.class);</span>
+		}
+<span class="nc" id="L108">		catch (Exception ex) {</span>
+<span class="nc" id="L109">			throw new IllegalStateException(</span>
+					&quot;Could not initialize WebSphereDataSourceAdapter because WebSphere API classes are not available: &quot; + ex);
+<span class="nc" id="L111">		}</span>
+<span class="nc" id="L112">	}</span>
+
+	/**
+	 * Checks that the specified 'targetDataSource' actually is
+	 * a WebSphere WSDataSource.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="nc" id="L120">		super.afterPropertiesSet();</span>
+
+<span class="nc bnc" id="L122" title="All 2 branches missed.">		if (!this.wsDataSourceClass.isInstance(getTargetDataSource())) {</span>
+<span class="nc" id="L123">			throw new IllegalStateException(</span>
+<span class="nc" id="L124">					&quot;Specified 'targetDataSource' is not a WebSphere WSDataSource: &quot; + getTargetDataSource());</span>
+		}
+<span class="nc" id="L126">	}</span>
+
+
+	/**
+	 * Builds a WebSphere JDBCConnectionSpec object for the current settings
+	 * and calls {@code WSDataSource.getConnection(JDBCConnectionSpec)}.
+	 * @see #createConnectionSpec
+	 * @see com.ibm.websphere.rsadapter.WSDataSource#getConnection(com.ibm.websphere.rsadapter.JDBCConnectionSpec)
+	 */
+	@Override
+	protected Connection doGetConnection(@Nullable String username, @Nullable String password) throws SQLException {
+		// Create JDBCConnectionSpec using current isolation level value and read-only flag.
+<span class="nc" id="L138">		Object connSpec = createConnectionSpec(</span>
+<span class="nc" id="L139">				getCurrentIsolationLevel(), getCurrentReadOnlyFlag(), username, password);</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L141">			logger.debug(&quot;Obtaining JDBC Connection from WebSphere DataSource [&quot; +</span>
+<span class="nc" id="L142">					getTargetDataSource() + &quot;], using ConnectionSpec [&quot; + connSpec + &quot;]&quot;);</span>
+		}
+		// Create Connection through invoking WSDataSource.getConnection(JDBCConnectionSpec)
+<span class="nc" id="L145">		Connection con = (Connection) invokeJdbcMethod(</span>
+<span class="nc" id="L146">				this.wsDataSourceGetConnectionMethod, obtainTargetDataSource(), connSpec);</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">		Assert.state(con != null, &quot;No Connection&quot;);</span>
+<span class="nc" id="L148">		return con;</span>
+	}
+
+	/**
+	 * Create a WebSphere {@code JDBCConnectionSpec} object for the given characteristics.
+	 * &lt;p&gt;The default implementation uses reflection to apply the given settings.
+	 * Can be overridden in subclasses to customize the JDBCConnectionSpec object
+	 * (&lt;a href=&quot;https://publib.boulder.ibm.com/infocenter/wasinfo/v6r0/topic/com.ibm.websphere.javadoc.doc/public_html/api/com/ibm/websphere/rsadapter/JDBCConnectionSpec.html&quot;&gt;JDBCConnectionSpec javadoc&lt;/a&gt;;
+	 * &lt;a href=&quot;https://www.ibm.com/developerworks/websphere/library/techarticles/0404_tang/0404_tang.html&quot;&gt;IBM developerWorks article&lt;/a&gt;).
+	 * @param isolationLevel the isolation level to apply (or {@code null} if none)
+	 * @param readOnlyFlag the read-only flag to apply (or {@code null} if none)
+	 * @param username the username to apply ({@code null} or empty indicates the default)
+	 * @param password the password to apply (may be {@code null} or empty)
+	 * @throws SQLException if thrown by JDBCConnectionSpec API methods
+	 * @see com.ibm.websphere.rsadapter.JDBCConnectionSpec
+	 */
+	protected Object createConnectionSpec(@Nullable Integer isolationLevel, @Nullable Boolean readOnlyFlag,
+			@Nullable String username, @Nullable String password) throws SQLException {
+
+<span class="nc" id="L167">		Object connSpec = invokeJdbcMethod(this.newJdbcConnSpecMethod, null);</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">		Assert.state(connSpec != null, &quot;No JDBCConnectionSpec&quot;);</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">		if (isolationLevel != null) {</span>
+<span class="nc" id="L170">			invokeJdbcMethod(this.setTransactionIsolationMethod, connSpec, isolationLevel);</span>
+		}
+<span class="nc bnc" id="L172" title="All 2 branches missed.">		if (readOnlyFlag != null) {</span>
+<span class="nc" id="L173">			invokeJdbcMethod(this.setReadOnlyMethod, connSpec, readOnlyFlag);</span>
+		}
+		// If the username is empty, we'll simply let the target DataSource
+		// use its default credentials.
+<span class="nc bnc" id="L177" title="All 2 branches missed.">		if (StringUtils.hasLength(username)) {</span>
+<span class="nc" id="L178">			invokeJdbcMethod(this.setUserNameMethod, connSpec, username);</span>
+<span class="nc" id="L179">			invokeJdbcMethod(this.setPasswordMethod, connSpec, password);</span>
+		}
+<span class="nc" id="L181">		return connSpec;</span>
+	}
+
+
+	@Nullable
+	private static Object invokeJdbcMethod(Method method, @Nullable Object target, @Nullable Object... args)
+			throws SQLException {
+		try {
+<span class="nc" id="L189">			return method.invoke(target, args);</span>
+		}
+<span class="nc" id="L191">		catch (IllegalAccessException ex) {</span>
+<span class="nc" id="L192">			ReflectionUtils.handleReflectionException(ex);</span>
+		}
+<span class="nc" id="L194">		catch (InvocationTargetException ex) {</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">			if (ex.getTargetException() instanceof SQLException) {</span>
+<span class="nc" id="L196">				throw (SQLException) ex.getTargetException();</span>
+			}
+<span class="nc" id="L198">			ReflectionUtils.handleInvocationTargetException(ex);</span>
+<span class="nc" id="L199">		}</span>
+<span class="nc" id="L200">		throw new IllegalStateException(&quot;Should never get here&quot;);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>

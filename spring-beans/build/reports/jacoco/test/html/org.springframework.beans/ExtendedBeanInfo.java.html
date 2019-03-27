@@ -1,0 +1,552 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExtendedBeanInfo.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans</a> &gt; <span class="el_source">ExtendedBeanInfo.java</span></div><h1>ExtendedBeanInfo.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-2018 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans;
+
+import java.awt.Image;
+import java.beans.BeanDescriptor;
+import java.beans.BeanInfo;
+import java.beans.EventSetDescriptor;
+import java.beans.IndexedPropertyDescriptor;
+import java.beans.IntrospectionException;
+import java.beans.Introspector;
+import java.beans.MethodDescriptor;
+import java.beans.PropertyDescriptor;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.lang.Nullable;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * Decorator for a standard {@link BeanInfo} object, e.g. as created by
+ * {@link Introspector#getBeanInfo(Class)}, designed to discover and register static
+ * and/or non-void returning setter methods. For example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * public class Bean {
+ *
+ *     private Foo foo;
+ *
+ *     public Foo getFoo() {
+ *         return this.foo;
+ *     }
+ *
+ *     public Bean setFoo(Foo foo) {
+ *         this.foo = foo;
+ *         return this;
+ *     }
+ * }&lt;/pre&gt;
+ *
+ * The standard JavaBeans {@code Introspector} will discover the {@code getFoo} read
+ * method, but will bypass the {@code #setFoo(Foo)} write method, because its non-void
+ * returning signature does not comply with the JavaBeans specification.
+ * {@code ExtendedBeanInfo}, on the other hand, will recognize and include it. This is
+ * designed to allow APIs with &quot;builder&quot; or method-chaining style setter signatures to be
+ * used within Spring {@code &lt;beans&gt;} XML. {@link #getPropertyDescriptors()} returns all
+ * existing property descriptors from the wrapped {@code BeanInfo} as well any added for
+ * non-void returning setters. Both standard (&quot;non-indexed&quot;) and
+ * &lt;a href=&quot;https://docs.oracle.com/javase/tutorial/javabeans/writing/properties.html&quot;&gt;
+ * indexed properties&lt;/a&gt; are fully supported.
+ *
+ * @author Chris Beams
+ * @author Juergen Hoeller
+ * @since 3.1
+ * @see #ExtendedBeanInfo(BeanInfo)
+ * @see ExtendedBeanInfoFactory
+ * @see CachedIntrospectionResults
+ */
+class ExtendedBeanInfo implements BeanInfo {
+
+<span class="fc" id="L82">	private static final Log logger = LogFactory.getLog(ExtendedBeanInfo.class);</span>
+
+	private final BeanInfo delegate;
+
+<span class="fc" id="L86">	private final Set&lt;PropertyDescriptor&gt; propertyDescriptors = new TreeSet&lt;&gt;(new PropertyDescriptorComparator());</span>
+
+
+	/**
+	 * Wrap the given {@link BeanInfo} instance; copy all its existing property descriptors
+	 * locally, wrapping each in a custom {@link SimpleIndexedPropertyDescriptor indexed}
+	 * or {@link SimplePropertyDescriptor non-indexed} {@code PropertyDescriptor}
+	 * variant that bypasses default JDK weak/soft reference management; then search
+	 * through its method descriptors to find any non-void returning write methods and
+	 * update or create the corresponding {@link PropertyDescriptor} for each one found.
+	 * @param delegate the wrapped {@code BeanInfo}, which is never modified
+	 * @see #getPropertyDescriptors()
+	 */
+<span class="fc" id="L99">	public ExtendedBeanInfo(BeanInfo delegate) {</span>
+<span class="fc" id="L100">		this.delegate = delegate;</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">		for (PropertyDescriptor pd : delegate.getPropertyDescriptors()) {</span>
+			try {
+<span class="fc bfc" id="L103" title="All 2 branches covered.">				this.propertyDescriptors.add(pd instanceof IndexedPropertyDescriptor ?</span>
+						new SimpleIndexedPropertyDescriptor((IndexedPropertyDescriptor) pd) :
+						new SimplePropertyDescriptor(pd));
+			}
+<span class="nc" id="L107">			catch (IntrospectionException ex) {</span>
+				// Probably simply a method that wasn't meant to follow the JavaBeans pattern...
+<span class="nc bnc" id="L109" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L110">					logger.debug(&quot;Ignoring invalid bean property '&quot; + pd.getName() + &quot;': &quot; + ex.getMessage());</span>
+				}
+<span class="fc" id="L112">			}</span>
+		}
+<span class="fc" id="L114">		MethodDescriptor[] methodDescriptors = delegate.getMethodDescriptors();</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">		if (methodDescriptors != null) {</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">			for (Method method : findCandidateWriteMethods(methodDescriptors)) {</span>
+				try {
+<span class="fc" id="L118">					handleCandidateWriteMethod(method);</span>
+				}
+<span class="nc" id="L120">				catch (IntrospectionException ex) {</span>
+					// We're only trying to find candidates, can easily ignore extra ones here...
+<span class="nc bnc" id="L122" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L123">						logger.debug(&quot;Ignoring candidate write method [&quot; + method + &quot;]: &quot; + ex.getMessage());</span>
+					}
+<span class="fc" id="L125">				}</span>
+<span class="fc" id="L126">			}</span>
+		}
+<span class="fc" id="L128">	}</span>
+
+
+	private List&lt;Method&gt; findCandidateWriteMethods(MethodDescriptor[] methodDescriptors) {
+<span class="fc" id="L132">		List&lt;Method&gt; matches = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">		for (MethodDescriptor methodDescriptor : methodDescriptors) {</span>
+<span class="fc" id="L134">			Method method = methodDescriptor.getMethod();</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">			if (isCandidateWriteMethod(method)) {</span>
+<span class="fc" id="L136">				matches.add(method);</span>
+			}
+		}
+		// Sort non-void returning write methods to guard against the ill effects of
+		// non-deterministic sorting of methods returned from Class#getDeclaredMethods
+		// under JDK 7. See https://bugs.java.com/view_bug.do?bug_id=7023180
+<span class="fc" id="L142">		matches.sort((m1, m2) -&gt; m2.toString().compareTo(m1.toString()));</span>
+<span class="fc" id="L143">		return matches;</span>
+	}
+
+	public static boolean isCandidateWriteMethod(Method method) {
+<span class="fc" id="L147">		String methodName = method.getName();</span>
+<span class="fc" id="L148">		Class&lt;?&gt;[] parameterTypes = method.getParameterTypes();</span>
+<span class="fc" id="L149">		int nParams = parameterTypes.length;</span>
+<span class="pc bpc" id="L150" title="1 of 6 branches missed.">		return (methodName.length() &gt; 3 &amp;&amp; methodName.startsWith(&quot;set&quot;) &amp;&amp; Modifier.isPublic(method.getModifiers()) &amp;&amp;</span>
+<span class="pc bpc" id="L151" title="2 of 10 branches missed.">				(!void.class.isAssignableFrom(method.getReturnType()) || Modifier.isStatic(method.getModifiers())) &amp;&amp;</span>
+				(nParams == 1 || (nParams == 2 &amp;&amp; int.class == parameterTypes[0])));
+	}
+
+	private void handleCandidateWriteMethod(Method method) throws IntrospectionException {
+<span class="fc" id="L156">		int nParams = method.getParameterCount();</span>
+<span class="fc" id="L157">		String propertyName = propertyNameFor(method);</span>
+<span class="fc" id="L158">		Class&lt;?&gt; propertyType = method.getParameterTypes()[nParams - 1];</span>
+<span class="fc" id="L159">		PropertyDescriptor existingPd = findExistingPropertyDescriptor(propertyName, propertyType);</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">		if (nParams == 1) {</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">			if (existingPd == null) {</span>
+<span class="fc" id="L162">				this.propertyDescriptors.add(new SimplePropertyDescriptor(propertyName, null, method));</span>
+			}
+			else {
+<span class="fc" id="L165">				existingPd.setWriteMethod(method);</span>
+			}
+		}
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">		else if (nParams == 2) {</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">			if (existingPd == null) {</span>
+<span class="fc" id="L170">				this.propertyDescriptors.add(</span>
+						new SimpleIndexedPropertyDescriptor(propertyName, null, null, null, method));
+			}
+<span class="fc bfc" id="L173" title="All 2 branches covered.">			else if (existingPd instanceof IndexedPropertyDescriptor) {</span>
+<span class="fc" id="L174">				((IndexedPropertyDescriptor) existingPd).setIndexedWriteMethod(method);</span>
+			}
+			else {
+<span class="fc" id="L177">				this.propertyDescriptors.remove(existingPd);</span>
+<span class="fc" id="L178">				this.propertyDescriptors.add(new SimpleIndexedPropertyDescriptor(</span>
+<span class="fc" id="L179">						propertyName, existingPd.getReadMethod(), existingPd.getWriteMethod(), null, method));</span>
+			}
+		}
+		else {
+<span class="nc" id="L183">			throw new IllegalArgumentException(&quot;Write method must have exactly 1 or 2 parameters: &quot; + method);</span>
+		}
+<span class="fc" id="L185">	}</span>
+
+	@Nullable
+	private PropertyDescriptor findExistingPropertyDescriptor(String propertyName, Class&lt;?&gt; propertyType) {
+<span class="fc bfc" id="L189" title="All 2 branches covered.">		for (PropertyDescriptor pd : this.propertyDescriptors) {</span>
+			final Class&lt;?&gt; candidateType;
+<span class="fc" id="L191">			final String candidateName = pd.getName();</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">			if (pd instanceof IndexedPropertyDescriptor) {</span>
+<span class="fc" id="L193">				IndexedPropertyDescriptor ipd = (IndexedPropertyDescriptor) pd;</span>
+<span class="fc" id="L194">				candidateType = ipd.getIndexedPropertyType();</span>
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">				if (candidateName.equals(propertyName) &amp;&amp;</span>
+<span class="fc bfc" id="L196" title="All 4 branches covered.">						(candidateType.equals(propertyType) || candidateType.equals(propertyType.getComponentType()))) {</span>
+<span class="fc" id="L197">					return pd;</span>
+				}
+<span class="fc" id="L199">			}</span>
+			else {
+<span class="fc" id="L201">				candidateType = pd.getPropertyType();</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">				if (candidateName.equals(propertyName) &amp;&amp;</span>
+<span class="fc bfc" id="L203" title="All 4 branches covered.">						(candidateType.equals(propertyType) || propertyType.equals(candidateType.getComponentType()))) {</span>
+<span class="fc" id="L204">					return pd;</span>
+				}
+			}
+<span class="fc" id="L207">		}</span>
+<span class="fc" id="L208">		return null;</span>
+	}
+
+	private String propertyNameFor(Method method) {
+<span class="fc" id="L212">		return Introspector.decapitalize(method.getName().substring(3, method.getName().length()));</span>
+	}
+
+
+	/**
+	 * Return the set of {@link PropertyDescriptor PropertyDescriptors} from the wrapped
+	 * {@link BeanInfo} object as well as {@code PropertyDescriptors} for each non-void
+	 * returning setter method found during construction.
+	 * @see #ExtendedBeanInfo(BeanInfo)
+	 */
+	@Override
+	public PropertyDescriptor[] getPropertyDescriptors() {
+<span class="fc" id="L224">		return this.propertyDescriptors.toArray(new PropertyDescriptor[0]);</span>
+	}
+
+	@Override
+	public BeanInfo[] getAdditionalBeanInfo() {
+<span class="nc" id="L229">		return this.delegate.getAdditionalBeanInfo();</span>
+	}
+
+	@Override
+	public BeanDescriptor getBeanDescriptor() {
+<span class="nc" id="L234">		return this.delegate.getBeanDescriptor();</span>
+	}
+
+	@Override
+	public int getDefaultEventIndex() {
+<span class="nc" id="L239">		return this.delegate.getDefaultEventIndex();</span>
+	}
+
+	@Override
+	public int getDefaultPropertyIndex() {
+<span class="nc" id="L244">		return this.delegate.getDefaultPropertyIndex();</span>
+	}
+
+	@Override
+	public EventSetDescriptor[] getEventSetDescriptors() {
+<span class="nc" id="L249">		return this.delegate.getEventSetDescriptors();</span>
+	}
+
+	@Override
+	public Image getIcon(int iconKind) {
+<span class="nc" id="L254">		return this.delegate.getIcon(iconKind);</span>
+	}
+
+	@Override
+	public MethodDescriptor[] getMethodDescriptors() {
+<span class="nc" id="L259">		return this.delegate.getMethodDescriptors();</span>
+	}
+
+
+	/**
+	 * A simple {@link PropertyDescriptor}.
+	 */
+	static class SimplePropertyDescriptor extends PropertyDescriptor {
+
+		@Nullable
+		private Method readMethod;
+
+		@Nullable
+		private Method writeMethod;
+
+		@Nullable
+		private Class&lt;?&gt; propertyType;
+
+		@Nullable
+		private Class&lt;?&gt; propertyEditorClass;
+
+		public SimplePropertyDescriptor(PropertyDescriptor original) throws IntrospectionException {
+<span class="fc" id="L281">			this(original.getName(), original.getReadMethod(), original.getWriteMethod());</span>
+<span class="fc" id="L282">			PropertyDescriptorUtils.copyNonMethodProperties(original, this);</span>
+<span class="fc" id="L283">		}</span>
+
+		public SimplePropertyDescriptor(String propertyName, @Nullable Method readMethod, Method writeMethod)
+				throws IntrospectionException {
+
+<span class="fc" id="L288">			super(propertyName, null, null);</span>
+<span class="fc" id="L289">			this.readMethod = readMethod;</span>
+<span class="fc" id="L290">			this.writeMethod = writeMethod;</span>
+<span class="fc" id="L291">			this.propertyType = PropertyDescriptorUtils.findPropertyType(readMethod, writeMethod);</span>
+<span class="fc" id="L292">		}</span>
+
+		@Override
+		@Nullable
+		public Method getReadMethod() {
+<span class="fc" id="L297">			return this.readMethod;</span>
+		}
+
+		@Override
+		public void setReadMethod(@Nullable Method readMethod) {
+<span class="fc" id="L302">			this.readMethod = readMethod;</span>
+<span class="fc" id="L303">		}</span>
+
+		@Override
+		@Nullable
+		public Method getWriteMethod() {
+<span class="fc" id="L308">			return this.writeMethod;</span>
+		}
+
+		@Override
+		public void setWriteMethod(@Nullable Method writeMethod) {
+<span class="fc" id="L313">			this.writeMethod = writeMethod;</span>
+<span class="fc" id="L314">		}</span>
+
+		@Override
+		@Nullable
+		public Class&lt;?&gt; getPropertyType() {
+<span class="fc bfc" id="L319" title="All 2 branches covered.">			if (this.propertyType == null) {</span>
+				try {
+<span class="fc" id="L321">					this.propertyType = PropertyDescriptorUtils.findPropertyType(this.readMethod, this.writeMethod);</span>
+				}
+<span class="nc" id="L323">				catch (IntrospectionException ex) {</span>
+					// Ignore, as does PropertyDescriptor#getPropertyType
+<span class="fc" id="L325">				}</span>
+			}
+<span class="fc" id="L327">			return this.propertyType;</span>
+		}
+
+		@Override
+		@Nullable
+		public Class&lt;?&gt; getPropertyEditorClass() {
+<span class="fc" id="L333">			return this.propertyEditorClass;</span>
+		}
+
+		@Override
+		public void setPropertyEditorClass(@Nullable Class&lt;?&gt; propertyEditorClass) {
+<span class="fc" id="L338">			this.propertyEditorClass = propertyEditorClass;</span>
+<span class="fc" id="L339">		}</span>
+
+		@Override
+		public boolean equals(Object other) {
+<span class="fc bfc" id="L343" title="All 4 branches covered.">			return (this == other || (other instanceof PropertyDescriptor &amp;&amp;</span>
+<span class="fc bfc" id="L344" title="All 2 branches covered.">					PropertyDescriptorUtils.equals(this, (PropertyDescriptor) other)));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L349">			return (ObjectUtils.nullSafeHashCode(getReadMethod()) * 29 + ObjectUtils.nullSafeHashCode(getWriteMethod()));</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="fc" id="L354">			return String.format(&quot;%s[name=%s, propertyType=%s, readMethod=%s, writeMethod=%s]&quot;,</span>
+<span class="fc" id="L355">					getClass().getSimpleName(), getName(), getPropertyType(), this.readMethod, this.writeMethod);</span>
+		}
+	}
+
+
+	/**
+	 * A simple {@link IndexedPropertyDescriptor}.
+	 */
+	static class SimpleIndexedPropertyDescriptor extends IndexedPropertyDescriptor {
+
+		@Nullable
+		private Method readMethod;
+
+		@Nullable
+		private Method writeMethod;
+
+		@Nullable
+		private Class&lt;?&gt; propertyType;
+
+		@Nullable
+		private Method indexedReadMethod;
+
+		@Nullable
+		private Method indexedWriteMethod;
+
+		@Nullable
+		private Class&lt;?&gt; indexedPropertyType;
+
+		@Nullable
+		private Class&lt;?&gt; propertyEditorClass;
+
+		public SimpleIndexedPropertyDescriptor(IndexedPropertyDescriptor original) throws IntrospectionException {
+<span class="fc" id="L387">			this(original.getName(), original.getReadMethod(), original.getWriteMethod(),</span>
+<span class="fc" id="L388">					original.getIndexedReadMethod(), original.getIndexedWriteMethod());</span>
+<span class="fc" id="L389">			PropertyDescriptorUtils.copyNonMethodProperties(original, this);</span>
+<span class="fc" id="L390">		}</span>
+
+		public SimpleIndexedPropertyDescriptor(String propertyName, @Nullable Method readMethod,
+				@Nullable Method writeMethod, @Nullable Method indexedReadMethod, Method indexedWriteMethod)
+				throws IntrospectionException {
+
+<span class="fc" id="L396">			super(propertyName, null, null, null, null);</span>
+<span class="fc" id="L397">			this.readMethod = readMethod;</span>
+<span class="fc" id="L398">			this.writeMethod = writeMethod;</span>
+<span class="fc" id="L399">			this.propertyType = PropertyDescriptorUtils.findPropertyType(readMethod, writeMethod);</span>
+<span class="fc" id="L400">			this.indexedReadMethod = indexedReadMethod;</span>
+<span class="fc" id="L401">			this.indexedWriteMethod = indexedWriteMethod;</span>
+<span class="fc" id="L402">			this.indexedPropertyType = PropertyDescriptorUtils.findIndexedPropertyType(</span>
+					propertyName, this.propertyType, indexedReadMethod, indexedWriteMethod);
+<span class="fc" id="L404">		}</span>
+
+		@Override
+		@Nullable
+		public Method getReadMethod() {
+<span class="fc" id="L409">			return this.readMethod;</span>
+		}
+
+		@Override
+		public void setReadMethod(@Nullable Method readMethod) {
+<span class="fc" id="L414">			this.readMethod = readMethod;</span>
+<span class="fc" id="L415">		}</span>
+
+		@Override
+		@Nullable
+		public Method getWriteMethod() {
+<span class="fc" id="L420">			return this.writeMethod;</span>
+		}
+
+		@Override
+		public void setWriteMethod(@Nullable Method writeMethod) {
+<span class="fc" id="L425">			this.writeMethod = writeMethod;</span>
+<span class="fc" id="L426">		}</span>
+
+		@Override
+		@Nullable
+		public Class&lt;?&gt; getPropertyType() {
+<span class="pc bpc" id="L431" title="1 of 2 branches missed.">			if (this.propertyType == null) {</span>
+				try {
+<span class="fc" id="L433">					this.propertyType = PropertyDescriptorUtils.findPropertyType(this.readMethod, this.writeMethod);</span>
+				}
+<span class="nc" id="L435">				catch (IntrospectionException ex) {</span>
+					// Ignore, as does IndexedPropertyDescriptor#getPropertyType
+<span class="fc" id="L437">				}</span>
+			}
+<span class="fc" id="L439">			return this.propertyType;</span>
+		}
+
+		@Override
+		@Nullable
+		public Method getIndexedReadMethod() {
+<span class="fc" id="L445">			return this.indexedReadMethod;</span>
+		}
+
+		@Override
+		public void setIndexedReadMethod(@Nullable Method indexedReadMethod) throws IntrospectionException {
+<span class="nc" id="L450">			this.indexedReadMethod = indexedReadMethod;</span>
+<span class="nc" id="L451">		}</span>
+
+		@Override
+		@Nullable
+		public Method getIndexedWriteMethod() {
+<span class="fc" id="L456">			return this.indexedWriteMethod;</span>
+		}
+
+		@Override
+		public void setIndexedWriteMethod(@Nullable Method indexedWriteMethod) throws IntrospectionException {
+<span class="fc" id="L461">			this.indexedWriteMethod = indexedWriteMethod;</span>
+<span class="fc" id="L462">		}</span>
+
+		@Override
+		@Nullable
+		public Class&lt;?&gt; getIndexedPropertyType() {
+<span class="fc bfc" id="L467" title="All 2 branches covered.">			if (this.indexedPropertyType == null) {</span>
+				try {
+<span class="fc" id="L469">					this.indexedPropertyType = PropertyDescriptorUtils.findIndexedPropertyType(</span>
+<span class="fc" id="L470">							getName(), getPropertyType(), this.indexedReadMethod, this.indexedWriteMethod);</span>
+				}
+<span class="nc" id="L472">				catch (IntrospectionException ex) {</span>
+					// Ignore, as does IndexedPropertyDescriptor#getIndexedPropertyType
+<span class="fc" id="L474">				}</span>
+			}
+<span class="fc" id="L476">			return this.indexedPropertyType;</span>
+		}
+
+		@Override
+		@Nullable
+		public Class&lt;?&gt; getPropertyEditorClass() {
+<span class="fc" id="L482">			return this.propertyEditorClass;</span>
+		}
+
+		@Override
+		public void setPropertyEditorClass(@Nullable Class&lt;?&gt; propertyEditorClass) {
+<span class="fc" id="L487">			this.propertyEditorClass = propertyEditorClass;</span>
+<span class="fc" id="L488">		}</span>
+
+		/*
+		 * See java.beans.IndexedPropertyDescriptor#equals(java.lang.Object)
+		 */
+		@Override
+		public boolean equals(Object other) {
+<span class="fc bfc" id="L495" title="All 2 branches covered.">			if (this == other) {</span>
+<span class="fc" id="L496">				return true;</span>
+			}
+<span class="fc bfc" id="L498" title="All 2 branches covered.">			if (!(other instanceof IndexedPropertyDescriptor)) {</span>
+<span class="fc" id="L499">				return false;</span>
+			}
+<span class="fc" id="L501">			IndexedPropertyDescriptor otherPd = (IndexedPropertyDescriptor) other;</span>
+<span class="fc bfc" id="L502" title="All 2 branches covered.">			return (ObjectUtils.nullSafeEquals(getIndexedReadMethod(), otherPd.getIndexedReadMethod()) &amp;&amp;</span>
+<span class="fc bfc" id="L503" title="All 2 branches covered.">					ObjectUtils.nullSafeEquals(getIndexedWriteMethod(), otherPd.getIndexedWriteMethod()) &amp;&amp;</span>
+<span class="pc bpc" id="L504" title="1 of 2 branches missed.">					ObjectUtils.nullSafeEquals(getIndexedPropertyType(), otherPd.getIndexedPropertyType()) &amp;&amp;</span>
+<span class="pc bpc" id="L505" title="1 of 2 branches missed.">					PropertyDescriptorUtils.equals(this, otherPd));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L510">			int hashCode = ObjectUtils.nullSafeHashCode(getReadMethod());</span>
+<span class="nc" id="L511">			hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(getWriteMethod());</span>
+<span class="nc" id="L512">			hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(getIndexedReadMethod());</span>
+<span class="nc" id="L513">			hashCode = 29 * hashCode + ObjectUtils.nullSafeHashCode(getIndexedWriteMethod());</span>
+<span class="nc" id="L514">			return hashCode;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="fc" id="L519">			return String.format(&quot;%s[name=%s, propertyType=%s, indexedPropertyType=%s, &quot; +</span>
+							&quot;readMethod=%s, writeMethod=%s, indexedReadMethod=%s, indexedWriteMethod=%s]&quot;,
+<span class="fc" id="L521">					getClass().getSimpleName(), getName(), getPropertyType(), getIndexedPropertyType(),</span>
+					this.readMethod, this.writeMethod, this.indexedReadMethod, this.indexedWriteMethod);
+		}
+	}
+
+
+	/**
+	 * Sorts PropertyDescriptor instances alpha-numerically to emulate the behavior of
+	 * {@link java.beans.BeanInfo#getPropertyDescriptors()}.
+	 * @see ExtendedBeanInfo#propertyDescriptors
+	 */
+<span class="fc" id="L532">	static class PropertyDescriptorComparator implements Comparator&lt;PropertyDescriptor&gt; {</span>
+
+		@Override
+		public int compare(PropertyDescriptor desc1, PropertyDescriptor desc2) {
+<span class="fc" id="L536">			String left = desc1.getName();</span>
+<span class="fc" id="L537">			String right = desc2.getName();</span>
+<span class="fc bfc" id="L538" title="All 2 branches covered.">			for (int i = 0; i &lt; left.length(); i++) {</span>
+<span class="fc bfc" id="L539" title="All 2 branches covered.">				if (right.length() == i) {</span>
+<span class="fc" id="L540">					return 1;</span>
+				}
+<span class="fc" id="L542">				int result = left.getBytes()[i] - right.getBytes()[i];</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">				if (result != 0) {</span>
+<span class="fc" id="L544">					return result;</span>
+				}
+			}
+<span class="fc" id="L547">			return left.length() - right.length();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.3.201901230119</span></div></body></html>
