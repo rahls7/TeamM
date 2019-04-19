@@ -17,4 +17,18 @@ Yann Kerichard 40059813
     - correlation.ipynb (Jupyter notebook with code to calculate all the correlation)
     - Test coverage and Mutation Score Data (Data from reports in csv format used to calculate correlation)
 
-# 
+# Running Test Coverage
+- Include the corresponding pom/gradle file into the project root folder. Plugins with their specification are already included in the pom files as per our requirements.
+- Run
+```
+mvn clean install
+mvn clean test
+```
+
+# Running PI testing
+- Include the corresponding pom/gradle file into the project root folder. Plugins with their specification are already included in the pom files as per our requirements.
+- Run
+```
+mvn org.pitest:pitest-maven:mutationCoverage
+
+```
