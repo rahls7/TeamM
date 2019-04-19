@@ -1,9 +1,9 @@
 # TeamM
-Rahul Sharma 40020034
-Rafael Bis Ferreira 40042321
-Harmeet Singh 40053592
-Harmandeep Kaur 40091199
-Yann Kerichard 40059813
+Rahul Sharma 40020034  
+Rafael Bis Ferreira 40042321  
+Harmeet Singh 40053592  
+Harmandeep Kaur 40091199  
+Yann Kerichard 40059813  
 
 # Directory Structure
 - Reports
